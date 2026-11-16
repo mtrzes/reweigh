@@ -1,0 +1,919 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["mcp==1.30.0", "zstandard==0.25.0"]
+# ///
+"""Consult Claude Code or Codex through dedicated, resumable CLI sessions."""
+
+import argparse
+import asyncio
+import fcntl
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+import tomllib
+import uuid
+from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
+
+import consultation
+from consultation import (
+    ACTIVE_ENV, CLOSED_INPUT, BridgeError, FailureFacts, PeerFailure, build_command, build_handoff,
+    check_limit, check_prompt, check_provider, check_thread_request, codex_mcp_server_names, completed_record,
+    consultation_outcome, consultation_result, consultation_timeout, consulted_ref, executable_variable,
+    failure_message, filter_overrides, git_environment, new_record, output_signals, peer_environment, resumed_record,
+    seed_context, signed_in_from, validate_commit, validate_session_id, with_seed,
+)
+from consultation import (
+    FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
+)
+from jobs import UNKNOWN_JOB, JobStore, run_job, spawn_runner
+from state_files import ensure_private, open_regular, read_json, write_json
+import peer_guard
+from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, git_common_dir
+
+UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
+MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+# On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
+MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
+BUNDLED_CODEX_PATH = Path("ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex")
+GIT_TIMEOUT_SECONDS = 120
+SIGN_IN_PROBE_SECONDS = 30
+SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
+GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
+# How long past the guard's own grace period to wait for it to stop the peer's group.
+GUARD_MARGIN_SECONDS = 3
+# How long to keep reading a peer's pipes after it exits, for output still buffered in them.
+PIPE_DRAIN_SECONDS = 1
+SEED_MESSAGES = 3
+# How often a caller waiting on a background consultation rereads its state.
+JOB_POLL_SECONDS = 0.5
+
+
+class InputClosed(Exception):
+    """The peer exited before reading the whole handoff; its output may still explain why."""
+
+    def __init__(self, output, errors):
+        super().__init__("The peer CLI closed its input.")
+        self.output, self.errors = output, errors
+
+
+def is_conversation_id(name):
+    try:
+        return validate_session_id(name) == name
+    except BridgeError:
+        return False
+
+
+def state_directory():
+    return consultation.state_directory(os.environ, Path.home())
+
+
+@contextmanager
+def job_store_errors():
+    """Report filesystem failures in the job store as fixed messages; a job that vanished meanwhile is unknown."""
+    try:
+        yield
+    except FileNotFoundError as exc:
+        raise BridgeError(UNKNOWN_JOB) from exc
+    except OSError as exc:
+        raise BridgeError("Cannot read or write the consultation job files.") from exc
+
+
+class SessionStore:
+    """Keep bridge-owned sessions bound to their provider and project."""
+
+    def __init__(self, directory):
+        self.directory = Path(directory).absolute()
+
+    @contextmanager
+    def open(self, provider, working_directory, conversation_id):
+        identifier = validate_session_id(conversation_id) if conversation_id else str(uuid.uuid4())
+        try:
+            ensure_private(self.directory)
+        except OSError as exc:
+            raise BridgeError("Cannot create the bridge's state directory.") from exc
+        with self.holding(identifier) as held:
+            if not held:
+                raise BridgeError("This conversation is busy. Wait for its current consultation to finish.")
+            path = self.directory / f"{identifier}.json"
+            record = new_record(provider, working_directory)
+            if conversation_id:
+                saved = read_json(path, unreadable=UNKNOWN_CONVERSATION)
+                if saved is None:
+                    raise BridgeError(UNKNOWN_CONVERSATION)
+                record = resumed_record(saved, provider, working_directory)
+            yield identifier, record, path
+
+    def idle_worktrees(self):
+        """The conversations with a pinned checkout folder, whatever their state; holding() tells which are idle."""
+        try:
+            names = [entry.name for entry in (self.directory / "worktrees").iterdir()]
+        except FileNotFoundError:
+            return []
+        # Only folders named as this bridge names them, a conversation's canonical UUID.
+        return [name for name in names if is_conversation_id(name)]
+
+    @contextmanager
+    def holding(self, identifier):
+        """Hold a conversation's lock while it is free: yields True when held, False when a consultation has it."""
+        try:
+            descriptor = open_regular(self.directory / f"{identifier}.lock", os.O_CREAT | os.O_RDWR)
+        except OSError as exc:
+            raise BridgeError("Cannot lock the conversation's state files.") from exc
+        with os.fdopen(descriptor, "w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+
+    @staticmethod
+    def save(path, record):
+        try:
+            write_json(path, record)
+        except OSError as exc:
+            raise BridgeError("Cannot save the conversation's state files.") from exc
+
+
+def codex_mcp_servers():
+    """The MCP servers the system Codex configuration declares, which a consultation disables.
+
+    Read without blocking, as a regular file of bounded size: it decides what the consultation may start, so one that
+    cannot be read refuses the consultation.
+    """
+    try:
+        # A symlink is followed: administrators link system configuration; the target must still be a regular file.
+        descriptor = os.open(consultation.CODEX_SYSTEM_CONFIG, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return set()
+    except OSError as exc:
+        raise BridgeError("Cannot read Codex configuration to disable consultation MCP servers.") from exc
+    try:
+        with os.fdopen(descriptor, "rb") as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise ValueError("not a regular file")
+            data = source.read(consultation.MAX_CONFIG_BYTES + 1)
+            if len(data) > consultation.MAX_CONFIG_BYTES:
+                raise ValueError("too large")
+            return codex_mcp_server_names(tomllib.loads(data.decode("utf-8")))
+    except (OSError, ValueError) as exc:
+        raise BridgeError("Cannot read Codex configuration to disable consultation MCP servers.") from exc
+
+
+def bundled_codex_candidates():
+    if sys.platform != "darwin":
+        return []
+    return [Path(directory).expanduser() / BUNDLED_CODEX_PATH for directory in MACOS_APPLICATION_DIRECTORIES]
+
+
+def peer_executable(provider):
+    """Find the peer CLI: the configured binary, then PATH, then the Codex CLI bundled with ChatGPT.app."""
+    variable = executable_variable(provider)
+    configured = os.environ.get(variable)
+    if configured:
+        executable = shutil.which(configured)
+        if not executable:
+            raise BridgeError(f"{variable} does not name an executable {provider} CLI.")
+        # Absolute, because the peer starts in the consulted directory, where a relative path would resolve again.
+        return os.path.abspath(executable)
+    executable = shutil.which(provider)
+    if executable:
+        return os.path.abspath(executable)
+    candidates = bundled_codex_candidates() if provider == "codex" else []
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    if candidates:
+        raise BridgeError(
+            "codex CLI is unavailable. Install it or ChatGPT.app, which bundles it at "
+            f"/Applications/{BUNDLED_CODEX_PATH}, and sign in before consulting it."
+        )
+    raise BridgeError(f"{provider} CLI is unavailable. Install it and sign in before consulting it.")
+
+
+def signed_in(provider):
+    """Ask the peer CLI whether it is signed in: True, False, or None when it cannot tell."""
+    try:
+        executable = peer_executable(provider)
+        probe = subprocess.run(
+            [executable, *SIGN_IN_PROBES[provider]], capture_output=True, text=True, timeout=SIGN_IN_PROBE_SECONDS,
+            env=peer_environment(os.environ), stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+    except (BridgeError, OSError, subprocess.TimeoutExpired):
+        return None
+    return signed_in_from(provider, probe.returncode, probe.stdout)
+
+
+def codex_catalogue():
+    """The models Codex's own catalogue lists, or an empty list when it has none or it cannot be read."""
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "models_cache.json"
+    try:
+        return catalogue_models(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return []
+
+
+def command_for(provider, working_directory, backend_session_id, conversation_id, model=None, reasoning_effort=None):
+    executable = peer_executable(provider)
+    if provider == "claude":
+        return build_command(provider, executable, conversation_id, backend_session_id)
+    return build_command(
+        provider, executable, conversation_id, backend_session_id, model=model,
+        mcp_servers=codex_mcp_servers(), reasoning_effort=reasoning_effort,
+    )
+
+
+async def read_output(stream, chunks):
+    """Collect a pipe into chunks, so what arrived stays usable while a descendant holds the pipe open."""
+    size = 0
+    while chunk := await stream.read(65536):
+        size += len(chunk)
+        if size > MAX_OUTPUT_BYTES:
+            raise BridgeError("Consultation output exceeded the size limit. Ask a narrower question.")
+        chunks.append(chunk)
+
+
+async def run_to_completion(cleanup):
+    """Await a cleanup step to its end even if the caller is cancelled meanwhile, then pass the cancellation on.
+
+    A signal cancels the CLI task once per delivery, and anyio, which serves MCP requests, cancels a cancelled request
+    again at every await; neither may cut short stopping the peer or removing its checkout.
+    """
+    import anyio  # installed with mcp
+
+    task = asyncio.ensure_future(cleanup)
+    cancellation = None
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                # Keep the first: anyio recognises its own cancellation by the message.
+                if cancellation is None:
+                    cancellation = exc
+    if cancellation is not None:
+        raise cancellation
+    return task.result()
+
+
+async def peer_exit_status(status):
+    """Return the peer's exit status from the guard's status descriptor, as soon as the guard reports it."""
+    data = b""
+    while b"\n" not in data:
+        try:
+            chunk = os.read(status, 64)
+        except BlockingIOError:
+            await asyncio.sleep(0.05)
+            continue
+        if not chunk:
+            raise BridgeError("The peer CLI stopped unexpectedly. Check its installation.")
+        data += chunk
+    token = data.split(b"\n", 1)[0]
+    if token == peer_guard.START_FAILED:
+        raise OSError("The peer CLI could not start.")
+    try:
+        return int(token)
+    except ValueError as exc:
+        raise BridgeError("The peer CLI stopped unexpectedly. Check its installation.") from exc
+
+
+async def guard_exit_status(guard):
+    """Return the guard's exit status once it has exited and been reaped.
+
+    The guard is a subprocess.Popen, so nothing else reaps it: only Popen.poll(), called from this event loop's thread,
+    does. While poll() returns None the guard is unreaped, running or a zombie, and its process group's ID is still its
+    own. (asyncio's child watcher would reap on another thread, ahead of what the bridge can see.)
+
+    """
+    while guard.poll() is None:
+        await asyncio.sleep(0.05)
+    return guard.returncode
+
+
+def kill_group(group):
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def stop_peer(guard, lifeline):
+    """Close the guard's lifeline, which makes it stop the peer's whole group, and wait for that to finish.
+
+    Normally the bridge sends no signal. If the guard does not finish in time, for example because it is stopped, it
+    is still unreaped, so its group's ID cannot belong to anyone else yet: the bridge kills that whole group, peer
+    included, and only then reaps the guard.
+    """
+    # A guard ends only after its lifeline closes, so one already gone was killed and never stopped the peer. Its group
+    # is killed now: the peer's processes keep the group's ID in use, so it cannot belong to anyone else while there is
+    # still a member to kill.
+    if guard.poll() is not None:
+        kill_group(guard.pid)
+    try:
+        os.close(lifeline)
+    except OSError:
+        pass
+    try:
+        await asyncio.wait_for(guard_exit_status(guard), timeout=peer_guard.GRACE_SECONDS + GUARD_MARGIN_SECONDS)
+    except asyncio.TimeoutError:
+        if guard.returncode is None:
+            kill_group(guard.pid)
+        await guard_exit_status(guard)
+
+
+async def open_streams(guard):
+    """Asyncio streams over the guard's pipes, which the peer inherited: two readers and a writer."""
+    loop = asyncio.get_running_loop()
+    readers, transports = [], []
+    for pipe in (guard.stdout, guard.stderr):
+        reader = asyncio.StreamReader()
+        transport, _ = await loop.connect_read_pipe(lambda reader=reader: asyncio.StreamReaderProtocol(reader), pipe)
+        readers.append(reader)
+        transports.append(transport)
+    transport, protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, guard.stdin)
+    transports.append(transport)
+    return readers, asyncio.StreamWriter(transport, protocol, None, loop), transports
+
+
+async def run_command(command, prompt, working_directory, timeout):
+    lifeline_read, lifeline_write = os.pipe()
+    try:
+        status_read, status_write = os.pipe()
+    except BaseException:
+        os.close(lifeline_read)
+        os.close(lifeline_write)
+        raise
+    os.set_blocking(status_read, False)
+    try:
+        guard = subprocess.Popen(
+            [sys.executable, "-I", str(GUARD_SCRIPT), str(lifeline_read), str(status_write), "--", *command],
+            cwd=working_directory, env=peer_environment(os.environ), pass_fds=(lifeline_read, status_write),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        )
+    except BaseException:
+        os.close(lifeline_write)
+        os.close(status_read)
+        raise
+    finally:
+        os.close(lifeline_read)
+        os.close(status_write)
+    transports = []
+
+    async def communicate():
+        nonlocal transports
+        (stdout, stderr), stdin, transports = await open_streams(guard)
+        collected = ([], [])
+        readers = [asyncio.create_task(read_output(stream, chunks))
+                   for stream, chunks in zip((stdout, stderr), collected)]
+        exited = asyncio.create_task(peer_exit_status(status_read))
+        try:
+            handed_off = True
+            try:
+                stdin.write(prompt.encode("utf-8"))
+                await stdin.drain()
+                stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                handed_off = False
+            # Wait for the peer, not for the end of its pipes. A reader that fails on oversized output ends the wait.
+            pending = {exited, *readers}
+            while not exited.done():
+                finished, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in finished:
+                    task.result()
+            drained, _ = await asyncio.wait(readers, timeout=PIPE_DRAIN_SECONDS)
+            for reader in drained:
+                reader.result()
+            output, errors = (b"".join(chunks).decode("utf-8", errors="replace") for chunks in collected)
+            if not handed_off:
+                raise InputClosed(output, errors)
+            return exited.result(), output, errors
+        finally:
+            for task in (*readers, exited):
+                task.cancel()
+            await asyncio.gather(*readers, exited, return_exceptions=True)
+
+    try:
+        return await asyncio.wait_for(communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise BridgeError("Consultation timed out. Narrow the question or increase the configured timeout.") from exc
+    finally:
+        try:
+            await run_to_completion(stop_peer(guard, lifeline_write))
+        finally:
+            os.close(status_read)
+            for transport in transports:
+                transport.close()
+            for pipe in (guard.stdin, guard.stdout, guard.stderr):
+                if not pipe.closed:
+                    pipe.close()
+
+
+async def git(directory, *arguments, failure, config=(), allowed=()):
+    """Run git with no hook or monitor of the repository's own, plus the settings in config; exit statuses in allowed
+    count as success."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git", "-C", str(directory), *arguments, env=git_environment(os.environ, config),
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise BridgeError("git is unavailable. Install it to pin a consultation to a ref.") from exc
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=GIT_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as exc:
+        raise BridgeError("git did not finish in time while preparing the pinned ref.") from exc
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+    if process.returncode and process.returncode not in allowed:
+        raise BridgeError(failure)
+    return stdout.decode("utf-8", errors="replace").strip()
+
+
+async def discard_worktree(repository, worktree):
+    """Remove a pinned checkout and git's record of it, also when the folder has already gone."""
+    if worktree.exists():
+        try:
+            await git(repository, "worktree", "remove", "--force", str(worktree), failure="Cannot remove the worktree.")
+        except BridgeError:
+            shutil.rmtree(worktree, ignore_errors=True)
+    try:
+        await git(repository, "worktree", "prune", failure="Cannot prune worktrees.")
+    except BridgeError:
+        pass
+
+
+async def sweep_worktrees(store):
+    """Remove pinned checkouts left by runs that died, which nothing else would remove: those whose conversation is
+    not running, read from its lock."""
+    for identifier in await asyncio.to_thread(store.idle_worktrees):
+        with store.holding(identifier) as held:
+            if not held:
+                continue
+            worktree = store.directory / "worktrees" / identifier
+            try:
+                repository = await git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                                       failure="Not a checkout.")
+            except BridgeError:
+                shutil.rmtree(worktree, ignore_errors=True)
+                continue
+            # The shared git directory itself, which is right whatever the repository's layout.
+            await discard_worktree(Path(repository), worktree)
+
+
+@asynccontextmanager
+async def pinned_checkout(worktree, directory, ref):
+    """Yield the directory to consult in: the request's own, or the same subdirectory of a detached ref checkout.
+
+    The worktree path is fixed per conversation, because Claude resumes a session only from the directory it ran in.
+    """
+    if ref is None:
+        yield directory, None
+        return
+    repository = Path(await git(
+        directory, "rev-parse", "--show-toplevel",
+        failure="A ref needs a working_directory inside a git repository.",
+    )).resolve()
+    commit = await git(
+        directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
+        failure="The ref does not name a commit in this repository.",
+    )
+    worktree.parent.mkdir(mode=0o700, exist_ok=True)
+    await discard_worktree(repository, worktree)
+    filters = filter_overrides(await git(repository, "config", "--null", "--get-regexp", r"^filter\.",
+                                         failure="Cannot read the repository's git configuration.", allowed=(1,)))
+    try:
+        await git(
+            repository, "worktree", "add", "--detach", "--force", "--quiet", str(worktree), validate_commit(commit),
+            failure="Cannot check out the ref in a temporary worktree.", config=filters,
+        )
+        consulted = worktree / directory.relative_to(repository)
+        # A symlink at the ref could lead the peer out of the checkout.
+        if not consulted.is_dir() or not consulted.resolve().is_relative_to(worktree.resolve()):
+            raise BridgeError("working_directory does not exist at that ref.")
+        yield consulted, commit
+    finally:
+        await run_to_completion(discard_worktree(repository, worktree))
+
+
+class Bridge:
+    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None):
+        self.store = store or SessionStore(state_directory())
+        self.readers = readers or {
+            "claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource()),
+        }
+        self.timeout = consultation_timeout(os.environ, timeout)
+        self.jobs = jobs or JobStore(self.store.directory)
+        self.spawn = spawn or spawn_runner
+
+    def checked_request(self, provider, prompt, working_directory, conversation_id, model=None, reasoning_effort=None):
+        """Check what can be checked before a consultation starts; return the canonical project directory and the
+        requested Codex model and reasoning effort."""
+        if os.environ.get(ACTIVE_ENV):
+            raise BridgeError("Nested peer consultations are disabled. Return your answer to the lead agent.")
+        check_prompt(prompt)
+        directory = self.project_directory(provider, working_directory)
+        if conversation_id:
+            validate_session_id(conversation_id)
+        model, reasoning_effort = check_codex_choices(provider, model, reasoning_effort)
+        if provider == "codex":
+            # A model or effort Codex does not list would be ignored or refused only once Codex runs; refuse it now.
+            check_against_catalogue(codex_catalogue(), *codex_choices(os.environ, model, reasoning_effort))
+        return directory, model, reasoning_effort
+
+    async def start(self, provider, prompt, working_directory, context="", conversation_id=None, ref=None,
+                    seed_thread=None, model=None, reasoning_effort=None):
+        """Start a consultation in a detached runner and return its job at once."""
+        directory, model, reasoning_effort = self.checked_request(provider, prompt, working_directory, conversation_id,
+                                                                  model, reasoning_effort)
+        request = {"provider": provider, "prompt": prompt, "working_directory": str(directory), "context": context,
+                   "conversation_id": conversation_id or None, "ref": ref or None, "seed_thread": seed_thread or None,
+                   "model": model, "reasoning_effort": reasoning_effort}
+        # Job files are read and written in a worker thread: a lock wait never holds up the MCP event loop.
+        with job_store_errors():
+            await asyncio.to_thread(self.jobs.prune, time.time())
+            # A cancelled await does not stop its worker thread, so creation is let finish and its job cancelled:
+            # a job published after the caller gave up would hold the prompt with nobody to read or cancel it.
+            creating = asyncio.ensure_future(asyncio.to_thread(self.jobs.create, provider, directory, request))
+            try:
+                job_id = await asyncio.shield(creating)
+            except asyncio.CancelledError:
+                await run_to_completion(self.discard_created(creating, provider))
+                raise
+            try:
+                self.spawn(job_id)
+            except OSError as exc:
+                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}))
+                raise BridgeError("Cannot start the consultation runner.") from exc
+            try:
+                return await asyncio.to_thread(self.jobs.view, job_id, {provider})
+            except asyncio.CancelledError:
+                # The caller will never learn this job's ID, so it is cancelled rather than left to run.
+                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}))
+                raise
+
+    async def discard_created(self, creating, provider):
+        """Cancel the job a creation published after its caller was cancelled, if it published one."""
+        try:
+            job_id = await creating
+        except Exception:
+            return
+        await asyncio.to_thread(self.jobs.cancel, job_id, {provider})
+
+    async def job(self, job_id, providers, wait_seconds=0):
+        """Return a job's state and, once finished, its result; wait up to wait_seconds for it to finish."""
+        deadline = time.monotonic() + check_wait(wait_seconds)
+        while True:
+            with job_store_errors():
+                view = await asyncio.to_thread(self.jobs.view, job_id, providers)
+            if view["state"] in FINISHED_JOB_STATES or time.monotonic() >= deadline:
+                return view
+            await asyncio.sleep(min(JOB_POLL_SECONDS, max(0, deadline - time.monotonic())))
+
+    async def cancel(self, job_id, providers):
+        with job_store_errors():
+            return await asyncio.to_thread(self.jobs.cancel, job_id, providers)
+
+    @staticmethod
+    def project_directory(provider, working_directory):
+        check_provider(provider)
+        directory = Path(working_directory).expanduser()
+        if not directory.is_absolute() or not directory.is_dir():
+            raise BridgeError("working_directory must be an absolute path to an existing directory.")
+        return directory.resolve()
+
+    async def threads(self, provider, working_directory, limit=20):
+        """List the provider's recent threads that belong to the working directory's git repository."""
+        directory = self.project_directory(provider, working_directory)
+        return await self.read_history(self.readers[provider].list, directory, check_limit(limit))
+
+    async def thread(self, provider, working_directory, thread, max_messages=3):
+        """Return one thread's latest agent messages and whether its latest turn has finished."""
+        directory = self.project_directory(provider, working_directory)
+        thread = check_thread_request(thread, max_messages)
+        return await self.read_history(self.readers[provider].read, directory, thread, max_messages)
+
+    @staticmethod
+    async def read_history(call, *arguments):
+        try:
+            return await asyncio.to_thread(call, *arguments)
+        except ThreadUnavailable as exc:
+            raise BridgeError(str(exc)) from exc
+        except OSError as exc:
+            raise BridgeError("Cannot read the thread history files.") from exc
+        except (TypeError, AttributeError) as exc:
+            # A record whose values have unexpected types, such as a number where text belongs.
+            raise BridgeError("The thread's history file has a malformed line.") from exc
+
+    async def consult(self, provider, prompt, working_directory, context="", conversation_id=None, ref=None,
+                      seed_thread=None, model=None, reasoning_effort=None):
+        directory, model, reasoning_effort = self.checked_request(provider, prompt, working_directory, conversation_id,
+                                                                  model, reasoning_effort)
+        if provider == "codex":
+            model, reasoning_effort = codex_choices(os.environ, model, reasoning_effort)
+        if seed_thread:
+            seed = await self.thread(provider, directory, seed_thread, SEED_MESSAGES)
+            context = with_seed(context, seed_context(seed))
+        try:
+            await sweep_worktrees(self.store)
+        except (OSError, BridgeError):
+            pass  # best effort: a leftover checkout costs only disk space
+        with self.store.open(provider, directory, conversation_id) as (identifier, record, path):
+            ref = consulted_ref(record, ref)
+            worktree = self.store.directory / "worktrees" / identifier
+            async with pinned_checkout(worktree, directory, ref) as (consulted, commit):
+                command = command_for(provider, consulted, record.get("backend_session_id"), identifier, model,
+                                      reasoning_effort)
+                depth = len(consulted.relative_to(worktree).parts) if commit else 0
+                handoff = build_handoff(provider, prompt, context, commit, depth)
+                failure = None
+                try:
+                    return_code, output, errors = await run_command(command, handoff, consulted, self.timeout)
+                except OSError as exc:
+                    raise BridgeError(f"Cannot start {provider}. Check its executable and working directory.") from exc
+                except InputClosed as exc:
+                    # An incomplete handoff is never a success, whatever the exit status.
+                    output, errors, failure = exc.output, exc.errors, PeerFailure(CLOSED_INPUT)
+            try:
+                if failure:
+                    raise failure
+                backend_session_id, reply = consultation_outcome(provider, return_code, output)
+            except PeerFailure as exc:
+                facts = await self.failure_facts(provider, directory, record, output, errors,
+                                                 chose_model=bool(model or reasoning_effort))
+                raise BridgeError(failure_message(provider, facts, str(exc))) from exc
+            self.store.save(path, completed_record(record, backend_session_id, commit))
+            return consultation_result(provider, identifier, reply, commit, model, reasoning_effort)
+
+    async def failure_facts(self, provider, directory, record, output, errors, chose_model=False):
+        """Establish what may explain a failed run, from exact fields and checks, never from the CLI's text."""
+        session = record.get("backend_session_id")
+        source = self.readers[provider].source
+
+        def check(question, *arguments):
+            try:
+                return question(*arguments)
+            except OSError:
+                return None
+
+        facts = {"resuming": bool(session), "signed_in": await asyncio.to_thread(signed_in, provider),
+                 **output_signals(provider, output, errors)}
+        if session:
+            facts["history_present"] = await asyncio.to_thread(check, source.has_history, session)
+        if provider == "codex":
+            if session:
+                facts["writer_lock_present"] = check(source.writer_lock_present, session)
+            facts["in_git_repository"] = await asyncio.to_thread(git_common_dir, directory) is not None
+            facts["model_setting"] = chose_model
+        return FailureFacts(**facts)
+
+
+# Shown to the agent by the host app. Codex was seen typing into the Claude desktop app's composer to reach a Claude
+# session; that bypasses every restriction the bridge applies, so the instructions say what to do instead.
+CLAUDE_PEER_INSTRUCTIONS = (
+    "Reach Claude Code only through these tools: ask_claude, or start_claude_consultation for work that takes "
+    "minutes. Never reach a Claude session by operating the Claude desktop app (computer use, accessibility, or "
+    "typing into its composer): that bypasses the read-only restrictions the bridge applies. The bridge cannot write "
+    "into an existing Claude session. To hand work to one, give the handoff as your reply, and tell the user that "
+    "session can read this thread with read_codex_thread, or start from it with seed_thread."
+)
+CODEX_PEER_INSTRUCTIONS = (
+    "Consult Codex with ask_codex, or start_codex_consultation for work that takes minutes. Choose the model and "
+    "reasoning_effort per call when the task needs a particular one, such as gpt-6-astra at xhigh for a review; "
+    "list_codex_models gives the values Codex offers. Otherwise leave them unset. Read a Codex Desktop thread with "
+    "read_codex_thread; never operate the Codex app."
+)
+
+
+def models_result():
+    models = codex_catalogue()
+    if not models:
+        raise BridgeError("Codex has no readable model catalogue yet. Start Codex once, then try again.")
+    return {"provider": "codex", "models": models}
+
+
+def server_instructions(peer):
+    parts = {"claude": [CLAUDE_PEER_INSTRUCTIONS], "codex": [CODEX_PEER_INSTRUCTIONS],
+             "both": [CLAUDE_PEER_INSTRUCTIONS, CODEX_PEER_INSTRUCTIONS]}[peer]
+    return " ".join(parts + ["Replies are advice: check them against the task before acting."])
+
+
+def create_server(peer):
+    from typing import Any
+
+    from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
+
+    server = FastMCP("peer-bridge", instructions=server_instructions(peer), log_level="WARNING")
+    bridge = Bridge()
+    consulting = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+    reading = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+
+    providers = {"claude", "codex"} if peer == "both" else {peer}
+    starting = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+    stopping = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+
+    @server.tool(annotations=reading)
+    async def get_consultation(job_id: str, wait_seconds: float = 0) -> dict[str, Any]:
+        """Return a background consultation's state (queued, running, cancelling, completed, failed, cancelled or
+        lost) and, once completed, its conversation_id and reply; wait_seconds, at most 60, waits for it to finish."""
+        return await bridge.job(job_id, providers, wait_seconds)
+
+    @server.tool(annotations=stopping)
+    async def cancel_consultation(job_id: str) -> dict[str, Any]:
+        """Stop a background consultation; it stops the peer and removes a pinned checkout."""
+        return await bridge.cancel(job_id, providers)
+
+    if peer in {"claude", "both"}:
+        @server.tool(annotations=starting)
+        async def start_claude_consultation(
+            prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
+            ref: str | None = None, seed_thread: str | None = None,
+        ) -> dict[str, Any]:
+            """Start an ask_claude consultation in the background and return its job_id at once; read it with
+            get_consultation. Takes the same arguments as ask_claude; suits reviews that take minutes. Use this, never
+            the Claude desktop app, to reach Claude."""
+            return await bridge.start("claude", prompt, working_directory, context, conversation_id, ref,
+                                      seed_thread)
+
+        @server.tool(annotations=consulting)
+        async def ask_claude(
+            prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
+            ref: str | None = None, seed_thread: str | None = None,
+        ) -> dict[str, str]:
+            """Ask Claude Code a scoped question; reuse conversation_id for a follow-up; pin a commit with ref;
+            seed_thread names a Claude Code session whose recent agent messages become context. Use this, never the
+            Claude desktop app, to reach Claude; it starts a new consultation and cannot write into an existing
+            session."""
+            return await bridge.consult("claude", prompt, working_directory, context, conversation_id, ref,
+                                        seed_thread)
+
+        @server.tool(annotations=reading)
+        async def list_claude_threads(working_directory: str, limit: int = 20) -> dict[str, Any]:
+            """Experimental: reads the other app's internal history files, which may change. List recent Claude Code
+            sessions in the same git repository as working_directory, newest first."""
+            return await bridge.threads("claude", working_directory, limit)
+
+        @server.tool(annotations=reading)
+        async def read_claude_thread(working_directory: str, thread: str, max_messages: int = 3) -> dict[str, Any]:
+            """Experimental: reads the other app's internal history files, which may change. Read a Claude Code
+            session's latest agent messages, by ID or name, and whether its turn finished."""
+            return await bridge.thread("claude", working_directory, thread, max_messages)
+
+    if peer in {"codex", "both"}:
+        @server.tool(annotations=starting)
+        async def start_codex_consultation(
+            prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
+            ref: str | None = None, seed_thread: str | None = None, model: str | None = None,
+            reasoning_effort: str | None = None,
+        ) -> dict[str, Any]:
+            """Start an ask_codex consultation in the background and return its job_id at once; read it with
+            get_consultation. Takes the same arguments as ask_codex; suits reviews that take minutes."""
+            return await bridge.start("codex", prompt, working_directory, context, conversation_id, ref,
+                                      seed_thread, model, reasoning_effort)
+
+        @server.tool(annotations=consulting)
+        async def ask_codex(
+            prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
+            ref: str | None = None, seed_thread: str | None = None, model: str | None = None,
+            reasoning_effort: str | None = None,
+        ) -> dict[str, str]:
+            """Ask Codex a scoped question; reuse conversation_id for a follow-up; pin a commit with ref;
+            seed_thread names a Codex thread whose recent agent messages become context. model (such as
+            gpt-6-astra) and reasoning_effort (such as low, medium, high or xhigh) choose what Codex runs for this
+            call, over PEER_BRIDGE_CODEX_MODEL and PEER_BRIDGE_CODEX_REASONING_EFFORT. list_codex_models gives the
+            values Codex offers, and a value it does not list is refused before Codex starts. The reply names the
+            model and effort when one was chosen."""
+            return await bridge.consult("codex", prompt, working_directory, context, conversation_id, ref,
+                                        seed_thread, model, reasoning_effort)
+
+        @server.tool(annotations=reading)
+        async def list_codex_models() -> dict[str, Any]:
+            """Experimental: list the models this Codex account offers, from Codex's own catalogue, with each one's
+            reasoning efforts and default: the values ask_codex's model and reasoning_effort accept."""
+            return await asyncio.to_thread(models_result)
+
+        @server.tool(annotations=reading)
+        async def list_codex_threads(working_directory: str, limit: int = 20) -> dict[str, Any]:
+            """Experimental: reads the other app's internal history files, which may change. List recent Codex threads
+            in the same git repository as working_directory, newest first."""
+            return await bridge.threads("codex", working_directory, limit)
+
+        @server.tool(annotations=reading)
+        async def read_codex_thread(working_directory: str, thread: str, max_messages: int = 3) -> dict[str, Any]:
+            """Experimental: reads the other app's internal history files, which may change. Read a Codex thread's
+            latest agent messages, by ID or name, and whether its turn finished."""
+            return await bridge.thread("codex", working_directory, thread, max_messages)
+
+    return server
+
+
+async def until_terminated(operation):
+    # A background caller stops the CLI with SIGTERM or SIGHUP; cancelling lets consult() stop the peer's group.
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    for signal_number in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(signal_number, task.cancel)
+    return await operation()
+
+
+def run_command_line(arguments):
+    """Run one CLI command and print its JSON result, or {"error": ...} with exit status 1."""
+    try:
+        if arguments.command in {"ask", "start"}:
+            context = ""
+            if arguments.context_file:
+                try:
+                    context = Path(arguments.context_file).read_text(encoding="utf-8")
+                except (OSError, ValueError) as exc:
+                    raise BridgeError("Cannot read the context file as UTF-8 text.") from exc
+            try:
+                sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+                prompt = sys.stdin.read()
+            except (OSError, ValueError) as exc:
+                raise BridgeError("Cannot read the prompt from standard input as UTF-8 text.") from exc
+            request = (arguments.provider, prompt, arguments.working_directory, context, arguments.conversation_id,
+                       arguments.ref, arguments.seed_thread, arguments.model, arguments.reasoning_effort)
+            if arguments.command == "start":
+                result = asyncio.run(Bridge().start(*request))
+            else:
+                result = asyncio.run(until_terminated(lambda: Bridge().consult(*request)))
+        elif arguments.command == "run-job":
+            store = JobStore(state_directory())
+
+            async def consult(request):
+                return await Bridge().consult(
+                    request["provider"], request["prompt"], request["working_directory"], request["context"],
+                    request["conversation_id"], request["ref"], request["seed_thread"], request.get("model"),
+                    request.get("reasoning_effort"),
+                )
+
+            with job_store_errors():
+                asyncio.run(until_terminated(lambda: run_job(store, arguments.job_id, consult)))
+            result = {"job_id": arguments.job_id}
+        elif arguments.command == "codex-models":
+            result = models_result()
+        elif arguments.command == "job":
+            result = asyncio.run(Bridge().job(arguments.job_id, {"claude", "codex"}, arguments.wait))
+        elif arguments.command == "cancel":
+            result = asyncio.run(Bridge().cancel(arguments.job_id, {"claude", "codex"}))
+        elif arguments.command == "threads":
+            result = asyncio.run(Bridge().threads(arguments.provider, arguments.working_directory, arguments.limit))
+        else:
+            result = asyncio.run(Bridge().thread(
+                arguments.provider, arguments.working_directory, arguments.thread, arguments.max_messages,
+            ))
+    except BridgeError as exc:
+        result = {"error": str(exc)}
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        result = {"error": "The consultation was cancelled."}
+    print(json.dumps(result, ensure_ascii=False))
+    return 1 if "error" in result else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--peer", choices=("claude", "codex", "both"), default="both",
+                        help="peer tools the MCP server exposes when no command is given")
+    commands = parser.add_subparsers(dest="command", metavar="command")
+    ask_parser = commands.add_parser("ask", help="run one consultation; the prompt is read from stdin")
+    start_parser = commands.add_parser("start", help="start a consultation in the background and print its job")
+    job_parser = commands.add_parser("job", help="print a background consultation's state and result")
+    cancel_parser = commands.add_parser("cancel", help="stop a background consultation")
+    runner_parser = commands.add_parser("run-job", help=argparse.SUPPRESS)
+    commands.add_parser("codex-models", help="list Codex's models with their reasoning efforts")
+    threads_parser = commands.add_parser("threads", help="list recent threads in the same git repository")
+    read_parser = commands.add_parser("read-thread", help="read a thread's latest agent messages")
+    for command in (ask_parser, start_parser, threads_parser, read_parser):
+        command.add_argument("--provider", choices=("claude", "codex"), required=True)
+        command.add_argument("--working-directory", required=True)
+    for command in (ask_parser, start_parser):
+        command.add_argument("--context-file", help="UTF-8 file with supporting context for the peer")
+        command.add_argument("--conversation-id", help="bridge conversation ID from an earlier consultation")
+        command.add_argument("--ref", help="consult a detached checkout of this commit instead of the working tree")
+        command.add_argument("--seed-thread", help="thread ID or name whose recent agent messages become context")
+        command.add_argument("--model", help="Codex only: the model to run, over PEER_BRIDGE_CODEX_MODEL")
+        command.add_argument("--reasoning-effort",
+                             help="Codex only: the reasoning effort, over PEER_BRIDGE_CODEX_REASONING_EFFORT")
+    for command in (job_parser, cancel_parser, runner_parser):
+        command.add_argument("--job-id", required=True)
+    job_parser.add_argument("--wait", type=float, default=0, help="seconds to wait for the job to finish, at most 60")
+    threads_parser.add_argument("--limit", type=int, default=20)
+    read_parser.add_argument("--thread", required=True, help="thread ID or exact name")
+    read_parser.add_argument("--max-messages", type=int, default=3)
+    arguments = parser.parse_args()
+    if arguments.command:
+        sys.exit(run_command_line(arguments))
+    create_server(arguments.peer).run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

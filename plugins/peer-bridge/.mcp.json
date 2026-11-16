@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "peer-bridge": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-project",
+        "--no-config",
+        "--script",
+        "${CLAUDE_PLUGIN_ROOT}/scripts/bridge.py",
+        "--peer",
+        "codex"
+      ],
+      "cwd": "${CLAUDE_PROJECT_DIR}"
+    }
+  }
+}

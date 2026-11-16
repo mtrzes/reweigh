@@ -1,0 +1,363 @@
+"""Pure rules for reading Codex threads and Claude Code sessions: records in, decisions out.
+
+Nothing here opens a file, starts a process or reads the environment. thread_reader.py does that and passes the
+records, lines and file facts it gathered to these functions.
+"""
+
+import json
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+MAX_MESSAGE_CHARACTERS = 24_000
+CODEX_MAIN_SOURCES = {"vscode", "cli"}
+# Codex compresses older rollouts with zstd; the records inside are the same JSONL.
+ROLLOUT_FORMATS = ((".jsonl", "jsonl"), (".jsonl.zst", "zstd"))
+UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+FINISHED_STATUSES = {"completed", "failed", "interrupted"}
+# The turn status a Claude reply's stop_reason leaves: a reply cut off at a limit still ends the turn, and only a tool
+# call, a paused server tool or a reply still being written (no stop_reason yet) leaves the turn running.
+CLAUDE_STOP_STATUSES = {
+    "end_turn": "completed", "stop_sequence": "completed", "max_tokens": "completed",
+    "model_context_window_exceeded": "completed", "refusal": "failed",
+    "tool_use": "inProgress", "pause_turn": "inProgress", None: "inProgress",
+}
+# Claude Code records an interruption as a user turn with exactly one of these texts.
+CLAUDE_INTERRUPTION_MARKERS = {"[Request interrupted by user]", "[Request interrupted by user for tool use]"}
+# Variables that would point git at another repository than the one a request names.
+GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+class ThreadUnavailable(Exception):
+    """A thread cannot be read safely. The message names the reason and never quotes the thread."""
+
+
+@dataclass(frozen=True)
+class ThreadSummary:
+    id: str
+    name: str | None
+    cwd: str
+    recency_at: float
+    archived: bool = False
+    source_kind: str = ""
+    forked_from_id: str | None = None
+    writer_lock_present: bool = False
+    """The thread's writer-lock file exists. Only a hint that an app holds the thread: a crash can leave it behind."""
+
+
+@dataclass(frozen=True)
+class TurnState:
+    turn_id: str | None
+    status: str
+    """completed, failed, interrupted or inProgress."""
+    liveness: str | None = None
+    """For an unfinished turn: abandoned when no app can be writing the thread, otherwise unknown; None if finished."""
+
+
+@dataclass(frozen=True)
+class AgentMessage:
+    turn_id: str | None
+    text: str
+    phase: str | None = None
+
+
+@dataclass(frozen=True)
+class ThreadSnapshot:
+    summary: ThreadSummary
+    latest_turn: TurnState
+    messages: list[AgentMessage]
+
+
+@dataclass(frozen=True)
+class ThreadListing:
+    threads: list[ThreadSummary]
+    unsupported: tuple[str, ...] = ()
+    """IDs of threads skipped because their history is duplicated or in a format this reader does not parse, from any
+    repository: the working directory of such a history cannot be read."""
+
+
+@dataclass(frozen=True)
+class Scan:
+    """What one pass over a history's records found."""
+    latest: TurnState | None
+    messages: list[AgentMessage]
+    completions: dict = field(default_factory=dict)
+    """Codex only: each completed turn's recorded final agent message."""
+
+
+def parse_line(line):
+    try:
+        record = json.loads(line)
+    except (ValueError, RecursionError) as exc:
+        raise ThreadUnavailable("The thread's history file has a malformed line.") from exc
+    if not isinstance(record, dict):
+        raise ThreadUnavailable("The thread's history file has a malformed line.")
+    return record
+
+
+def complete_records(data, from_start):
+    """Parse the complete lines in a block of bytes read from the end of a file.
+
+    Unless the block starts at the beginning of the file, its leading partial line is dropped. An unterminated last
+    line, which the app may still be writing, is always dropped.
+    """
+    lines = data.split(b"\n")[:-1]
+    if not from_start:
+        lines = lines[1:]
+    return [parse_line(line) for line in lines if line.strip()]
+
+
+def scan_is_enough(scan, max_messages):
+    return scan.latest is not None and len(scan.messages) >= max_messages
+
+
+def text_of(blocks, block_type):
+    """Join the text of the blocks of one type, skipping anything else such as tool calls or reasoning."""
+    if not isinstance(blocks, list):
+        return ""
+    return "".join(
+        block["text"] for block in blocks
+        if isinstance(block, dict) and block.get("type") == block_type and isinstance(block.get("text"), str)
+    )
+
+
+def keep_recent(snapshot_messages, max_messages):
+    return snapshot_messages[-max_messages:]
+
+
+# Codex
+
+
+def rollout_identifier(file_name):
+    """The thread ID a rollout file name carries, or None."""
+    identifiers = UUID_PATTERN.findall(file_name)
+    return identifiers[-1] if identifiers else None
+
+
+def rollout_format(file_name):
+    """The rollout's storage format from its exact file-name suffix: "jsonl", "zstd" (zstd-compressed JSONL) or None."""
+    for suffix, kind in ROLLOUT_FORMATS:
+        if file_name.endswith(suffix):
+            return kind
+    return None
+
+
+def is_supported_history(files):
+    """Whether a thread's rollout files are one file in a format the reader parses. files holds (path, archived)."""
+    return len(files) == 1 and rollout_format(files[0][0].name) is not None
+
+
+def parse_session_index(lines):
+    """Map thread IDs to names from session_index.jsonl lines, skipping lines that do not parse."""
+    names = {}
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            names[entry["id"]] = entry.get("thread_name")
+    return names
+
+
+def codex_main_thread(meta):
+    """Return (source, cwd, forked_from_id) for a Desktop or interactive CLI thread's session_meta, else None.
+
+    Subagent and guardian threads record their source as an object; consultations record "exec".
+    """
+    payload = meta.get("payload") if meta.get("type") == "session_meta" else None
+    source = payload.get("source") if isinstance(payload, dict) else None
+    if not isinstance(source, str) or source not in CODEX_MAIN_SOURCES:
+        return None
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str):
+        return None
+    return source, cwd, payload.get("forked_from_id")
+
+
+def scan_codex(records):
+    latest, messages, completions = None, [], {}
+    for record in records:
+        payload = record.get("payload")
+        if record.get("type") != "event_msg" or not isinstance(payload, dict):
+            continue
+        kind, turn_id = payload.get("type"), payload.get("turn_id")
+        if kind == "task_started":
+            latest = TurnState(turn_id, "inProgress")
+        elif kind == "task_complete":
+            latest = TurnState(turn_id, "failed" if payload.get("error") else "completed")
+            completions[turn_id] = payload.get("last_agent_message")
+        elif kind == "turn_aborted":
+            latest = TurnState(turn_id, "interrupted")
+        elif kind == "item_completed":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "AgentMessage":
+                text = text_of(item.get("content"), "Text")
+                if text.strip():
+                    messages.append(AgentMessage(turn_id, text, item.get("phase")))
+    return Scan(latest, messages, completions)
+
+
+def codex_snapshot(summary, scan, max_messages):
+    latest, messages = scan.latest, scan.messages
+    expected = scan.completions.get(latest.turn_id) if latest.status == "completed" else None
+    produced = [message.text for message in messages if message.turn_id == latest.turn_id]
+    if isinstance(expected, str) and expected.strip() and (not produced or produced[-1].strip() != expected.strip()):
+        # No message at all for a turn that recorded one means the records changed shape: older turns' text would
+        # otherwise pass for this one's.
+        raise ThreadUnavailable("The thread's final message does not match its turn record.")
+    if latest.status == "inProgress":
+        # Codex removes the lock file when its writer stops cleanly, so only its absence is conclusive.
+        latest = TurnState(latest.turn_id, latest.status, "unknown" if summary.writer_lock_present else "abandoned")
+    return ThreadSnapshot(summary, latest, keep_recent(messages, max_messages))
+
+
+# Claude Code
+
+
+def claude_head(lines):
+    """Return the session's first recorded working directory and its entrypoint, None when it records none."""
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+            entrypoint = entry.get("entrypoint")
+            return entry["cwd"], entrypoint if isinstance(entrypoint, str) and entrypoint else None
+    return None, None
+
+
+def claude_last_cwd(records):
+    """The working directory the session's most recent records name: a session can move after it starts."""
+    for entry in reversed(records):
+        if isinstance(entry.get("cwd"), str):
+            return entry["cwd"]
+    return None
+
+
+def is_interactive_claude_session(entrypoint):
+    """Print-mode sessions, bridge consultations among them, have no person at the keyboard; a session that records
+    no entrypoint cannot be told apart, so it is left out."""
+    return isinstance(entrypoint, str) and bool(entrypoint) and not entrypoint.startswith("sdk")
+
+
+def claude_title(lines):
+    """Return the session's custom title, else its generated title, else None."""
+    titles = {}
+    for line in lines:
+        if b'"custom-title"' not in line and b'"ai-title"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict):
+            for kind, key in (("custom-title", "customTitle"), ("ai-title", "aiTitle")):
+                if entry.get("type") == kind and isinstance(entry.get(key), str):
+                    titles[kind] = entry[key]
+    return titles.get("custom-title") or titles.get("ai-title")
+
+
+def scan_claude(records):
+    latest, messages, turn_id = None, [], None
+    for entry in records:
+        if entry.get("isSidechain") or entry.get("isMeta"):
+            continue
+        message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+        content = message.get("content")
+        if entry.get("type") == "user":
+            blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+            if any(not isinstance(block, dict) or block.get("type") == "tool_result" for block in blocks):
+                continue
+            text = "".join(block.get("text") or "" for block in blocks if block.get("type") == "text")
+            if text in CLAUDE_INTERRUPTION_MARKERS:
+                latest = TurnState(turn_id, "interrupted")
+            else:
+                turn_id = entry.get("uuid")
+                latest = TurnState(turn_id, "inProgress")
+        elif entry.get("type") == "assistant":
+            if entry.get("isApiErrorMessage"):
+                latest = TurnState(turn_id, "failed")
+                continue
+            text = text_of(content, "text")
+            if text.strip():
+                messages.append(AgentMessage(turn_id, text))
+            latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(message.get("stop_reason")))
+    return Scan(latest, messages)
+
+
+def claude_snapshot(summary, scan, max_messages):
+    latest = scan.latest
+    if latest.status is None:
+        raise ThreadUnavailable("The session's latest reply stopped for a reason this reader does not know.")
+    if latest.status == "inProgress":
+        latest = TurnState(latest.turn_id, latest.status, "unknown")
+    return ThreadSnapshot(summary, latest, keep_recent(scan.messages, max_messages))
+
+
+# Results
+
+
+def iso_time(timestamp):
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds")
+
+
+def newest_first(listing):
+    return ThreadListing(sorted(listing.threads, key=lambda summary: summary.recency_at, reverse=True),
+                         listing.unsupported)
+
+
+def listing_result(provider, listing, limit):
+    result = {"provider": provider, "threads": [
+        {"id": summary.id, "name": summary.name, "updated_at": iso_time(summary.recency_at),
+         "archived": summary.archived, "writer_lock_file": summary.writer_lock_present}
+        for summary in listing.threads[:limit]
+    ]}
+    if listing.unsupported:
+        # Not limited to this repository, so it reveals nothing about which threads belong to it.
+        result["unsupported_threads_machine_wide"] = len(listing.unsupported)
+    return result
+
+
+def match_thread(threads, thread):
+    """Pick the one listed thread whose ID or exact name is thread."""
+    matches = [summary for summary in threads if thread in (summary.id, summary.name)]
+    if not matches:
+        # The same answer for an unsupported history, which may belong to another repository, as for no thread.
+        raise ThreadUnavailable("No readable thread with that ID or name belongs to this repository.")
+    if len(matches) > 1:
+        raise ThreadUnavailable("Several threads have that name. Pass the thread's ID instead.")
+    return matches[0]
+
+
+def cap_messages(messages, budget=MAX_MESSAGE_CHARACTERS):
+    """Keep the newest text within budget characters, cutting the oldest kept message from its start.
+
+    Returns the kept messages, oldest first, and whether anything was cut or left out.
+    """
+    kept, truncated = [], False
+    for message in reversed(messages):
+        text = message.text
+        if len(text) > budget:
+            text, truncated = text[len(text) - budget:], True
+        if text:
+            kept.insert(0, {"text": text, "phase": message.phase})
+        budget -= len(text)
+        if budget <= 0:
+            truncated = truncated or len(kept) < len(messages)
+            break
+    return kept, truncated
+
+
+def snapshot_result(provider, snapshot):
+    messages, truncated = cap_messages(snapshot.messages)
+    latest = snapshot.latest_turn
+    return {
+        "provider": provider, "id": snapshot.summary.id, "name": snapshot.summary.name,
+        "updated_at": iso_time(snapshot.summary.recency_at),
+        "latest_turn": {"status": latest.status, "finished": latest.status in FINISHED_STATUSES,
+                        "liveness": latest.liveness},
+        "messages": messages, "truncated": truncated,
+    }
+

@@ -1,0 +1,109 @@
+# How peer-bridge works
+
+peer-bridge lets Claude Code consult Codex, and Codex consult Claude Code, without either one handing the other its
+tools. This page describes what the bridge does today; [README.md](README.md) has setup, every argument and every
+setting.
+
+## Shape
+
+```mermaid
+flowchart TB
+    claude["Claude Code<br/>(Claude Code plugin)"] --> bridge
+    codex["Codex<br/>(Codex plugin)"] --> bridge
+    shell["Shell<br/>(bridge.py CLI)"] --> bridge
+    subgraph bridge["peer-bridge: MCP server and CLI"]
+        consult["Consultations<br/>restricted, resumable"]
+        jobs["Background jobs<br/>a runner per job"]
+        reader["Thread reader<br/>read-only, same repo"]
+        jobs --> consult
+    end
+    consult --> peer["Peer CLI<br/>under peer_guard"]
+    jobs --> state["State directory<br/>records, jobs, locks"]
+    reader --> history["Session files<br/>the other app's history"]
+```
+
+Each app reaches the bridge through its own plugin; the shell uses the same script. The bridge does three things:
+
+- **Consultations**: `ask_codex` and `ask_claude` ask the other agent a scoped question, in a conversation the caller
+  can continue with `conversation_id`.
+- **Background jobs**: `start_codex_consultation` and `start_claude_consultation` run a consultation in a detached
+  runner, `get_consultation` reads it and `cancel_consultation` stops it.
+- **Thread reading**: `list_codex_threads`, `read_codex_thread`, `list_claude_threads` and `read_claude_thread` read
+  what the other app's agent last said in this repository.
+
+All rules (request checks, the peer's command line, environment cleanup, the handoff text, failure diagnosis, job
+states) live in two pure modules, `consultation.py` and `thread_parsing.py`; the rest only starts processes and
+touches files.
+
+## One consultation
+
+```mermaid
+flowchart TB
+    check["Check the request<br/>no nesting, real directory, valid IDs"] --> record
+    record["Lock the conversation record<br/>bound to peer and project; resumes"] --> pin
+    pin["Pinned checkout, if a ref is given<br/>detached worktree, removed afterwards"] --> run
+    run["Peer runs under the guard<br/>read-only tools, scrubbed environment"] --> outcome
+    outcome["Reply, or a fixed error<br/>cause named only from exact facts"]
+```
+
+- **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep, only the user's own settings, and no MCP
+  servers, hooks or slash commands; it reads only inside the consulted directory, Claude Code's temporary folder, and
+  wherever the user's own settings add a directory or allow a read. Codex runs as `codex exec` in its read-only sandbox,
+  without the user's "always allow" rules, with MCP servers, plugins and web search off and only the core environment
+  for its commands; it can read any file the user can. Neither can start another consultation. See
+  [SECURITY.md](../../SECURITY.md) for what this does not cover.
+- **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`;
+  `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
+- **The peer's process group never outlives the consultation.** `peer_guard.py` leads the peer's process group and
+  stops all of it when the consultation ends, times out or is cancelled, and when the bridge's own process dies, even
+  by SIGKILL. A descendant that leaves the group, by starting its own session or group, is not stopped.
+- **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
+  given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file.
+
+## Background jobs
+
+```mermaid
+flowchart LR
+    queued["queued<br/>job ID returned"] --> running["running<br/>runner holds lock"]
+    running --> completed["completed<br/>reply kept seven days"]
+    running --> failed["failed<br/>fixed error message"]
+    running --> cancelled["cancelled<br/>marker, no signals"]
+    queued -. runner never starts .-> lost["lost<br/>stored, honoured"]
+    running -. runner dies .-> lost
+```
+
+A job lives in its own folder under the state directory. Its runner holds a lock for as long as it lives, so whether a
+runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
+dies, or does not start within two minutes, is stored as `lost`, and a runner that starts late honours that. While a
+cancel waits for the runner, `cancel_consultation` reports `cancelling`. The prompt and context are deleted as soon as
+the runner has read them.
+
+## Thread reading
+
+The reader opens the other app's session files read-only: Claude Code's `projects/*/*.jsonl`, and Codex's rollouts,
+plain or zstd-compressed. It returns only agent messages and the latest turn's state, and only for threads in the same
+git repository. `seed_thread` carries a thread's recent messages into a new consultation, so a review left in Codex
+Desktop can be followed up without touching it.
+
+The bridge never writes into the other app's sessions. To hand work to an existing session, an agent puts the handoff
+in its own reply, and that session reads it with `read_codex_thread` or `read_claude_thread`. Neither agent may reach
+the other by operating its desktop app; the bridge's tool descriptions and skill say so.
+
+To split work, the operator starts the other app in a worktree of its own (`claude --worktree` or
+`codex --worktree`) with the handoff. The lead follows that session with `read_*_thread` and reviews its branch with
+`ask_codex` or `ask_claude` and `ref`. No peer the bridge starts ever edits;
+[ADR 0003](../../docs/adr/0003-peers-only-read.md) records why.
+
+Codex's session files are an internal format. A developer tool outside the plugin, `dev/codex_app_server.py`, tests
+whether Codex's app-server API could replace reading them; [ADR 0001](../../docs/adr/0001-codex-thread-reader-source.md)
+sets when it may take over.
+
+## Scope
+
+- **In:** asking the other agent a scoped question with read-only access, continuing that conversation, pinning it to
+  a commit, choosing Codex's model and effort, running it in the background, and reading what the other app's agent
+  last said in this repository.
+- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, push or call
+  tools, nesting consultations, network access of its own, and Windows.
+- **Experimental:** the thread tools, `seed_thread` and `list_codex_models` read the apps' internal files, which can
+  change in any release.

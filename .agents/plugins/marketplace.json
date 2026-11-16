@@ -1,0 +1,17 @@
+{
+  "name": "peer-bridge",
+  "plugins": [
+    {
+      "name": "peer-bridge",
+      "source": {
+        "source": "local",
+        "path": "./plugins/peer-bridge"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
