@@ -5,3 +5,6 @@
 - Tests follow [ADR 0002](docs/adr/0002-test-architecture.md): each critical path proved once, at the lowest level.
 - Decisions go in `docs/adr/` with the sections Status, Enforced by, Context, Decision, Consequences and Reconsider if; current decision only; history is in git.
 - Deterministic code reads exact tokens and structure; judgement about language goes to a model or the operator.
+- Commit a file only when something uses it: code, a test or its fixture, a user doc, an ADR, the changelog, the backlog.
+  Session artifacts (plans, review transcripts, parity reports, scratch notes) stay out; what they settled goes in the
+  commit message, an ADR, `HOW-IT-WORKS.md` or `TODO.md`.
