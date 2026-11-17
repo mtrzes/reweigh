@@ -58,11 +58,10 @@ def read_json(path, unreadable=UNREADABLE):
         return None
     except OSError as exc:
         raise BridgeError(unreadable) from exc
-    with os.fdopen(descriptor, "rb") as source:
-        data = source.read()
     try:
-        return json.loads(data)
-    except (ValueError, RecursionError) as exc:
+        with os.fdopen(descriptor, "rb") as source:
+            return json.load(source)
+    except (OSError, ValueError, RecursionError) as exc:
         raise BridgeError(unreadable) from exc
 
 

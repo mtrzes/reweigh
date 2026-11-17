@@ -150,14 +150,15 @@ consultation in a detached runner, and return at once:
 
 `get_consultation` takes the `job_id` and an optional `wait_seconds`, at most 60, and returns the job's `state`:
 `queued`, `running`, `cancelling` while a cancelled job's runner stops, `completed`, `failed`, `cancelled`, or `lost`
-when its runner stopped without a result or never started within two minutes. A completed job adds the
+when its runner stopped without a result or did not claim it within two minutes. A completed job adds the
 `conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, and `model` and `reasoning_effort` when
 chosen; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops a running job, its
 peer and the peer's child processes, and removes a pinned checkout. Each server sees only the jobs of the peers it
-exposes.
+exposes. Each status read or cancellation can wait up to one second for the job's state lock before reporting that
+the job is busy.
 
 Each job runs in its own process, so it outlives a restart of the MCP server or the calling app, and a later server
-reads its result. The runner deletes the job's prompt and context as soon as it has read them; the reply is kept as
+reads its result. The runner deletes the request holding the prompt and context after trying to read it. The reply is kept as
 [State retention](#state-retention) describes.
 
 ### Command-line consultations

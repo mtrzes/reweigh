@@ -102,34 +102,72 @@ class JobTests(BridgeTestCase):
         self.assertFalse(folder.exists())
 
     async def test_a_killed_runners_conversation_stays_locked_until_its_guard_has_stopped_the_peer(self):
-        # The runner's death frees its own lock at once, but the guard is still stopping a peer that ignores SIGTERM
-        # in a pinned checkout; until it has, no other consultation may take the conversation or sweep the checkout.
         git_repository(self.project)
-        with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang", "SIMULATED_PEER_IGNORES_SIGTERM": "1"}):
-            job_id = (await self.start(ref="HEAD"))["job_id"]
-            await self.wait_for_child()
-        [checkout] = (self.state / "worktrees").iterdir()
-        folder = self.folder(job_id)
-        os.kill(json.loads((folder / "job.json").read_text())["pid"], signal.SIGKILL)
+        real_git = shutil.which("git")
+        command = self.root / "blocking-peer"
+        command.write_text(f"""#!{sys.executable}
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-        def runner_gone():
-            with self.client.jobs.state_lock(folder):
-                return not self.client.jobs.runner_present(folder)
+if Path(sys.argv[0]).name == "git":
+    git = {real_git!r}
+    if sys.argv[4:6] != ["read-tree", "--reset"]:
+        os.execv(git, [git, *sys.argv[1:]])
+    subprocess.run([git, *sys.argv[1:]], check=True)
 
-        await eventually_async(runner_gone, "The killed runner still holds its job.")
-        with self.client.store.holding(checkout.name) as lock:
-            self.assertIsNone(lock)  # the guard's grace period for the SIGTERM-ignoring peer has not ended
-        await bridge.sweep_worktrees(self.client.store)
-        self.assertTrue(checkout.is_dir())
-        await self.assert_processes_stopped()
+root = Path({str(self.root)!r})
+(root / "guard.pid").write_text(str(os.getppid()))
+temporary = root / "command.pid.tmp"
+temporary.write_text(str(os.getpid()))
+temporary.replace(root / "command.pid")
+time.sleep({4 * DEADLINE_SECONDS})
+""")
+        command.chmod(0o700)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        shutil.copy2(command, bin_dir / "git")
+        ready = self.root / "command.pid"
 
-        def free():
-            with self.client.store.holding(checkout.name) as lock:
-                return lock is not None
+        for name, settings in (
+            ("peer", {"PEER_BRIDGE_CLAUDE_BIN": str(command)}),
+            ("read-tree", {"PATH": os.pathsep.join((str(bin_dir), os.environ["PATH"]))}),
+        ):
+            with self.subTest(command=name):
+                ready.unlink(missing_ok=True)
+                with patch.dict(os.environ, settings):
+                    job_id = (await self.start(ref="HEAD"))["job_id"]
+                await eventually_async(ready.exists, f"The guarded {name} command did not start.")
+                [checkout] = (self.state / "worktrees").iterdir()
+                folder = self.folder(job_id)
+                runner = json.loads((folder / "job.json").read_text())["pid"]
+                guard = int((self.root / "guard.pid").read_text())
 
-        await eventually_async(free, "The conversation stayed locked after its guard stopped.")
-        await bridge.sweep_worktrees(self.client.store)
-        self.assertFalse(checkout.exists())
+                def runner_gone():
+                    with self.client.jobs.state_lock(folder):
+                        return not self.client.jobs.runner_present(folder)
+
+                def free():
+                    with self.client.store.holding(checkout.name) as lock:
+                        return lock is not None
+
+                # Pause the guard before the lifeline closes. Only the test can let it begin shutdown.
+                os.kill(guard, signal.SIGSTOP)
+                try:
+                    os.kill(runner, signal.SIGKILL)
+                    await eventually_async(runner_gone, "The killed runner still holds its job.")
+                    self.assertFalse(free())
+                    await bridge.sweep_worktrees(self.client.store)
+                    self.assertTrue(checkout.is_dir())
+                finally:
+                    os.kill(guard, signal.SIGCONT)
+                    await self.assert_processes_stopped(("command.pid",))
+
+                await eventually_async(free, "The conversation stayed locked after its guard stopped.")
+                await bridge.sweep_worktrees(self.client.store)
+                self.assertFalse(checkout.exists())
 
     async def test_a_killed_runner_takes_its_peer_with_it_and_its_job_is_lost(self):
         with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang"}):
@@ -234,6 +272,49 @@ class JobTests(BridgeTestCase):
         view = await self.client.job(job_id, CLAUDE)
         self.assertEqual((view["state"], view["error"]), ("cancelled", jobs.CANCELLED))
 
+    async def test_the_runner_can_be_cancelled_while_its_state_lock_is_held(self):
+        for phase in ("claim", "reply", "cancel"):
+            with self.subTest(phase=phase):
+                job_id = await self.queued()
+                store = self.client.jobs
+                folder = self.folder(job_id)
+                state_lock = folder / "state.lock"
+                attempted, consulting, reply = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                real_flock = store.flock
+                held = False
+
+                def flock(path, blocking):
+                    if path == state_lock and held:
+                        attempted.set()
+                        self.assertFalse(blocking)
+                    return real_flock(path, blocking)
+
+                async def consult(request):
+                    consulting.set()
+                    await reply.wait()
+                    return {"conversation_id": "conv", "reply": "done"}
+
+                with patch.object(store, "flock", flock):
+                    runner = asyncio.create_task(jobs.run_job(store, job_id, consult))
+                    try:
+                        if phase != "claim":
+                            await asyncio.wait_for(consulting.wait(), DEADLINE_SECONDS)
+                        with real_flock(state_lock, blocking=False) as held:
+                            self.assertTrue(held)
+                            if phase == "reply":
+                                reply.set()
+                            if phase != "cancel":
+                                await asyncio.wait_for(attempted.wait(), DEADLINE_SECONDS)
+                            runner.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(runner, DEADLINE_SECONDS)
+                    finally:
+                        if not runner.done():
+                            runner.cancel()
+                            await asyncio.gather(runner, return_exceptions=True)
+                with real_flock(folder / "runner.lock", blocking=False) as free:
+                    self.assertTrue(free)
+
     async def test_a_queued_job_cancelled_before_its_runner_starts_never_runs(self):
         job_id = await self.queued(prompt="PRIVATE QUESTION")
         self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelled")
@@ -248,6 +329,27 @@ class JobTests(BridgeTestCase):
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelled")
         self.assertFalse((self.folder(job_id) / "request.json").exists())
 
+    async def test_only_regular_files_request_cancellation(self):
+        target = self.root / "marker-target"
+        target.touch()
+
+        async def consult(request):
+            await asyncio.sleep(0)  # let the watcher check the marker before the reply
+            return {"conversation_id": "conv", "reply": "done"}
+
+        for marker_type in ("symlink", "fifo"):
+            with self.subTest(marker_type=marker_type):
+                job_id = await self.queued()
+                marker = self.folder(job_id) / "cancel.requested"
+                if marker_type == "symlink":
+                    marker.symlink_to(target)
+                else:
+                    os.mkfifo(marker)
+                before = await self.client.job(job_id, CLAUDE)
+                await jobs.run_job(self.client.jobs, job_id, consult)
+                after = await self.client.job(job_id, CLAUDE)
+                self.assertEqual((before["state"], after["state"]), ("queued", "completed"))
+
     async def test_a_lost_verdict_is_stored_and_a_late_runner_honours_it(self):
         job_id = await self.queued(prompt="PRIVATE QUESTION")
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "queued")
@@ -261,13 +363,23 @@ class JobTests(BridgeTestCase):
         record = json.loads((self.folder(job_id) / "job.json").read_text(encoding="utf-8"))
         record["created_at"] -= consultation.JOB_START_GRACE_SECONDS + 1
         (self.folder(job_id) / "job.json").write_text(json.dumps(record), encoding="utf-8")
+        (self.folder(job_id) / "cancel.requested").touch()  # interrupted cancel
         await jobs.run_job(self.client.jobs, job_id, self.never)
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
+
+    async def test_cancelling_an_overdue_queued_job_stores_it_as_lost(self):
+        job_id = await self.queued(prompt="PRIVATE QUESTION")
+        later = time.time() + consultation.JOB_START_GRACE_SECONDS + 1
+        cancelled = self.client.jobs.cancel(job_id, CLAUDE, now=later)
+        self.assertEqual((cancelled["state"], cancelled["error"]), ("lost", consultation.LOST_JOB))
+        self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
+        self.assertFalse((self.folder(job_id) / "request.json").exists())
 
     async def test_a_job_reads_cancelling_until_its_runner_stops(self):
         job_id = await self.queued()
         store = self.client.jobs
-        with store.runner_lock(self.folder(job_id)):  # a runner that has not seen the marker yet
+        with store.flock(self.folder(job_id) / "runner.lock", blocking=False) as acquired:
+            self.assertTrue(acquired)  # a runner that has not seen the marker yet
             self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelling")
             self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelling")
         await jobs.run_job(self.client.jobs, job_id, self.never)  # the runner then honours the marker
@@ -279,6 +391,24 @@ class JobTests(BridgeTestCase):
         with other.state_lock(self.folder(held)):
             await asyncio.wait_for(asyncio.to_thread(self.client.jobs.prune, time.time() + LATER), DEADLINE_SECONDS)
         self.assertEqual((self.folder(held).exists(), self.folder(free).exists()), (True, False))
+
+    async def test_job_apis_stop_waiting_for_a_busy_state_lock(self):
+        job_id = await self.queued()
+        state_lock = self.folder(job_id) / "state.lock"
+
+        def sleep(seconds):
+            clock.now += seconds
+
+        clock = SimpleNamespace(now=1000.0, monotonic=lambda: clock.now, sleep=sleep)
+        for call in (self.client.job, self.client.cancel):
+            clock.now = 1000.0
+            with self.subTest(call=call.__name__), patch.object(jobs, "time", clock):
+                with self.client.jobs.flock(state_lock, blocking=False) as acquired:
+                    self.assertTrue(acquired)
+                    with self.assertRaises(bridge.BridgeError) as error:
+                        await asyncio.wait_for(call(job_id, CLAUDE), timeout=1)
+                self.assertEqual(str(error.exception), "The consultation job is busy. Try again.")
+                self.assertEqual(clock.now, 1001.0)
 
     async def test_the_runner_lock_is_probed_only_under_the_state_lock(self):
         # A probe outside the state lock could meet another probe and take it for a runner.
@@ -322,12 +452,12 @@ class JobTests(BridgeTestCase):
         store, other, seen = jobs.JobStore(self.state), jobs.JobStore(self.state), {}
         record = store.record_outcome
 
-        def at_the_outcome(folder, outcome):
+        async def at_the_outcome(folder, outcome):
             # The reply is in and its outcome not yet written; the runner still holds the job.
             seen["request kept"] = (folder / "request.json").exists()
             seen["view"] = other.view(job_id, CLAUDE)["state"]
             seen["cancel"] = other.cancel(job_id, CLAUDE)["state"]
-            record(folder, outcome)
+            await record(folder, outcome)
 
         store.record_outcome = at_the_outcome
 
@@ -342,6 +472,39 @@ class JobTests(BridgeTestCase):
 
     # Files and retention
 
+    async def test_claim_removes_an_unreadable_request_and_records_failure(self):
+        job_id = await self.queued()
+        request = self.folder(job_id) / "request.json"
+        request.write_text("{\"prompt\": \"PRIVATE QUESTION\"")
+        await jobs.run_job(self.client.jobs, job_id, self.never)
+        self.assertFalse(request.exists())
+        view = await self.client.job(job_id, CLAUDE)
+        self.assertEqual((view["state"], view["error"]), ("failed", jobs.UNREADABLE))
+
+    async def test_prune_uses_the_folder_age_when_reading_the_record_fails(self):
+        job_id = await self.queued()
+        folder = self.folder(job_id)
+        record = (folder / "job.json").stat()
+        old = time.time() - LATER
+        os.utime(folder, (old, old))
+        fdopen = os.fdopen
+
+        def fail_read():
+            raise OSError(errno.EIO, "PRIVATE DETAIL")
+
+        @contextmanager
+        def open_with_failed_read(descriptor, *args, **kwargs):
+            with fdopen(descriptor, *args, **kwargs) as handle:
+                info = os.fstat(descriptor)
+                if (info.st_dev, info.st_ino) == (record.st_dev, record.st_ino):
+                    yield SimpleNamespace(read=fail_read)
+                else:
+                    yield handle
+
+        with patch("state_files.os.fdopen", open_with_failed_read):
+            self.client.jobs.prune(time.time())
+        self.assertFalse(folder.exists())
+
     async def test_a_job_appears_whole_or_not_at_all(self):
         def crash(path, data):
             if path.name == "job.json":
@@ -352,7 +515,7 @@ class JobTests(BridgeTestCase):
             with self.assertRaisesRegex(bridge.BridgeError, "Cannot read or write the consultation job files"):
                 await self.start(prompt="PRIVATE QUESTION")
         self.assertEqual(list((self.state / "jobs").iterdir()), [])
-        stale = self.state / "jobs" / f"{jobs.STAGING_PREFIX}leftover"
+        stale = self.state / "jobs" / f"{jobs.STAGING_PREFIX}{uuid.uuid4()}"
         stale.mkdir()
         (stale / "request.json").write_text("PRIVATE QUESTION")
         self.client.jobs.prune(time.time() + jobs.STAGING_RETENTION_SECONDS + 60)
@@ -360,9 +523,9 @@ class JobTests(BridgeTestCase):
 
     async def test_prune_skips_a_staging_folder_published_meanwhile(self):
         await self.queued()
-        vanishing = self.state / "jobs" / f"{jobs.STAGING_PREFIX}being-published"
+        published = self.state / "jobs" / str(uuid.uuid4())
+        vanishing = published.with_name(f"{jobs.STAGING_PREFIX}{published.name}")
         vanishing.mkdir()
-        published = self.state / "jobs" / "published-meanwhile"
         real_is_dir = Path.is_dir
 
         def is_dir(path, *arguments, **keywords):
@@ -389,6 +552,19 @@ class JobTests(BridgeTestCase):
         (tombstone / "outcome.json").write_text(json.dumps({"result": {"reply": "PRIVATE REPLY"}}))
         self.client.jobs.prune(time.time())
         self.assertFalse(tombstone.exists())
+
+    async def test_prune_leaves_prefixed_directories_without_a_canonical_job_id(self):
+        await self.queued()
+        made = []
+        for prefix in (jobs.STAGING_PREFIX, jobs.DELETING_PREFIX):
+            for suffix in ("keep", "AAAAAAAA-AAAA-4AAA-AAAA-AAAAAAAAAAAA"):
+                entry = self.state / "jobs" / f"{prefix}{suffix}"
+                entry.mkdir()
+                made.append(entry)
+        self.client.jobs.prune(time.time() + LATER)
+        for entry in made:
+            with self.subTest(entry=entry.name):
+                self.assertTrue(entry.is_dir())
 
     async def test_unreadable_jobs_are_refused_with_a_reason_and_never_stop_pruning(self):
         broken_outcome = await self.queued()

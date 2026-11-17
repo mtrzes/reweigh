@@ -78,10 +78,17 @@ flowchart LR
 
 A job lives in its own folder under the state directory. Its runner holds a lock for as long as it lives, so whether a
 runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
-dies, or does not start within two minutes, is stored as `lost`, and a runner that starts late honours that. While a
-cancel waits for the runner, `cancel_consultation` reports `cancelling`. The prompt and context are deleted as soon as
-the runner has read them. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
+dies, or has yet to claim it after two minutes, is stored as `lost` when it is read, cancelled or claimed. Before that
+deadline, cancellation of a queued job with no runner takes effect immediately. While a cancel waits for the runner,
+`cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The runner deletes
+the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
+`failed` with a fixed error. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
 published during creation.
+
+Each status read or cancellation waits at most one second for the lock on the job's state, then reports that the job
+is busy. The runner can respond to `SIGTERM` or `SIGHUP` while waiting for the lock.
+
+Job cleanup removes only folders named with a canonical job UUID, optionally preceded by `.staging-` or `.deleting-`.
 
 ## Thread reading
 

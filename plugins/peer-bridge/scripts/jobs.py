@@ -17,31 +17,43 @@ import asyncio
 import fcntl
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from consultation import (
-    JOB_RETENTION_SECONDS, JOB_START_GRACE_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state,
-    job_view, new_job_record, valid_job_outcome, valid_job_record, validate_session_id,
+    JOB_RETENTION_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state, job_view, new_job_record,
+    valid_job_outcome, valid_job_record, validate_session_id,
 )
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 
 UNKNOWN_JOB = "No consultation job with that ID."
 UNREADABLE = "The consultation job's files are unreadable."
+LOCK_BUSY = "The consultation job is busy. Try again."
 CANCELLED = "The consultation was cancelled."
 UNEXPECTED = "The consultation stopped on an unexpected error."
+STOPPED_JOB_ERRORS = {"lost": LOST_JOB, "cancelled": CANCELLED}
 CANCEL_POLL_SECONDS = 0.2
+LOCK_POLL_SECONDS = 0.05
+STATE_LOCK_TIMEOUT_SECONDS = 1.0
 # A job folder is built under STAGING_PREFIX and renamed into place whole; an expired one is renamed under
 # DELETING_PREFIX before it is removed, so an interrupted removal is finished later, whatever is left in it.
 STAGING_PREFIX = ".staging-"
 DELETING_PREFIX = ".deleting-"
 STAGING_RETENTION_SECONDS = 3600
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("bridge.py")
+
+
+def cancel_requested(folder):
+    try:
+        return stat.S_ISREG((folder / "cancel.requested").lstat().st_mode)
+    except FileNotFoundError:
+        return False
 
 
 class JobStore:
@@ -111,11 +123,31 @@ class JobStore:
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
+    @contextmanager
     def state_lock(self, folder):
-        return self.flock(folder / "state.lock", blocking=True)
+        deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            with self.flock(folder / "state.lock", blocking=False) as acquired:
+                if acquired:
+                    yield
+                    return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(LOCK_POLL_SECONDS, remaining))
+            if time.monotonic() >= deadline:
+                break
+        raise BridgeError(LOCK_BUSY)
 
-    def runner_lock(self, folder):
-        return self.flock(folder / "runner.lock", blocking=True)
+    @asynccontextmanager
+    async def runner_file_lock(self, path, *, retry=True):
+        """Retry on the event loop so the runner can be cancelled while waiting."""
+        while True:
+            with self.flock(path, blocking=False) as acquired:
+                if acquired or not retry:
+                    yield acquired
+                    return
+            await asyncio.sleep(LOCK_POLL_SECONDS)
 
     def runner_present(self, folder):
         """Whether a runner holds the job. Call only while holding the job's state lock."""
@@ -163,11 +195,11 @@ class JobStore:
             if outcome is None:
                 now = time.time() if now is None else now
                 state = job_state(record, None, self.runner_present(folder), now,
-                                  cancel_requested=(folder / "cancel.requested").exists())
-                if state != "lost":
+                                  cancel_requested=cancel_requested(folder))
+                if state not in STOPPED_JOB_ERRORS:
                     return job_view(job_id, record, None, state)
                 # Stored, so a runner that starts later finds it and does not run.
-                outcome = job_outcome("lost", now, error=LOST_JOB)
+                outcome = job_outcome(state, now, error=STOPPED_JOB_ERRORS[state])
                 self.finish(folder, outcome)
             else:
                 # A crash may have left the request behind a final outcome; it is not kept.
@@ -182,16 +214,14 @@ class JobStore:
             if outcome is not None:
                 (folder / "request.json").unlink(missing_ok=True)
                 return job_view(job_id, record, outcome, outcome["state"])
-            # The runner checks for this marker before it consults and watches for it while it does.
-            self.mark(folder / "cancel.requested")
-            if self.runner_present(folder):
-                return job_view(job_id, record, None, "cancelling")
             now = time.time() if now is None else now
-            if record["state"] == "running":
-                # Its runner died: the peer's guard is still stopping the peer, so this is no clean cancellation.
-                outcome = job_outcome("lost", now, error=LOST_JOB)
-            else:
-                outcome = job_outcome("cancelled", now, error=CANCELLED)
+            state = job_state(record, None, self.runner_present(folder), now, cancel_requested=True)
+            if state != "lost":
+                # The runner checks this marker before it consults and watches for it while it does.
+                self.mark(folder / "cancel.requested")
+            if state == "cancelling":
+                return job_view(job_id, record, None, state)
+            outcome = job_outcome(state, now, error=STOPPED_JOB_ERRORS[state])
             self.finish(folder, outcome)
             return job_view(job_id, record, outcome, outcome["state"])
 
@@ -204,10 +234,15 @@ class JobStore:
             try:
                 if entry.is_symlink() or not entry.is_dir():
                     continue
-                if entry.name.startswith(DELETING_PREFIX):
+                prefix = next((prefix for prefix in (STAGING_PREFIX, DELETING_PREFIX) if entry.name.startswith(prefix)),
+                              "")
+                job_id = entry.name.removeprefix(prefix)
+                if validate_session_id(job_id) != job_id:
+                    continue
+                if prefix == DELETING_PREFIX:
                     shutil.rmtree(entry, ignore_errors=True)
                     continue
-                if entry.name.startswith(STAGING_PREFIX):
+                if prefix == STAGING_PREFIX:
                     # A concurrent start may publish this folder at any moment; a vanished one is skipped.
                     if now - entry.stat().st_mtime > STAGING_RETENTION_SECONDS:
                         shutil.rmtree(entry, ignore_errors=True)
@@ -218,7 +253,7 @@ class JobStore:
                     if not held or self.runner_present(entry):
                         continue
                     if self.expired(entry, now):
-                        tombstone = self.directory / f"{DELETING_PREFIX}{entry.name}"
+                        tombstone = self.directory / f"{DELETING_PREFIX}{job_id}"
                         os.rename(entry, tombstone)
                 if tombstone is not None:
                     shutil.rmtree(tombstone, ignore_errors=True)
@@ -237,36 +272,41 @@ class JobStore:
 
     # Runner side
 
-    def claim(self, folder):
+    async def claim(self, folder):
         """Take the job's request for this runner, or None when the job must not run. Hold the runner lock."""
-        with self.state_lock(folder):
+        async with self.runner_file_lock(folder / "state.lock"):
             record = self.read(folder / "job.json")
             if record is None:
                 return None  # removed while this runner waited
             if self.read(folder / "outcome.json") is not None:
                 (folder / "request.json").unlink(missing_ok=True)
                 return None  # cancelled, or judged lost, before the runner started
-            if (folder / "cancel.requested").exists():
-                self.finish(folder, job_outcome("cancelled", time.time(), error=CANCELLED))
+            now = time.time()
+            if not valid_job_record(record):
+                self.finish(folder, job_outcome("failed", now, error=UNREADABLE))
                 return None
-            if (valid_job_record(record) and record["state"] == "queued"
-                    and time.time() - record["created_at"] >= JOB_START_GRACE_SECONDS):
-                # A reader would already report this job lost; a runner that starts this late must not run it.
-                self.finish(folder, job_outcome("lost", time.time(), error=LOST_JOB))
+            # This runner holds runner.lock, but has yet to claim the job.
+            state = job_state(record, None, False, now, cancel_requested=cancel_requested(folder))
+            if state in STOPPED_JOB_ERRORS:
+                self.finish(folder, job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]))
                 return None
-            request = self.read(folder / "request.json")
-            (folder / "request.json").unlink(missing_ok=True)
-            if not valid_job_record(record) or not isinstance(request, dict):
+            try:
+                request = self.read(folder / "request.json")
+            except BridgeError:
+                request = None
+            if not isinstance(request, dict):
                 self.finish(folder, job_outcome("failed", time.time(), error=UNREADABLE))
                 return None
+            (folder / "request.json").unlink(missing_ok=True)
             # The PID is recorded for diagnosis only; nothing signals it.
             self.write(folder / "job.json", {**record, "state": "running", "pid": os.getpid(),
                                              "started_at": time.time()})
             return request
 
-    def record_outcome(self, folder, outcome):
-        with self.state_lock(folder):
-            self.finish(folder, outcome)
+    async def record_outcome(self, folder, outcome, *, retry=True):
+        async with self.runner_file_lock(folder / "state.lock", retry=retry) as acquired:
+            if acquired:
+                self.finish(folder, outcome)
 
 
 def spawn_runner(job_id):
@@ -281,7 +321,7 @@ def spawn_runner(job_id):
 
 async def watch_for_cancel(folder, task):
     """Cancel the consultation task once the job's cancel marker appears."""
-    while not (folder / "cancel.requested").exists():
+    while not cancel_requested(folder):
         await asyncio.sleep(CANCEL_POLL_SECONDS)
     task.cancel()
 
@@ -293,8 +333,8 @@ async def run_job(store, job_id, consult):
     """
     try:
         folder = store.folder(job_id)
-        with store.runner_lock(folder):
-            request = store.claim(folder)
+        async with store.runner_file_lock(folder / "runner.lock"):
+            request = await store.claim(folder)
             if request is not None:
                 await consult_and_record(store, folder, request, consult)
     except (BridgeError, OSError):
@@ -313,12 +353,15 @@ async def consult_and_record(store, folder, request, consult):
         outcome = job_outcome("failed", time.time(), error=str(exc))
     except (asyncio.CancelledError, KeyboardInterrupt):
         # Cancelling consult() has already stopped the peer's guard and removed a pinned checkout.
-        store.record_outcome(folder, job_outcome("cancelled", time.time(), error=CANCELLED))
-        if watcher.done() and not watcher.cancelled():
+        marked = (not asyncio.current_task().cancelling()
+                  and watcher.done() and not watcher.cancelled() and watcher.exception() is None)
+        # A signalled runner must exit even if another process holds the state lock.
+        await store.record_outcome(folder, job_outcome("cancelled", time.time(), error=CANCELLED), retry=marked)
+        if marked:
             return  # cancelled through the marker: the job ends normally
         raise
     except Exception:
         outcome = job_outcome("failed", time.time(), error=UNEXPECTED)
     finally:
         watcher.cancel()
-    store.record_outcome(folder, outcome)
+    await store.record_outcome(folder, outcome)
