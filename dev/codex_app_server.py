@@ -214,7 +214,8 @@ class AppServerSource:
                     threads.append(summary)
         return ThreadListing(threads)
 
-    def read_thread(self, summary, max_messages):
+    def read_thread(self, summary, max_messages, include=None):
+        """include is the file reader's repository check, which the app-server answers for itself."""
         if summary.forked_from_id:
             raise ThreadUnavailable("Forked Codex threads are not supported yet.")
         turns = self.client.request("thread/turns/list", {
@@ -373,7 +374,7 @@ def compare(file_source, app_source):
     compared, unreadable, missing, mismatches = 0, {}, [], []
     for summary in file_source.list_threads(everything).threads:
         try:
-            expected = file_source.read_thread(summary, 3)
+            expected = file_source.read_thread(summary, 3, everything)
         except ThreadUnavailable as exc:
             unreadable[str(exc)] = unreadable.get(str(exc), 0) + 1
             continue

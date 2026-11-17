@@ -561,6 +561,14 @@ class CodexParsingTests(unittest.TestCase):
 class ClaudeParsingTests(unittest.TestCase):
     SUMMARY = t.ThreadSummary("id-1", None, "/repo", 0.0)
 
+    @staticmethod
+    def belongs(cwd):
+        """The requested repository: its main checkout and one worktree."""
+        return cwd in ("/repo", "/repo-worktree")
+
+    def scan(self, records):
+        return t.scan_claude(records, self.belongs)
+
     def test_head_title_and_interactivity(self):
         self.assertEqual(t.claude_head(lines({"type": "summary"}, {"cwd": "/repo", "entrypoint": "cli"})),
                          ("/repo", "cli"))
@@ -580,32 +588,32 @@ class ClaudeParsingTests(unittest.TestCase):
         self.assertIsNone(t.claude_title(lines({"type": "user"})))
 
     @staticmethod
-    def user(text, uuid_="u1"):
-        return {"type": "user", "uuid": uuid_, "message": {"content": text}}
+    def user(text, uuid_="u1", cwd="/repo"):
+        return {"type": "user", "uuid": uuid_, "cwd": cwd, "message": {"content": text}}
 
     @staticmethod
-    def assistant(text, stop_reason, **fields):
-        return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}],
-                                                 "stop_reason": stop_reason}, **fields}
+    def assistant(text, stop_reason, cwd="/repo", **fields):
+        return {"type": "assistant", "cwd": cwd, "message": {"content": [{"type": "text", "text": text}],
+                                                             "stop_reason": stop_reason}, **fields}
 
     def test_turn_states(self):
         cases = [(stop, status) for stop, status in t.CLAUDE_STOP_STATUSES.items()]
         for stop_reason, status in cases:
             with self.subTest(stop_reason=stop_reason):
-                scan = t.scan_claude([self.user("q"), self.assistant("a", stop_reason)])
+                scan = self.scan([self.user("q"), self.assistant("a", stop_reason)])
                 snapshot = t.claude_snapshot(self.SUMMARY, scan, 3)
                 self.assertEqual(snapshot.latest_turn.status, status)
                 self.assertEqual(snapshot.latest_turn.liveness, "unknown" if status == "inProgress" else None)
         for marker in sorted(t.CLAUDE_INTERRUPTION_MARKERS):
-            interrupted = t.scan_claude([self.user("q"), self.user(marker, "u2")])
+            interrupted = self.scan([self.user("q"), self.user(marker, "u2")])
             self.assertEqual(interrupted.latest, t.TurnState("u1", "interrupted"))
         # A person typing text that only starts like the marker asks a new question.
-        typed = t.scan_claude([self.user("q"), self.user("[Request interrupted by user] means what?", "u2")])
+        typed = self.scan([self.user("q"), self.user("[Request interrupted by user] means what?", "u2")])
         self.assertEqual(typed.latest, t.TurnState("u2", "inProgress"))
-        failed = t.scan_claude([self.user("q"), self.assistant("", None, isApiErrorMessage=True)])
+        failed = self.scan([self.user("q"), self.assistant("", None, isApiErrorMessage=True)])
         self.assertEqual(failed.latest, t.TurnState("u1", "failed"))
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not know"):
-            t.claude_snapshot(self.SUMMARY, t.scan_claude([self.user("q"), self.assistant("a", "new_reason")]), 3)
+            t.claude_snapshot(self.SUMMARY, self.scan([self.user("q"), self.assistant("a", "new_reason")]), 3)
 
     def test_tool_results_side_chains_and_meta_entries_are_not_turns(self):
         records = [
@@ -614,9 +622,57 @@ class ClaudeParsingTests(unittest.TestCase):
             {**self.user("side", "u8"), "isSidechain": True}, {**self.user("meta", "u7"), "isMeta": True},
             self.assistant("answer", "end_turn"),
         ]
-        scan = t.scan_claude(records)
+        scan = self.scan(records)
         self.assertEqual(scan.latest, t.TurnState("u1", "completed"))
         self.assertEqual([message.text for message in scan.messages], ["calling", "answer"])
+
+    def test_only_the_current_stay_in_the_repository_counts(self):
+        user, reply = self.user, self.assistant
+
+        def title(text, kind="custom-title", key="customTitle"):
+            return {"type": kind, key: text}
+
+        def without_cwd(record):
+            return {key: value for key, value in record.items() if key != "cwd"}
+
+        cases = (
+            ("never left", [user("q"), reply("a", "end_turn")], t.TurnState("u1", "completed"), ["a"], None, False),
+            ("worktree of the same repository", [user("q"), reply("a", "end_turn"),
+                                                 user("q2", "u2", "/repo-worktree"), reply("b", "end_turn", "/repo")],
+             t.TurnState("u2", "completed"), ["a", "b"], None, False),
+            ("moved in, only a prompt since", [user("q", "u1", "/other"), reply("foreign", "end_turn", "/other"),
+                                               title("Foreign"), user("q2", "u2")],
+             t.TurnState("u2", "inProgress"), [], None, True),
+            ("left and came back", [user("q"), reply("before", "end_turn"), title("Mine"),
+                                    user("q2", "u2", "/other"), reply("foreign", "end_turn", "/other"),
+                                    user("q3", "u3"), reply("after", "end_turn")],
+             t.TurnState("u3", "completed"), ["after"], None, True),
+            ("moved out", [user("q"), reply("here", "end_turn"), user("q2", "u2", "/other")], None, [], None, False),
+            ("cut-off window starts before any directory", [without_cwd(reply("orphan", "end_turn")),
+                                                            user("q"), reply("a", "end_turn")],
+             t.TurnState("u1", "completed"), ["a"], None, False),
+            ("records without a directory inside the stay", [user("q"), without_cwd(reply("a", "end_turn")),
+                                                             title("Generated", "ai-title", "aiTitle"), title("Mine")],
+             t.TurnState("u1", "completed"), ["a"], "Mine", False),
+        )
+        for label, records, latest, texts, expected_title, segment_start in cases:
+            with self.subTest(label):
+                scan = self.scan(records)
+                self.assertEqual((scan.latest, [message.text for message in scan.messages], scan.title,
+                                  scan.segment_start), (latest, texts, expected_title, segment_start))
+        # A known start of the stay ends the search for older messages; without one, only enough messages do.
+        started = self.scan(cases[2][1])
+        self.assertTrue(t.scan_is_enough(started, 3))
+        self.assertFalse(t.scan_is_enough(self.scan(cases[0][1]), 3))
+
+
+class GitOutputTests(unittest.TestCase):
+    def test_git_output_path_removes_only_the_line_end(self):
+        cases = ((b"/r/.git\n", "/r/.git"), (b"/r/.git \n", "/r/.git "), (b"/r/.git\n\n", "/r/.git\n"),
+                 (b"/r/.git", "/r/.git"), (b"\n", None), (b"", None), (b"/r/\xff\n", "/r/\udcff"))
+        for stdout, expected in cases:
+            with self.subTest(stdout=stdout):
+                self.assertEqual(t.git_output_path(stdout), expected)
 
 
 class ResultTests(unittest.TestCase):

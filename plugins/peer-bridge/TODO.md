@@ -45,6 +45,9 @@ update):
       between them; the check cannot tell offline.
 - [ ] Once it replaces the reader, read a fresh clone of the Codex home on each use, never the live home: an app-server
       start deletes other Codex processes' temporary folders.
+- [ ] Returned Codex turns are bound only to the rollout's `session_meta.cwd`. A turn that records its own directory
+      (`turn_context.payload.cwd`) is not checked against the repository; binding turns to it would add `turn_context`
+      to the records ADR 0001 lists, so it needs that ADR changed first.
 
 Reconsider the order if a Codex release breaks the file reader and no parser fix restores it, if Codex Desktop's own
 app-server becomes reachable without starting a second one, or if forked threads must become readable.

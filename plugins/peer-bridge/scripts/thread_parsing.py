@@ -5,6 +5,7 @@ records, lines and file facts it gathered to these functions.
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,8 +25,12 @@ CLAUDE_STOP_STATUSES = {
 }
 # Claude Code records an interruption as a user turn with exactly one of these texts.
 CLAUDE_INTERRUPTION_MARKERS = {"[Request interrupted by user]", "[Request interrupted by user for tool use]"}
+# Claude Code's title records and the field each keeps its title in; a custom title wins over a generated one.
+CLAUDE_TITLE_RECORDS = (("custom-title", "customTitle"), ("ai-title", "aiTitle"))
 # Variables that would point git at another repository than the one a request names.
 GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+# The same answer for a thread of another repository, an unsupported history and no thread at all.
+NOT_IN_REPOSITORY = "No readable thread with that ID or name belongs to this repository."
 
 
 class ThreadUnavailable(Exception):
@@ -83,6 +88,11 @@ class Scan:
     messages: list[AgentMessage]
     completions: dict = field(default_factory=dict)
     """Codex only: each completed turn's recorded final agent message."""
+    title: str | None = None
+    """Claude only: the session's title, taken only from the records that count."""
+    segment_start: bool = False
+    """Claude only: the records include where the session entered the requested repository, so older records cannot
+    count and a larger window cannot add any."""
 
 
 def parse_line(line):
@@ -108,7 +118,7 @@ def complete_records(data, from_start):
 
 
 def scan_is_enough(scan, max_messages):
-    return scan.latest is not None and len(scan.messages) >= max_messages
+    return scan.latest is not None and (len(scan.messages) >= max_messages or scan.segment_start)
 
 
 def text_of(blocks, block_type):
@@ -242,8 +252,18 @@ def is_interactive_claude_session(entrypoint):
     return isinstance(entrypoint, str) and bool(entrypoint) and not entrypoint.startswith("sdk")
 
 
+def keep_title(titles, entry):
+    for kind, key in CLAUDE_TITLE_RECORDS:
+        if entry.get("type") == kind and isinstance(entry.get(key), str):
+            titles[kind] = entry[key]
+
+
+def chosen_title(titles):
+    return titles.get("custom-title") or titles.get("ai-title")
+
+
 def claude_title(lines):
-    """Return the session's custom title, else its generated title, else None."""
+    """Return the session's custom title, else its generated title, else None, for the listing."""
     titles = {}
     for line in lines:
         if b'"custom-title"' not in line and b'"ai-title"' not in line:
@@ -253,15 +273,32 @@ def claude_title(lines):
         except (ValueError, RecursionError):
             continue
         if isinstance(entry, dict):
-            for kind, key in (("custom-title", "customTitle"), ("ai-title", "aiTitle")):
-                if entry.get("type") == kind and isinstance(entry.get(key), str):
-                    titles[kind] = entry[key]
-    return titles.get("custom-title") or titles.get("ai-title")
+            keep_title(titles, entry)
+    return chosen_title(titles)
 
 
-def scan_claude(records):
-    latest, messages, turn_id = None, [], None
+def scan_claude(records, belongs):
+    """Find the latest turn, agent messages and title in the session's current stay in the requested repository.
+
+    A record that names a working directory sets where the following records are; belongs says whether a directory is
+    in the requested repository, worktrees included. A move outside it drops everything found so far, also when the
+    session comes back later, and records before the first one that names a directory are not counted: at a window
+    cut from the file's end, nothing says where they were.
+    """
+    latest, messages, turn_id, titles = None, [], None, {}
+    inside, segment_start = None, False
     for entry in records:
+        cwd = entry.get("cwd")
+        if isinstance(cwd, str):
+            here = belongs(cwd)
+            if not here:
+                latest, messages, turn_id, titles = None, [], None, {}
+            elif inside is False:
+                segment_start = True
+            inside = here
+        if not inside:
+            continue
+        keep_title(titles, entry)
         if entry.get("isSidechain") or entry.get("isMeta"):
             continue
         message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
@@ -284,7 +321,7 @@ def scan_claude(records):
             if text.strip():
                 messages.append(AgentMessage(turn_id, text))
             latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(message.get("stop_reason")))
-    return Scan(latest, messages)
+    return Scan(latest, messages, title=chosen_title(titles), segment_start=segment_start)
 
 
 def claude_snapshot(summary, scan, max_messages):
@@ -294,6 +331,17 @@ def claude_snapshot(summary, scan, max_messages):
     if latest.status == "inProgress":
         latest = TurnState(latest.turn_id, latest.status, "unknown")
     return ThreadSnapshot(summary, latest, keep_recent(scan.messages, max_messages))
+
+
+# Git
+
+
+def git_output_path(stdout):
+    """The path git printed on one line, as bytes: only the line's own end is removed, so a path that ends in spaces
+    stays itself. None when git printed nothing."""
+    if stdout.endswith(b"\n"):
+        stdout = stdout[:-1]
+    return os.fsdecode(stdout) if stdout else None
 
 
 # Results
@@ -325,7 +373,7 @@ def match_thread(threads, thread):
     matches = [summary for summary in threads if thread in (summary.id, summary.name)]
     if not matches:
         # The same answer for an unsupported history, which may belong to another repository, as for no thread.
-        raise ThreadUnavailable("No readable thread with that ID or name belongs to this repository.")
+        raise ThreadUnavailable(NOT_IN_REPOSITORY)
     if len(matches) > 1:
         raise ThreadUnavailable("Several threads have that name. Pass the thread's ID instead.")
     return matches[0]
