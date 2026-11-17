@@ -90,11 +90,13 @@ Desktop can be followed up without touching it.
 
 The listing only picks a thread. The read opens the thread's file once and decides again, from the same bytes it
 returns messages from, whether the thread is in this repository: for Codex from the rollout's `session_meta` (main
-thread, working directory, not forked), for Claude Code from the latest working directory the session records, searched
-back up to 32 MB and refused when none is found. A file that changes while it is read is read once more, then refused.
-A Claude Code session counts only from where it last entered this repository, worktrees included: its replies and
-title from before that, or from a stay in another repository, are left out, so a session that has just moved in shows
-an unfinished turn and no messages.
+thread, working directory, not forked), for Claude Code from the latest working directory the main session records.
+Claude sidechains never set that directory. Each read attempt checks the recorded directories against the repository
+resolved at the start of the request. A file that changes while it is read is read once more, then refused.
+The Claude reader searches up to 32 MiB of recent history and refuses a session whose main working directory is
+missing there. Only the current stay in the repository contributes replies and a title, including the title shown
+in the listing and used for exact-name selection. A session that has just moved in shows an unfinished turn and
+no messages.
 
 The bridge never writes into the other app's sessions. To hand work to an existing session, an agent puts the handoff
 in its own reply, and that session reads it with `read_codex_thread` or `read_claude_thread`. Neither agent may reach

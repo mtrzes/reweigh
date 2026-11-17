@@ -569,7 +569,7 @@ class ClaudeParsingTests(unittest.TestCase):
     def scan(self, records):
         return t.scan_claude(records, self.belongs)
 
-    def test_head_title_and_interactivity(self):
+    def test_session_directories_and_interactivity(self):
         self.assertEqual(t.claude_head(lines({"type": "summary"}, {"cwd": "/repo", "entrypoint": "cli"})),
                          ("/repo", "cli"))
         self.assertEqual(t.claude_head([b"broken\n", *lines({"cwd": "/repo"})]), ("/repo", None))
@@ -582,10 +582,6 @@ class ClaudeParsingTests(unittest.TestCase):
         for entrypoint, expected in (("cli", True), ("", False), ("sdk-cli", False), (None, False), (3, False)):
             with self.subTest(entrypoint=entrypoint):
                 self.assertEqual(t.is_interactive_claude_session(entrypoint), expected)
-        titles = lines({"type": "ai-title", "aiTitle": "Generated"}, {"type": "custom-title", "customTitle": "Mine"})
-        self.assertEqual(t.claude_title(titles), "Mine")
-        self.assertEqual(t.claude_title(titles[:1]), "Generated")
-        self.assertIsNone(t.claude_title(lines({"type": "user"})))
 
     @staticmethod
     def user(text, uuid_="u1", cwd="/repo"):
@@ -625,6 +621,15 @@ class ClaudeParsingTests(unittest.TestCase):
         scan = self.scan(records)
         self.assertEqual(scan.latest, t.TurnState("u1", "completed"))
         self.assertEqual([message.text for message in scan.messages], ["calling", "answer"])
+
+    def test_sidechains_cannot_change_main_session_ownership(self):
+        for main, side, expected in (("/other", "/repo", []), ("/repo", "/other", ["answer"])):
+            with self.subTest(main=main):
+                assistant = self.assistant("answer", "end_turn")
+                del assistant["cwd"]
+                records = [self.user("q", cwd=main), {**self.user("side", cwd=side), "isSidechain": True}, assistant]
+                self.assertEqual((t.claude_last_cwd(records), [m.text for m in self.scan(records).messages]),
+                                 (main, expected))
 
     def test_only_the_current_stay_in_the_repository_counts(self):
         user, reply = self.user, self.assistant

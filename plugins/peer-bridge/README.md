@@ -208,8 +208,8 @@ which no consultation can continue:
 A thread is readable only when its recorded working directory belongs to the same git repository as
 `working_directory`, worktrees included; a thread whose worktree has since been deleted is not. The read checks this
 again on the same open file it reads the messages from, and refuses a file that changes while it is read, after one
-more try. A Claude Code session that moved between repositories returns only the replies and title recorded since it
-last entered this one; a session whose latest working directory is not named within its last 32 MB is refused. Only
+more try. For Claude Code, replies, listed titles and exact-name selection use the main session's current stay in
+the repository. A session whose latest main-session working directory is missing from its last 32 MiB is refused. Only
 agent messages come back, never prompts, tool calls, tool output or reasoning, up to 24,000 characters. `latest_turn`
 gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut
 off at its output limit counts as `completed` and a refusal as `failed`. For an unfinished turn, `liveness` is `abandoned` when

@@ -308,6 +308,20 @@ class ReaderTests(unittest.TestCase):
                 path, {**claude_prompt(), **elsewhere}, {**claude_reply("Elsewhere."), **elsewhere})))
             return lambda: self.read("claude", thread), "^No readable thread with that ID"
 
+        def cwd_symlink_retargeted_after_selection(stack, codex, claude):
+            linked = claude.parent / "linked"
+            linked.parent.mkdir()
+            linked.symlink_to(self.worktree)
+            thread, path = claude_session(claude, linked, claude_prompt(), claude_reply("Here."))
+
+            def retarget():
+                linked.unlink()
+                linked.symlink_to(self.other)
+                append(path, {**claude_reply("Elsewhere."), "cwd": str(linked)})
+
+            stack.enter_context(at_selection(retarget))
+            return lambda: self.read("claude", thread), "^No readable thread with that ID"
+
         def codex_replaced_after_selection(stack, codex, claude):
             thread, path = codex_thread(codex, self.project, codex_turn("t1", "Here."))
             _, foreign = codex_thread(codex.parent / "elsewhere-codex", self.other, codex_turn("t1", "Elsewhere."))
@@ -334,11 +348,15 @@ class ReaderTests(unittest.TestCase):
             thread, path = claude_session(claude, self.other, claude_prompt(), claude_reply("Started elsewhere."),
                                           {"type": "custom-title", "customTitle": "Elsewhere title"}, project="other")
             append(path, {**claude_prompt(), "cwd": str(self.project)})
+            listing = self.threads("claude")["threads"]
+            self.assertEqual([(entry["id"], entry["name"]) for entry in listing], [(thread, None)])
+            with self.assertRaisesRegex(ThreadUnavailable, "^No readable thread with that ID"):
+                self.read("claude", "Elsewhere title")
             return (lambda: self.read("claude", thread),
                     ([], {"status": "inProgress", "finished": False, "liveness": "unknown"}, None))
 
-        rows = (claude_append_after_selection, codex_replaced_after_selection, move_hidden_beyond_the_first_window,
-                directory_beyond_the_cap, moved_in_after_a_foreign_answer)
+        rows = (claude_append_after_selection, cwd_symlink_retargeted_after_selection, codex_replaced_after_selection,
+                move_hidden_beyond_the_first_window, directory_beyond_the_cap, moved_in_after_a_foreign_answer)
         for row in rows:
             homes = self.root / row.__name__
             codex, claude = homes / "codex-home", homes / "claude-home"

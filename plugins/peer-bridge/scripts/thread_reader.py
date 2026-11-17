@@ -19,6 +19,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import cache
 from itertools import islice
 from pathlib import Path
 from typing import Callable, Protocol
@@ -26,7 +27,7 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from thread_parsing import (
     GIT_LOCATION_ENV, NOT_IN_REPOSITORY, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, claude_head,
-    claude_last_cwd, claude_snapshot, claude_title, codex_main_thread, codex_snapshot, complete_records,
+    claude_last_cwd, claude_snapshot, codex_main_thread, codex_snapshot, complete_records,
     git_output_path, is_interactive_claude_session, is_supported_history, listing_result, match_thread, newest_first,
     parse_line, parse_session_index, rollout_format, rollout_identifier, scan_claude, scan_codex, scan_is_enough,
     snapshot_result, UUID_PATTERN,
@@ -267,15 +268,19 @@ def grown(window):
     return min(window * 2, MAX_TAIL_BYTES)
 
 
-def scan_tail(history, max_messages, scan):
-    """Grow the tail window until scan finds a turn and enough messages, or the whole file or the cap is read."""
+def scan_tail(history, scan, enough):
+    """Grow the tail window until the scan has enough, or reaches the whole file or the cap."""
     window = INITIAL_TAIL_BYTES
     while True:
         records, whole = history.tail(window)
         result = scan(records)
-        if whole or window >= MAX_TAIL_BYTES or scan_is_enough(result, max_messages):
-            break
+        if whole or window >= MAX_TAIL_BYTES or enough(result):
+            return result
         window = grown(window)
+
+
+def scan_turns(history, max_messages, scan):
+    result = scan_tail(history, scan, lambda result: scan_is_enough(result, max_messages))
     if result.latest is None:
         raise ThreadUnavailable("No turn was found in the thread's recent history.")
     return result
@@ -358,7 +363,7 @@ class CodexFilesSource:
             if forked_from_id:
                 raise ThreadUnavailable("Forked Codex threads are not supported yet.")
             current = replace(summary, cwd=cwd, source_kind=source, forked_from_id=forked_from_id)
-            return codex_snapshot(current, scan_tail(history, max_messages, scan_codex), max_messages)
+            return codex_snapshot(current, scan_turns(history, max_messages, scan_codex), max_messages)
 
         return read_unchanged(lambda: self.rollout(summary.id), read)
 
@@ -415,7 +420,8 @@ class ClaudeSessionsSource:
                     cwd, entrypoint = self.current_cwd(history)
                     if cwd is None or not include(cwd):
                         continue
-                    name = claude_title(history.lines(MAX_INDEX_LINE_BYTES))
+                    name = scan_tail(history, lambda records: scan_claude(records, include, title_only=True),
+                                     lambda result: result.segment_start).title
                 threads.append(ThreadSummary(id=path.stem, name=name, cwd=cwd, recency_at=opened.st_mtime,
                                              source_kind=entrypoint))
             except (OSError, ThreadUnavailable, HistoryChanged):
@@ -424,10 +430,11 @@ class ClaudeSessionsSource:
 
     def read_thread(self, summary, max_messages, include):
         def read(history):
+            belongs = cache(include)
             cwd, entrypoint = self.current_cwd(history)
-            if cwd is None or not include(cwd):
+            if cwd is None or not belongs(cwd):
                 raise ThreadUnavailable(NOT_IN_REPOSITORY)
-            scan = scan_tail(history, max_messages, lambda records: scan_claude(records, include))
+            scan = scan_turns(history, max_messages, lambda records: scan_claude(records, belongs))
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
             current = replace(summary, cwd=cwd, name=scan.title, source_kind=entrypoint)
             return claude_snapshot(current, scan, max_messages)
@@ -462,23 +469,18 @@ class ThreadReader:
         repository = self.common_dir(working_directory)
         if repository is None:
             raise ThreadUnavailable("working_directory must be inside a git repository.")
-        decided = {}
-
         def include(cwd):
-            if cwd not in decided:
-                # Only an absolute path: an empty or relative one would resolve against the server's own directory.
-                decided[cwd] = (Path(cwd).is_absolute() and Path(cwd).is_dir()
-                                and self.common_dir(cwd) == repository)
-            return decided[cwd]
+            # Only an absolute path: an empty or relative one would resolve against the server's own directory.
+            return Path(cwd).is_absolute() and Path(cwd).is_dir() and self.common_dir(cwd) == repository
 
         return include
 
     def list(self, working_directory, limit):
-        listing = self.source.list_threads(self.same_repository(working_directory))
+        listing = self.source.list_threads(cache(self.same_repository(working_directory)))
         return listing_result(self.source.provider, newest_first(listing), limit)
 
     def read(self, working_directory, thread, max_messages):
         include = self.same_repository(working_directory)
         # The listing only picks the thread; the source decides again from the bytes it reads the messages from.
-        summary = match_thread(newest_first(self.source.list_threads(include)).threads, thread)
+        summary = match_thread(newest_first(self.source.list_threads(cache(include))).threads, thread)
         return snapshot_result(self.source.provider, self.source.read_thread(summary, max_messages, include))

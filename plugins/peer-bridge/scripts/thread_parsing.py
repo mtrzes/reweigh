@@ -225,6 +225,10 @@ def codex_snapshot(summary, scan, max_messages):
 # Claude Code
 
 
+def is_main_claude_record(entry):
+    return entry.get("isSidechain", False) is False
+
+
 def claude_head(lines):
     """Return the session's first recorded working directory and its entrypoint, None when it records none."""
     for line in lines:
@@ -232,7 +236,7 @@ def claude_head(lines):
             entry = json.loads(line)
         except (ValueError, RecursionError):
             continue
-        if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+        if isinstance(entry, dict) and is_main_claude_record(entry) and isinstance(entry.get("cwd"), str):
             entrypoint = entry.get("entrypoint")
             return entry["cwd"], entrypoint if isinstance(entrypoint, str) and entrypoint else None
     return None, None
@@ -241,7 +245,7 @@ def claude_head(lines):
 def claude_last_cwd(records):
     """The working directory the session's most recent records name: a session can move after it starts."""
     for entry in reversed(records):
-        if isinstance(entry.get("cwd"), str):
+        if is_main_claude_record(entry) and isinstance(entry.get("cwd"), str):
             return entry["cwd"]
     return None
 
@@ -262,22 +266,7 @@ def chosen_title(titles):
     return titles.get("custom-title") or titles.get("ai-title")
 
 
-def claude_title(lines):
-    """Return the session's custom title, else its generated title, else None, for the listing."""
-    titles = {}
-    for line in lines:
-        if b'"custom-title"' not in line and b'"ai-title"' not in line:
-            continue
-        try:
-            entry = json.loads(line)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(entry, dict):
-            keep_title(titles, entry)
-    return chosen_title(titles)
-
-
-def scan_claude(records, belongs):
+def scan_claude(records, belongs, *, title_only=False):
     """Find the latest turn, agent messages and title in the session's current stay in the requested repository.
 
     A record that names a working directory sets where the following records are; belongs says whether a directory is
@@ -288,6 +277,8 @@ def scan_claude(records, belongs):
     latest, messages, turn_id, titles = None, [], None, {}
     inside, segment_start = None, False
     for entry in records:
+        if not is_main_claude_record(entry):
+            continue
         cwd = entry.get("cwd")
         if isinstance(cwd, str):
             here = belongs(cwd)
@@ -299,7 +290,7 @@ def scan_claude(records, belongs):
         if not inside:
             continue
         keep_title(titles, entry)
-        if entry.get("isSidechain") or entry.get("isMeta"):
+        if title_only or entry.get("isMeta"):
             continue
         message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
         content = message.get("content")
