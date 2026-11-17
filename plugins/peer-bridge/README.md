@@ -149,7 +149,7 @@ consultation in a detached runner, and return at once:
 
 `get_consultation` takes the `job_id` and an optional `wait_seconds`, at most 60, and returns the job's `state`:
 `queued`, `running`, `cancelling` while a cancelled job's runner stops, `completed`, `failed`, `cancelled`, or `lost`
-when its runner stopped without a result or never started within two minutes. A completed job adds the
+when its runner stopped without a result or did not claim it within two minutes. A completed job adds the
 `conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, and `model` and `reasoning_effort` when
 chosen; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops a running job, its
 peer and the peer's child processes, and removes a pinned checkout. Each server sees only the jobs of the peers it

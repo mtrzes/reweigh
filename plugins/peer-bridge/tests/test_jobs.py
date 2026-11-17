@@ -261,8 +261,17 @@ class JobTests(BridgeTestCase):
         record = json.loads((self.folder(job_id) / "job.json").read_text(encoding="utf-8"))
         record["created_at"] -= consultation.JOB_START_GRACE_SECONDS + 1
         (self.folder(job_id) / "job.json").write_text(json.dumps(record), encoding="utf-8")
+        (self.folder(job_id) / "cancel.requested").touch()  # interrupted cancel
         await jobs.run_job(self.client.jobs, job_id, self.never)
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
+
+    async def test_cancelling_an_overdue_queued_job_stores_it_as_lost(self):
+        job_id = await self.queued(prompt="PRIVATE QUESTION")
+        later = time.time() + consultation.JOB_START_GRACE_SECONDS + 1
+        cancelled = self.client.jobs.cancel(job_id, CLAUDE, now=later)
+        self.assertEqual((cancelled["state"], cancelled["error"]), ("lost", consultation.LOST_JOB))
+        self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
+        self.assertFalse((self.folder(job_id) / "request.json").exists())
 
     async def test_a_job_reads_cancelling_until_its_runner_stops(self):
         job_id = await self.queued()

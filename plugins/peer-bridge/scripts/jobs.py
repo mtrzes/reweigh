@@ -26,8 +26,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from consultation import (
-    JOB_RETENTION_SECONDS, JOB_START_GRACE_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state,
-    job_view, new_job_record, valid_job_outcome, valid_job_record, validate_session_id,
+    JOB_RETENTION_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state, job_view, new_job_record,
+    valid_job_outcome, valid_job_record, validate_session_id,
 )
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 
@@ -35,6 +35,7 @@ UNKNOWN_JOB = "No consultation job with that ID."
 UNREADABLE = "The consultation job's files are unreadable."
 CANCELLED = "The consultation was cancelled."
 UNEXPECTED = "The consultation stopped on an unexpected error."
+STOPPED_JOB_ERRORS = {"lost": LOST_JOB, "cancelled": CANCELLED}
 CANCEL_POLL_SECONDS = 0.2
 # A job folder is built under STAGING_PREFIX and renamed into place whole; an expired one is renamed under
 # DELETING_PREFIX before it is removed, so an interrupted removal is finished later, whatever is left in it.
@@ -164,10 +165,10 @@ class JobStore:
                 now = time.time() if now is None else now
                 state = job_state(record, None, self.runner_present(folder), now,
                                   cancel_requested=(folder / "cancel.requested").exists())
-                if state != "lost":
+                if state not in STOPPED_JOB_ERRORS:
                     return job_view(job_id, record, None, state)
                 # Stored, so a runner that starts later finds it and does not run.
-                outcome = job_outcome("lost", now, error=LOST_JOB)
+                outcome = job_outcome(state, now, error=STOPPED_JOB_ERRORS[state])
                 self.finish(folder, outcome)
             else:
                 # A crash may have left the request behind a final outcome; it is not kept.
@@ -182,16 +183,14 @@ class JobStore:
             if outcome is not None:
                 (folder / "request.json").unlink(missing_ok=True)
                 return job_view(job_id, record, outcome, outcome["state"])
-            # The runner checks for this marker before it consults and watches for it while it does.
-            self.mark(folder / "cancel.requested")
-            if self.runner_present(folder):
-                return job_view(job_id, record, None, "cancelling")
             now = time.time() if now is None else now
-            if record["state"] == "running":
-                # Its runner died: the peer's guard is still stopping the peer, so this is no clean cancellation.
-                outcome = job_outcome("lost", now, error=LOST_JOB)
-            else:
-                outcome = job_outcome("cancelled", now, error=CANCELLED)
+            state = job_state(record, None, self.runner_present(folder), now, cancel_requested=True)
+            if state != "lost":
+                # The runner checks this marker before it consults and watches for it while it does.
+                self.mark(folder / "cancel.requested")
+            if state == "cancelling":
+                return job_view(job_id, record, None, state)
+            outcome = job_outcome(state, now, error=STOPPED_JOB_ERRORS[state])
             self.finish(folder, outcome)
             return job_view(job_id, record, outcome, outcome["state"])
 
@@ -246,19 +245,20 @@ class JobStore:
             if self.read(folder / "outcome.json") is not None:
                 (folder / "request.json").unlink(missing_ok=True)
                 return None  # cancelled, or judged lost, before the runner started
-            if (folder / "cancel.requested").exists():
-                self.finish(folder, job_outcome("cancelled", time.time(), error=CANCELLED))
+            now = time.time()
+            if not valid_job_record(record):
+                self.finish(folder, job_outcome("failed", now, error=UNREADABLE))
                 return None
-            if (valid_job_record(record) and record["state"] == "queued"
-                    and time.time() - record["created_at"] >= JOB_START_GRACE_SECONDS):
-                # A reader would already report this job lost; a runner that starts this late must not run it.
-                self.finish(folder, job_outcome("lost", time.time(), error=LOST_JOB))
+            # This runner holds runner.lock, but has yet to claim the job.
+            state = job_state(record, None, False, now, cancel_requested=(folder / "cancel.requested").exists())
+            if state in STOPPED_JOB_ERRORS:
+                self.finish(folder, job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]))
                 return None
             request = self.read(folder / "request.json")
-            (folder / "request.json").unlink(missing_ok=True)
-            if not valid_job_record(record) or not isinstance(request, dict):
+            if not isinstance(request, dict):
                 self.finish(folder, job_outcome("failed", time.time(), error=UNREADABLE))
                 return None
+            (folder / "request.json").unlink(missing_ok=True)
             # The PID is recorded for diagnosis only; nothing signals it.
             self.write(folder / "job.json", {**record, "state": "running", "pid": os.getpid(),
                                              "started_at": time.time()})

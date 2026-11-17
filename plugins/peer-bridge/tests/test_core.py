@@ -394,16 +394,20 @@ class JobRuleTests(unittest.TestCase):
         done = c.job_outcome("completed", 1010.0, result={"reply": "hi"})
         running = self.RECORD | {"state": "running", "pid": 5}
         cases = (
-            (self.RECORD, done, False, 5000.0, "completed"),
-            (self.RECORD, None, True, 5000.0, "running"),
-            (self.RECORD, None, True, 5000.0, "cancelling", True),
-            (self.RECORD, None, False, 1000.0 + grace - 1, "queued"),
-            (self.RECORD, None, False, 1000.0 + grace + 1, "lost"),
-            (running, None, False, 1001.0, "lost"),
+            (self.RECORD, done, False, 5000.0, True, "completed"),
+            (self.RECORD, None, True, 1001.0, False, "running"),
+            (self.RECORD, None, True, 1001.0, True, "cancelling"),
+            (running, None, True, 5000.0, True, "cancelling"),
+            (self.RECORD, None, False, 1000.0 + grace - 1, False, "queued"),
+            (self.RECORD, None, False, 1000.0 + grace - 1, True, "cancelled"),
+            (self.RECORD, None, False, 1000.0 + grace, False, "lost"),
+            (self.RECORD, None, False, 1000.0 + grace, True, "lost"),
+            (self.RECORD, None, True, 1000.0 + grace, True, "lost"),
+            (running, None, False, 1001.0, True, "lost"),
         )
-        for record, outcome, alive, now, expected, *cancel in cases:
+        for record, outcome, alive, now, cancel, expected in cases:
             with self.subTest(record=record, outcome=outcome, alive=alive, now=now, cancel=cancel):
-                self.assertEqual(c.job_state(record, outcome, alive, now, *cancel), expected)
+                self.assertEqual(c.job_state(record, outcome, alive, now, cancel), expected)
 
     def test_job_view(self):
         done = c.job_outcome("completed", 1.0, result={"conversation_id": "conv", "reply": "hi", "provider": "codex"})

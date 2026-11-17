@@ -613,15 +613,17 @@ def job_outcome(state, now, result=None, error=None):
 
 
 def job_state(record, outcome, runner_present, now, cancel_requested=False):
-    """A job's state from its files: a stored outcome decides; else a present runner means running, or cancelling
-    once a cancel was requested; a job whose runner has not started yet is queued for a grace period; anything else
-    lost its runner."""
+    """Keep a stored outcome. A queued job must be claimed within the grace period. Before then, a cancel
+    ends it immediately if no runner holds it. A claimed job is lost if its runner is gone."""
     if outcome is not None:
         return outcome["state"]
+    queued = record["state"] == "queued"
+    if queued and now - record["created_at"] >= JOB_START_GRACE_SECONDS:
+        return "lost"
     if runner_present:
         return "cancelling" if cancel_requested else "running"
-    if record["state"] == "queued" and now - record["created_at"] < JOB_START_GRACE_SECONDS:
-        return "queued"
+    if queued:
+        return "cancelled" if cancel_requested else "queued"
     return "lost"
 
 
