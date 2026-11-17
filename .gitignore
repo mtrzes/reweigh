@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 .claude/worktrees/
 .claude/settings.local.json
+# The backlog is kept locally only.
+plugins/peer-bridge/TODO.md
