@@ -124,7 +124,13 @@ class JobStore:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     @contextmanager
-    def state_lock(self, folder):
+    def state_lock(self, folder, wait=False):
+        """Hold the job's short state lock. A caller gives up after a bounded wait; cleanup that must finish, such as
+        cancelling a job nobody else will learn of, passes wait=True and waits as long as the holder needs."""
+        if wait:
+            with self.flock(folder / "state.lock", blocking=True):
+                yield
+            return
         deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
         while True:
             with self.flock(folder / "state.lock", blocking=False) as acquired:
@@ -206,10 +212,10 @@ class JobStore:
                 (folder / "request.json").unlink(missing_ok=True)
             return job_view(job_id, record, outcome, outcome["state"])
 
-    def cancel(self, job_id, providers, now=None):
+    def cancel(self, job_id, providers, now=None, wait=False):
         """Stop a running job, or mark one cancelled that no runner holds."""
         folder = self.folder(job_id)
-        with self.state_lock(folder):
+        with self.state_lock(folder, wait=wait):
             record, outcome = self.load(folder, providers)
             if outcome is not None:
                 (folder / "request.json").unlink(missing_ok=True)

@@ -26,6 +26,15 @@ Later hardening, from the 1.0.0 reviews:
 - [ ] Linux: require a local state directory (flock is per process on NFS) and name a missing Codex sandbox.
 - [ ] Make seed thread enumeration cancellable. Its repository checks run `git` through `subprocess.run` in a worker thread that cancellation cannot stop.
 
+Thread reader (opt-in), from the review of its P2 fixes:
+
+- [ ] A read returns `name: null` when the title sits before the scanned window; take it from a title-only pass.
+- [ ] A session that never moved never marks the start of its stay, so listings rescan it up to the 32 MiB cap.
+- [ ] Refuse malformed Claude content blocks with a fixed reason instead of skipping them or failing on a join.
+- [ ] Walk history folders with `os.scandir` and skip one that vanishes mid-listing (`rglob` raises).
+- [ ] Cap distinct `git rev-parse` probes per read; decide whether the Claude leaf comes from `last-prompt.leafUuid`
+      and whether a rewound stay elsewhere should still end the current one.
+
 Parity tool (`dev/`), from the review of its P2 fixes:
 
 - [ ] Bound `pages()` by page count or an overall deadline, and give `compare()` and the clone lock an overall budget.

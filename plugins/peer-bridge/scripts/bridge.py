@@ -32,7 +32,7 @@ from consultation import (
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
 )
-from jobs import UNKNOWN_JOB, JobStore, run_job, spawn_runner
+from jobs import LOCK_BUSY, UNKNOWN_JOB, JobStore, run_job, spawn_runner
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
@@ -613,13 +613,19 @@ class Bridge:
             try:
                 self.spawn(job_id)
             except OSError as exc:
-                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}))
+                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
                 raise BridgeError("Cannot start the consultation runner.") from exc
             try:
-                return await asyncio.to_thread(self.jobs.view, job_id, {provider})
+                try:
+                    return await asyncio.to_thread(self.jobs.view, job_id, {provider})
+                except BridgeError as exc:
+                    if str(exc) != LOCK_BUSY:
+                        raise
+                    # The runner is busy with the job already: the caller still needs its ID.
+                    return {"job_id": job_id, "provider": provider, "state": "queued"}
             except asyncio.CancelledError:
                 # The caller will never learn this job's ID, so it is cancelled rather than left to run.
-                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}))
+                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
                 raise
 
     async def discard_created(self, creating, provider):
@@ -628,7 +634,7 @@ class Bridge:
             job_id = await creating
         except Exception:
             return
-        await asyncio.to_thread(self.jobs.cancel, job_id, {provider})
+        await asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True)
 
     async def job(self, job_id, providers, wait_seconds=0):
         """Return a job's state and, once finished, its result; wait up to wait_seconds for it to finish."""
