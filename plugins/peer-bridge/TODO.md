@@ -26,6 +26,14 @@ Later hardening, from the 1.0.0 reviews:
 - [ ] Linux: require a local state directory (flock is per process on NFS) and name a missing Codex sandbox.
 - [ ] Make seed thread enumeration cancellable. Its repository checks run `git` through `subprocess.run` in a worker thread that cancellation cannot stop.
 
+Parity tool (`dev/`), from the review of its P2 fixes:
+
+- [ ] Bound `pages()` by page count or an overall deadline, and give `compare()` and the clone lock an overall budget.
+- [ ] Kill an app-server group left by a parity run that was itself killed, before the next run uses the copy.
+- [ ] Confine the bundled executable's real path to the signed ChatGPT.app bundle.
+- [ ] fsync the copy record and reports before their rename, and rebuild an unreadable copy record.
+- [ ] Time out codesign, ps and cp; record a server request that arrives after the 0.25 s shutdown drain.
+
 ## Move the Codex thread reader to Codex's app-server API
 
 `list_codex_threads` and `read_codex_thread` parse Codex's session files (`scripts/thread_reader.py::CodexFilesSource`),

@@ -44,13 +44,17 @@ class AppServerParsingTests(unittest.TestCase):
         app = p.app_server_snapshot(self.SUMMARY, turns, messages, 2)
         self.assertEqual(app.latest_turn, t.TurnState("t2", "completed"))
         self.assertEqual([message.text for message in app.messages], ["Two.", "Final."])
-        self.assertEqual(p.final_message(app), "Final.")
-        same = t.ThreadSnapshot(self.SUMMARY, t.TurnState("t2", "completed", None),
-                                [t.AgentMessage("t1", "One."), t.AgentMessage("t2", " Final.\n")])
+        same = t.ThreadSnapshot(self.SUMMARY, t.TurnState("t2", "completed"), messages["t2"])
         self.assertEqual(p.parity_differences(same, app), [])
+        for sequence in (app.messages[1:], app.messages[::-1],
+                         [t.AgentMessage("t2", "Two.", "commentary"), app.messages[-1]],
+                         [t.AgentMessage("t1", "Two."), app.messages[-1]]):
+            with self.subTest(sequence=sequence):
+                changed = t.ThreadSnapshot(self.SUMMARY, app.latest_turn, sequence)
+                self.assertEqual(p.parity_differences(changed, app), ["messages"])
         other = t.ThreadSnapshot(self.SUMMARY, t.TurnState("t3", "interrupted", "abandoned"),
                                  [t.AgentMessage("t3", "Else.")])
-        self.assertEqual(p.parity_differences(other, app), ["latest_turn", "status", "final_agent_message"])
+        self.assertEqual(p.parity_differences(other, app), ["latest_turn", "status", "messages"])
         for turns_, reason in (([], "No turn"), ([{"id": "t1", "status": "paused"}], "does not know")):
             with self.subTest(turns=turns_), self.assertRaisesRegex(t.ThreadUnavailable, reason):
                 p.app_server_snapshot(self.SUMMARY, turns_, {}, 3)
@@ -88,7 +92,7 @@ class AppServerParsingTests(unittest.TestCase):
         self.assertTrue(p.parity_passed(clean))
         for field, value in (("threads_compared", 0), ("missing", ["id"]), ("mismatches", [{"id": "id", "fields": ["status"]}]),
                              ("thread_data_changes", ["sessions/x.jsonl"]),
-                             ("other_database_changes", ["logs_2.sqlite"]),
+                             ("other_database_changes", ["logs_2.sqlite"]), ("file_unsupported", ["id"]),
                              ("server_requests", ["item/commandExecution/requestApproval"])):
             with self.subTest(field=field):
                 self.assertFalse(p.parity_passed(clean | {field: value}))
@@ -99,7 +103,8 @@ class AppServerParsingTests(unittest.TestCase):
         keys = [p.release_key(version) for version in ordered]
         self.assertEqual(keys, sorted(keys))
         self.assertEqual(len(set(keys)), len(keys))
-        for text in ("0.167.0", "codex-cli 0.167", "codex-cli 0.167.0 (beta)", "", None):
+        for text in ("0.167.0", "codex-cli 0.167", "codex-cli 0.167.0 (beta)", "codex-cli 0.167.0-alpha..1",
+                     "codex-cli 0.167.0-alpha.01", "codex-cli 00.167.0", "", None):
             with self.subTest(text=text):
                 self.assertIsNone(p.release_key(text))
 

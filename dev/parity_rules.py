@@ -3,16 +3,10 @@
 A developer tool, not part of the shipped plugin: see codex_app_server.py and ADR 0001.
 """
 
-import re
-
 from thread_parsing import (
     CODEX_MAIN_SOURCES, FINISHED_STATUSES, AgentMessage, ThreadSnapshot, ThreadSummary, ThreadUnavailable, TurnState,
     keep_recent,
 )
-
-# `codex --version` prints this exact form; anything else is not a version the verdict can order.
-CODEX_VERSION = re.compile(r"codex-cli (\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
-
 
 
 def app_server_summary(thread, archived):
@@ -54,12 +48,6 @@ def app_server_snapshot(summary, turns, messages_by_turn, max_messages):
     return ThreadSnapshot(summary, TurnState(latest.get("id"), latest["status"]), keep_recent(messages, max_messages))
 
 
-def final_message(snapshot):
-    """The latest turn's last agent message, or None."""
-    texts = [message.text for message in snapshot.messages if message.turn_id == snapshot.latest_turn.turn_id]
-    return texts[-1].strip() if texts else None
-
-
 def parity_differences(file_snapshot, app_snapshot):
     """The fields in which the app-server's view of a thread differs from the file reader's."""
     differences = []
@@ -67,17 +55,18 @@ def parity_differences(file_snapshot, app_snapshot):
         differences.append("latest_turn")
     if file_snapshot.latest_turn.status != app_snapshot.latest_turn.status:
         differences.append("status")
-    if final_message(file_snapshot) != final_message(app_snapshot):
-        differences.append("final_agent_message")
+    if file_snapshot.messages != app_snapshot.messages:
+        differences.append("messages")
     return differences
 
 
 def parity_passed(report):
-    """Whether one parity run passed: every thread matched, the copy's files stayed unchanged and the server sent no
-    request. ADR 0001 requires the copy's rollouts and databases to stay unchanged, Codex's log database included."""
+    """Whether one parity run passed: every thread matched, none was left out as unsupported, the copy's files stayed
+    unchanged and the server sent no request. ADR 0001 requires the copy's rollouts and databases to stay unchanged; a
+    database the copy never held, such as Codex's logs, is created by the server and is not a change."""
     # A run that compared no thread proves nothing.
     return report["threads_compared"] > 0 and not (
-        report["missing"] or report["mismatches"] or report["thread_data_changes"]
+        report["missing"] or report["mismatches"] or report.get("file_unsupported") or report["thread_data_changes"]
         or report["other_database_changes"] or report["server_requests"])
 
 
@@ -116,12 +105,29 @@ def parity_verdict(reports):
 
 def release_key(version):
     """An ordering key for `codex --version` output, by semantic-versioning precedence; None for any other text."""
-    match = CODEX_VERSION.fullmatch(version.strip()) if isinstance(version, str) else None
-    if match is None:
+    if not isinstance(version, str):
         return None
-    major, minor, patch, prerelease = match.groups()
-    if prerelease is None:
+    name, _, token = version.strip().partition(" ")
+    core, dash, prerelease = token.partition("-")
+    numbers = core.split(".")
+    if name != "codex-cli" or len(numbers) != 3 or not all(map(version_number, numbers)):
+        return None
+    release = tuple(map(int, numbers))
+    if not dash:
         # A release sorts after every prerelease of the same version.
-        return int(major), int(minor), int(patch), (1,)
-    identifiers = tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in prerelease.split("."))
-    return int(major), int(minor), int(patch), (0, *identifiers)
+        return (*release, (1,))
+    identifiers = []
+    for part in prerelease.split("."):
+        if not part or not all(char.isascii() and (char.isalnum() or char == "-") for char in part):
+            return None
+        if part.isdecimal():
+            if not version_number(part):
+                return None
+            identifiers.append((0, int(part)))
+        else:
+            identifiers.append((1, part))
+    return (*release, (0, *identifiers))
+
+
+def version_number(token):
+    return token.isascii() and token.isdecimal() and (token == "0" or token[0] != "0")

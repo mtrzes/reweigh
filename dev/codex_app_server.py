@@ -15,16 +15,20 @@ home, so this source is never pointed at a live Codex home.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,22 +39,27 @@ from parity_rules import (  # noqa: E402
     app_server_agent_messages, app_server_snapshot, app_server_summary, parity_differences, parity_passed,
     parity_verdict,
 )
-from thread_parsing import ThreadListing, ThreadUnavailable  # noqa: E402
+from thread_parsing import ThreadListing, ThreadUnavailable, rollout_format, rollout_identifier  # noqa: E402
 from thread_reader import CodexFilesSource  # noqa: E402
 
 ALLOWED_REQUESTS = ("initialize", "thread/list", "thread/read", "thread/turns/list", "thread/items/list")
 ALLOWED_NOTIFICATIONS = ("initialized",)
 REQUEST_TIMEOUT_SECONDS = 60
+SHUTDOWN_DRAIN_SECONDS = 0.25
+TERMINATE_GRACE_SECONDS = 0.25
 PAGE_SIZE = 100
 # Files a sandboxed app-server must not change. SQLite rewrites a WAL database's -shm index whenever it is opened, even
-# by a reader, so that file is reported separately, not counted as a change to the database.
+# by a reader, so it is neither cloned nor counted as a change to the database.
 DURABLE_FOLDERS = ("sessions", "archived_sessions")
 DURABLE_FILES = ("session_index.jsonl",)
 DURABLE_DATABASE_SUFFIXES = (".sqlite", ".sqlite-wal")
 # Databases that hold thread state; any other database, such as Codex's own log database, is reported apart.
 THREAD_DATABASE_PREFIXES = ("state_", "thread_history_")
-# Left out of the copied home: credentials, and configuration that could start MCP servers or select providers.
-EXCLUDED_FROM_COPY = ("auth.json", "auth.lock", "config.toml")
+# The database names used by the supported desktop app-server for thread/list and turn history.
+STATE_DATABASE = "state_5.sqlite"
+THREAD_DATABASES = (STATE_DATABASE, "thread_history_1.sqlite")
+COPY_RECORD = "copy.json"
+SYSTEM_ENVIRONMENT = {"PATH": "/usr/bin:/bin"}
 DESKTOP_APP = Path("/Applications/ChatGPT.app")
 BUNDLED_DESKTOP_CODEX = DESKTOP_APP / "Contents" / "Resources" / "codex-cli" / "bin" / "codex"
 # The Apple team that signs ChatGPT.app; its seal covers the bundled Codex executable.
@@ -63,6 +72,13 @@ REFUSAL = {"code": -32601, "message": "Rejected by peer-bridge."}
 
 class AppServerError(Exception):
     """The app-server could not be used safely or did not answer."""
+
+
+def time_left(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AppServerError("The app-server did not answer in time.")
+    return remaining
 
 
 def check_outgoing(message):
@@ -95,53 +111,81 @@ class AppServerClient:
     def __init__(self, executable, codex_home, sandbox_home):
         sandbox_home = Path(sandbox_home)
         (sandbox_home / "tmp").mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.environment = {"PATH": "/usr/bin:/bin", "HOME": str(sandbox_home), "CODEX_HOME": str(codex_home),
+        self.environment = {**SYSTEM_ENVIRONMENT, "HOME": str(sandbox_home), "CODEX_HOME": str(codex_home),
                             "TMPDIR": str(sandbox_home / "tmp")}
         self.executable = executable
         self.server_requests, self.notifications = [], []
-        self.process = None
+        self.process = self.selector = None
         self.buffer = b""
         self.next_id = 0
 
     def __enter__(self):
         self.stderr = open_private(Path(self.environment["HOME"]) / "app-server.log", append=True)
-        self.process = subprocess.Popen(
-            [self.executable, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
-            env=self.environment, start_new_session=True,
-        )
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(self.process.stdout, selectors.EVENT_READ)
         try:
+            self.process = subprocess.Popen(
+                [self.executable, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
+                env=self.environment, start_new_session=True,
+            )
+            os.set_blocking(self.process.stdin.fileno(), False)
+            os.set_blocking(self.process.stdout.fileno(), False)
+            self.selector = selectors.DefaultSelector()
+            self.selector.register(self.process.stdout, selectors.EVENT_READ)
             self.request("initialize", {"clientInfo": {"name": "peer-bridge", "version": "parity"},
                                         "capabilities": {"experimentalApi": True}})
             self.notify("initialized")
         except BaseException:
-            self.__exit__(None, None, None)  # a failed handshake must not leave the server running
+            self.__exit__(*sys.exc_info())
             raise
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, traceback):
         try:
-            os.killpg(self.process.pid, signal.SIGTERM)
-            self.process.wait(timeout=10)
-        except ProcessLookupError:
-            pass
-        except subprocess.TimeoutExpired:
-            os.killpg(self.process.pid, signal.SIGKILL)
-            self.process.wait()
+            if exc_type is None:
+                deadline = time.monotonic() + SHUTDOWN_DRAIN_SECONDS
+                while (message := self.receive(deadline, allow_idle=True)) is not None:
+                    self.dispatch(message, deadline)
         finally:
-            self.selector.close()
-            for stream in (self.process.stdin, self.process.stdout, self.stderr):
-                try:
-                    stream.close()
-                except BrokenPipeError:
-                    pass
+            try:
+                if self.process is not None:
+                    self.stop_group()
+            finally:
+                if self.selector is not None:
+                    self.selector.close()
+                if self.process is not None:
+                    self.process.stdin.close()
+                    self.process.stdout.close()
+                self.stderr.close()
 
-    def write(self, message):
-        check_outgoing(message)
+    def stop_group(self):
         try:
-            self.process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
-            self.process.stdin.flush()
+            # macOS can return EPERM for a group whose leader exited and has yet to be reaped.
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, signal.SIGTERM)
+            self.process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            # The leader's exit does not imply that its helpers exited.
+            with suppress(ProcessLookupError):
+                os.killpg(self.process.pid, signal.SIGKILL)
+            self.process.wait(timeout=10)
+
+    def write(self, message, deadline=None):
+        check_outgoing(message)
+        if deadline is None:
+            deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        fd = self.process.stdin.fileno()
+        data = memoryview((json.dumps(message) + "\n").encode("utf-8"))
+        try:
+            while data:
+                time_left(deadline)
+                try:
+                    data = data[os.write(fd, data):]
+                except BlockingIOError:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(fd, selectors.EVENT_WRITE)
+                        if not selector.select(time_left(deadline)):
+                            raise AppServerError("The app-server did not read its input in time.")
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise AppServerError("The app-server closed its input.") from exc
 
@@ -149,33 +193,48 @@ class AppServerClient:
         self.write({"method": method})
 
     def request(self, method, params):
+        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
         check_outgoing({"id": self.next_id + 1, "method": method, "params": params})
         self.next_id += 1
-        self.write({"id": self.next_id, "method": method, "params": params})
-        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        self.write({"id": self.next_id, "method": method, "params": params}, deadline)
         while True:
             message = self.receive(deadline)
-            if "method" in message and "id" in message:
-                # The source never answers a server request with anything but a refusal.
-                self.server_requests.append(message["method"])
-                self.write({"id": message["id"], "error": REFUSAL})
-            elif "method" in message:
-                self.notifications.append(message["method"])
-            elif message.get("id") == self.next_id:
+            if message is None:
+                raise AppServerError("The app-server exited.")
+            if not self.dispatch(message, deadline) and message.get("id") == self.next_id:
                 if "error" in message:
                     raise AppServerError(f"{method} failed with code {message['error'].get('code')}.")
                 return message.get("result")
 
-    def receive(self, deadline):
+    def dispatch(self, message, deadline):
+        if "method" not in message:
+            return False
+        if "id" in message:
+            self.server_requests.append(message["method"])
+            self.write({"id": message["id"], "error": REFUSAL}, deadline)
+        else:
+            self.notifications.append(message["method"])
+        return True
+
+    def receive(self, deadline, *, allow_idle=False):
         while b"\n" not in self.buffer:
-            if not self.selector.select(timeout=max(0, deadline - time.monotonic())):
+            if not self.selector.select(time_left(deadline)):
+                if allow_idle and not self.buffer:
+                    return None
                 raise AppServerError("The app-server did not answer in time.")
-            chunk = os.read(self.process.stdout.fileno(), 65536)
+            time_left(deadline)
+            try:
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+            except BlockingIOError:
+                continue
             if not chunk:
-                raise AppServerError("The app-server exited.")
+                if self.buffer:
+                    raise AppServerError("The app-server exited inside a message.")
+                return None
             self.buffer += chunk
             if len(self.buffer) > MAX_MESSAGE_BYTES:
                 raise AppServerError("The app-server sent a message larger than the limit.")
+        time_left(deadline)
         line, self.buffer = self.buffer.split(b"\n", 1)
         try:
             message = json.loads(line)
@@ -187,10 +246,17 @@ class AppServerClient:
 
     def pages(self, method, params):
         cursor = None
+        seen = set()
         while True:
             result = self.request(method, {**params, "cursor": cursor} if cursor else params)
-            yield from result.get("data") or []
+            if not isinstance(result, dict):
+                raise AppServerError(f"{method} returned a malformed page.")
             cursor = result.get("nextCursor")
+            if cursor:
+                if not isinstance(cursor, str) or cursor in seen:
+                    raise AppServerError(f"{method} returned an invalid or repeated cursor.")
+                seen.add(cursor)
+            yield from result.get("data") or []
             if not cursor:
                 return
 
@@ -218,25 +284,32 @@ class AppServerSource:
         """include is the file reader's repository check, which the app-server answers for itself."""
         if summary.forked_from_id:
             raise ThreadUnavailable("Forked Codex threads are not supported yet.")
-        turns = self.client.request("thread/turns/list", {
+        recent_turns = self.client.pages("thread/turns/list", {
             "threadId": summary.id, "sortDirection": "desc", "limit": max_messages, "itemsView": "notLoaded",
-        }).get("data") or []
-        messages = {}
-        for turn in turns:
-            if isinstance(turn, dict) and isinstance(turn.get("id"), str):
-                entries = self.client.pages("thread/items/list", {"threadId": summary.id, "turnId": turn["id"],
-                                                                  "limit": PAGE_SIZE})
-                messages[turn["id"]] = app_server_agent_messages(entries)
+        })
+        turns, messages, count = [], {}, 0
+        for turn in recent_turns:
+            if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
+                raise AppServerError("The app-server returned a malformed turn.")
+            turns.append(turn)
+            entries = self.client.pages("thread/items/list", {"threadId": summary.id, "turnId": turn["id"],
+                                                              "limit": PAGE_SIZE})
+            messages[turn["id"]] = app_server_agent_messages(entries)
+            count += len(messages[turn["id"]])
+            if count >= max_messages:
+                break
         return app_server_snapshot(summary, turns, messages, max_messages)
 
 
 def signed_desktop_app():
     """Whether ChatGPT.app's seal is intact and its signing team is OpenAI's, read from codesign's exact fields."""
-    verified = subprocess.run(["codesign", "--verify", "--strict", str(DESKTOP_APP)], capture_output=True)
+    verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(DESKTOP_APP)],
+                              capture_output=True, env=SYSTEM_ENVIRONMENT)
     if verified.returncode:
         return False
-    details = subprocess.run(["codesign", "-d", "--verbose=2", str(DESKTOP_APP)], capture_output=True, text=True)
-    return f"TeamIdentifier={DESKTOP_TEAM}" in details.stderr.splitlines()
+    details = subprocess.run(["/usr/bin/codesign", "-d", "--verbose=2", str(DESKTOP_APP)],
+                             capture_output=True, text=True, env=SYSTEM_ENVIRONMENT)
+    return details.returncode == 0 and f"TeamIdentifier={DESKTOP_TEAM}" in details.stderr.splitlines()
 
 
 def desktop_codex_executable():
@@ -245,12 +318,14 @@ def desktop_codex_executable():
     bundled = os.path.realpath(BUNDLED_DESKTOP_CODEX)
     if not Path(bundled).is_file() or not signed_desktop_app():
         raise AppServerError("Cannot find a ChatGPT.app whose signature covers its Codex executable.")
-    listing = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True).stdout
+    listing = subprocess.run(["/bin/ps", "-axo", "pid=,comm="], capture_output=True, text=True,
+                             env=SYSTEM_ENVIRONMENT).stdout
     for line in listing.splitlines():
         pid, _, command = line.strip().partition(" ")
         if os.path.realpath(command) != bundled:
             continue
-        arguments = subprocess.run(["ps", "-o", "args=", "-p", pid], capture_output=True, text=True).stdout.split()
+        arguments = subprocess.run(["/bin/ps", "-o", "args=", "-p", pid], capture_output=True, text=True,
+                                   env=SYSTEM_ENVIRONMENT).stdout.split()
         if "app-server" in arguments[1:2]:
             return bundled, "running desktop app-server"
     return bundled, "ChatGPT.app's bundled Codex (no desktop app-server running)"
@@ -258,7 +333,10 @@ def desktop_codex_executable():
 
 def codex_version(executable, environment):
     result = subprocess.run([executable, "--version"], capture_output=True, text=True, env=environment, timeout=30)
-    return result.stdout.strip() or "unknown"
+    version = result.stdout.strip()
+    if result.returncode or not version:
+        raise AppServerError("Cannot identify the Codex release.")
+    return version
 
 
 def check_isolated(path, live_home):
@@ -292,37 +370,60 @@ def open_private(path, append=False):
         raise AppServerError(f"Cannot write {path.name} in the parity sandbox; it may be a symlink.") from exc
 
 
-def clone_home(source, destination):
-    """Copy a Codex home as an APFS clone, which uses no space until a file changes, without credentials or config.
+def clone_inputs(source):
+    """Select only regular rollouts, the session index and the supported thread databases and WAL files."""
+    def rollouts(directory):
+        for path in directory.iterdir():
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                yield from rollouts(path)
+            elif path.name.startswith("rollout-") and rollout_identifier(path.name):
+                if not rollout_format(path.name):
+                    raise AppServerError("Cannot clone an unsupported Codex rollout format.")
+                yield path
 
-    source must already be resolved: cp copies a symlink operand as a link, and the cleanup below would then reach
-    the live home through it.
-    """
+    state = source / STATE_DATABASE
+    if state.is_symlink() or not state.is_file():
+        raise AppServerError(f"Cannot clone the Codex home without {STATE_DATABASE}.")
+    for name in (*DURABLE_FILES, *THREAD_DATABASES, *(database + "-wal" for database in THREAD_DATABASES)):
+        path = source / name
+        if path.exists() and not path.is_symlink():
+            yield path
+    for name in DURABLE_FOLDERS:
+        directory = source / name
+        if directory.is_dir() and not directory.is_symlink():
+            yield from rollouts(directory)
+
+
+def clone_home(source, destination):
+    """Stage a macOS clone containing only parity inputs, then publish it with its copy identity."""
     if sys.platform != "darwin":
         raise AppServerError("The parity check clones the Codex home with APFS, which needs macOS.")
     if Path(source).resolve() != Path(source) or not Path(source).is_dir():
         raise AppServerError("The live Codex home must be given as a resolved directory.")
-    # The clone is made under a partial name and renamed into place only once credentials are gone, so an
-    # interrupted clone never becomes the copy; the next run removes it.
     partial = destination.with_name(destination.name + ".partial")
     for path in (destination, partial):
         check_isolated(path, source)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     discard_partial(partial)
-    # cp warns about sockets it cannot copy; the clone is still complete for files.
-    subprocess.run(["cp", "-c", "-R", str(source), str(partial)], capture_output=True)
-    if partial.is_symlink() or not partial.is_dir():
+    partial.mkdir(mode=0o700)
+    try:
+        for path in clone_inputs(source):
+            target = partial / path.relative_to(source)
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise AppServerError(f"Cannot clone non-regular input {path.name}.")
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            result = subprocess.run(["/bin/cp", "-c", "-p", "-P", str(path), str(target)],
+                                    capture_output=True, env=SYSTEM_ENVIRONMENT)
+            if result.returncode or target.is_symlink() or not target.is_file():
+                raise AppServerError(f"Cannot clone {path.name}.")
+        with open_private(partial / COPY_RECORD) as output:
+            json.dump({"copy_id": str(uuid.uuid4()),
+                       "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}, output)
+        os.rename(partial, destination)
+    finally:
         discard_partial(partial)
-        raise AppServerError("Cannot clone the Codex home as a directory.")
-    # Nothing under the clone is touched before it is known to be a separate directory.
-    check_isolated(partial, source)
-    if not (partial / "sessions").is_dir():
-        discard_partial(partial)
-        raise AppServerError("Cannot clone the Codex home. The parity check needs an APFS volume.")
-    remove_symlinks(partial)
-    for name in EXCLUDED_FROM_COPY:
-        (partial / name).unlink(missing_ok=True)
-    os.rename(partial, destination)
 
 
 def discard_partial(partial):
@@ -372,16 +473,17 @@ def compare(file_source, app_source):
     everything = lambda cwd: True  # noqa: E731  (the copy is compared machine-wide, not per repository)
     app_threads = {summary.id: summary for summary in app_source.list_threads(everything).threads}
     compared, unreadable, missing, mismatches = 0, {}, [], []
-    for summary in file_source.list_threads(everything).threads:
+    listing = file_source.list_threads(everything)
+    for summary in listing.threads:
+        # Only the reader's own refusal leaves a thread out by design; any other error is a reader fault or an
+        # unreadable file, and stops the run rather than shrinking what was compared.
         try:
             expected = file_source.read_thread(summary, 3, everything)
         except ThreadUnavailable as exc:
             unreadable[str(exc)] = unreadable.get(str(exc), 0) + 1
             continue
-        except (OSError, TypeError, AttributeError):
-            unreadable["The thread's history file could not be read."] = unreadable.get(
-                "The thread's history file could not be read.", 0) + 1
-            continue
+        except (OSError, TypeError, AttributeError) as exc:
+            raise AppServerError(f"The file reader failed on thread {summary.id}.") from exc
         compared += 1
         if summary.id not in app_threads:
             missing.append(summary.id)
@@ -394,51 +496,82 @@ def compare(file_source, app_source):
         differences = parity_differences(expected, actual)
         if differences:
             mismatches.append({"id": summary.id, "fields": differences})
-    return {"threads_compared": compared, "file_unreadable": unreadable, "missing": missing, "mismatches": mismatches}
+    return {"threads_compared": compared, "file_unreadable": unreadable, "missing": missing, "mismatches": mismatches,
+            "file_unsupported": sorted(listing.unsupported)}
 
 
 def run_parity(state_directory, fresh_copy=False):
     """Run one parity check on the persistent copied home under the state directory and save its report."""
     live = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
     root = Path(state_directory) / "parity"
-    copy, sandbox, reports = root / "codex-home", root / "home", root / "reports"
-    copy_record = root / "copy.json"
-    # Every path is checked before anything is created or written.
-    for path in (root, copy, sandbox, sandbox / "tmp", reports, copy_record):
-        check_isolated(path, live)
+    check_isolated(root, live)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open_private(root / "parity.lock", append=True) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run_locked_parity(root, live, fresh_copy)
+
+
+def save_report(path, report):
+    fd, name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(report, output, indent=2)
+            output.write("\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def run_locked_parity(root, live, fresh_copy):
+    copy, sandbox, reports = root / "codex-home", root / "home", root / "reports"
+    copy_record = copy / COPY_RECORD
+    for path in (copy, sandbox, sandbox / "tmp", reports, copy_record):
+        check_isolated(path, live)
     discard_partial(copy.with_name(copy.name + ".partial"))
     if sandbox.is_dir():
         remove_symlinks(sandbox)
-    if fresh_copy:
-        shutil.rmtree(copy, ignore_errors=True)
-        copy_record.unlink(missing_ok=True)
+    # Clones made before the record moved inside may contain files outside the allowlist. Rebuild them.
+    if copy.is_dir() and (fresh_copy or not copy_record.is_file()):
+        shutil.rmtree(copy)
     if not copy.is_dir():
         clone_home(live, copy)
-        with open_private(copy_record) as output:
-            output.write(json.dumps({"copy_id": str(uuid.uuid4()),
-                                     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
     record = json.loads(copy_record.read_text())
-    executable, executable_source = desktop_codex_executable()
     report = {
-        "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "copy_id": record["copy_id"],
-        "copy_created_at": record["created_at"], "executable": executable, "executable_source": executable_source,
+        "ran_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"), "copy_id": record["copy_id"],
+        "copy_created_at": record["created_at"], "codex_version": "unknown", "passed": False,
     }
-    # The app-server makes symlinks to its own executable on each start; none may survive into another run.
-    report["symlinks_removed"] = remove_symlinks(copy)
-    before = fingerprint(copy)
-    with AppServerClient(executable, copy, sandbox) as client:
-        report["codex_version"] = codex_version(executable, client.environment)
-        report.update(compare(CodexFilesSource(copy), AppServerSource(client)))
-        report["server_requests"] = sorted(set(client.server_requests))
-    changes = changed_paths(before, fingerprint(copy))
-    remove_symlinks(copy)
-    report["thread_data_changes"] = [path for path in changes if is_thread_data(path)]
-    report["other_database_changes"] = [path for path in changes if not is_thread_data(path)]
-    report["passed"] = parity_passed(report)
     reports.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open_private(reports / f"{report['ran_at'].replace(':', '')}.json") as output:
-        output.write(json.dumps(report, indent=2) + "\n")
+    path = reports / f"{report['ran_at'].replace(':', '')}-{uuid.uuid4().hex}.json"
+    client = None
+    try:
+        report["executable"], report["executable_source"] = desktop_codex_executable()
+        executable = report["executable"]
+        client = AppServerClient(executable, copy, sandbox)
+        # Taken before anything runs Codex against the copy, so even `codex --version` cannot change it unseen.
+        report["symlinks_removed"] = remove_symlinks(copy)
+        before = fingerprint(copy)
+        report["codex_version"] = codex_version(executable, client.environment)
+        # A run interrupted after startup must still count against the release.
+        save_report(path, {**report, "error": "The parity run did not complete."})
+        # The app-server makes symlinks to its executable on each start; clean them before and after each attempt.
+        report["symlinks_removed"] += remove_symlinks(copy)
+        try:
+            with client:
+                report.update(compare(CodexFilesSource(copy), AppServerSource(client)))
+            changes = changed_paths(before, fingerprint(copy))
+        finally:
+            report["server_requests"] = sorted(set(client.server_requests))
+            remove_symlinks(copy)
+        report["thread_data_changes"] = [path for path in changes if is_thread_data(path)]
+        # Databases the copy never held, such as Codex's logs, are created by the server in the copy: noted, not
+        # counted. A copied database that changes, or new thread data, fails the run.
+        report["other_database_changes"] = [path for path in changes if not is_thread_data(path) and path in before]
+        report["databases_created"] = [path for path in changes if not is_thread_data(path) and path not in before]
+        report["passed"] = parity_passed(report)
+    except (AppServerError, OSError, subprocess.SubprocessError) as exc:
+        report["error"] = str(exc)
+    save_report(path, report)
     saved = [json.loads(path.read_text()) for path in sorted(reports.glob("*.json"))]
     report["ready_to_replace_file_reader"], report["verdict"] = parity_verdict(saved)
     return report
@@ -454,7 +587,7 @@ def main():
     except AppServerError as exc:
         result = {"error": str(exc)}
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 1 if "error" in result else 0
+    return 0 if result.get("passed") else 1
 
 
 if __name__ == "__main__":
