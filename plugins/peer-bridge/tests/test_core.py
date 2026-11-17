@@ -524,7 +524,7 @@ class CodexParsingTests(unittest.TestCase):
 
     def message(self, turn, text):
         return self.event("item_completed", turn, item={"type": "AgentMessage", "content": [
-            {"type": "Text", "text": text}], "phase": "final"})
+            {"type": "Text", "text": text}], "phase": "final_answer"})
 
     def test_turn_states(self):
         e = self.event
@@ -546,7 +546,7 @@ class CodexParsingTests(unittest.TestCase):
         records = [self.message("t1", "one"), {"type": "response_item"}, self.message("t1", " "),
                    self.message("t1", "two"), self.event("task_complete", "t1", last_agent_message="two")]
         snapshot = t.codex_snapshot(self.SUMMARY, t.scan_codex(records), 1)
-        self.assertEqual(snapshot.messages, [t.AgentMessage("t1", "two", "final")])
+        self.assertEqual(snapshot.messages, [t.AgentMessage("t1", "two", "final_answer")])
         records[-1] = self.event("task_complete", "t1", last_agent_message="something else")
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not match"):
             t.codex_snapshot(self.SUMMARY, t.scan_codex(records), 1)
@@ -556,6 +556,26 @@ class CodexParsingTests(unittest.TestCase):
                  self.event("task_started", "t1"), self.event("task_complete", "t1", last_agent_message="new")]
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not match"):
             t.codex_snapshot(self.SUMMARY, t.scan_codex(older), 3)
+
+    def test_malformed_codex_turn_and_message_fields_are_refused(self):
+        e = self.event
+        text_block = {"type": "Text", "text": "new"}
+        agent = {"type": "AgentMessage", "content": [text_block]}
+        older = [self.message("t0", "old"), e("task_complete", "t0", last_agent_message="old")]
+        cases = (
+            e("task_complete", "t1", last_agent_message={"text": "new"}),
+            e("task_complete", "t1", error=True),
+            e("task_started", ["t1"]),
+            e("turn_aborted", {}),
+            e("item_completed", "t1", item=[]),
+            e("item_completed", "t1", item=agent | {"phase": {"text": "new"}}),
+            e("item_completed", "t1", item=agent | {"phase": "unexpected phase"}),
+            e("item_completed", "t1", item=agent | {"content": {"text": "new"}}),
+            e("item_completed", "t1", item=agent | {"content": [text_block | {"text": 42}]}),
+        )
+        for malformed in cases:
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(t.ThreadUnavailable, "malformed line"):
+                t.scan_codex([*older, malformed])
 
 
 class ClaudeParsingTests(unittest.TestCase):

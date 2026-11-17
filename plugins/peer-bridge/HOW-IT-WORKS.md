@@ -100,6 +100,9 @@ missing there. Only the current stay in the repository contributes replies and a
 in the listing and used for exact-name selection. A session that has just moved in shows an unfinished turn and
 no messages.
 
+A Codex read refuses malformed turn and message fields. Message phases are the recorded `commentary` or
+`final_answer` tokens, or null when the phase is absent.
+
 The bridge never writes into the other app's sessions. To hand work to an existing session, an agent puts the handoff
 in its own reply, and that session reads it with `read_codex_thread` or `read_claude_thread`. Neither agent may reach
 the other by operating its desktop app; the bridge's tool descriptions and skill say so.

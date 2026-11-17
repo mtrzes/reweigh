@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 
 MAX_MESSAGE_CHARACTERS = 24_000
 CODEX_MAIN_SOURCES = {"vscode", "cli"}
+CODEX_TURN_EVENTS = ("task_started", "task_complete", "turn_aborted", "item_completed")
+CODEX_MESSAGE_PHASES = (None, "commentary", "final_answer")
+MALFORMED_CODEX_EVENT = "The thread's history file has a malformed line for a Codex event."
 # Codex compresses older rollouts with zstd; the records inside are the same JSONL.
 ROLLOUT_FORMATS = ((".jsonl", "jsonl"), (".jsonl.zst", "zstd"))
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -192,26 +195,52 @@ def codex_main_thread(meta, identifier):
     return source, cwd, payload.get("forked_from_id")
 
 
+def codex_agent_message(item, turn_id):
+    if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+        raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+    if item["type"] != "AgentMessage":
+        return None
+    content, phase = item.get("content"), item.get("phase")
+    if not isinstance(content, list) or phase not in CODEX_MESSAGE_PHASES:
+        raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+    text = []
+    for block in content:
+        if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+            raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+        if block["type"] == "Text":
+            if not isinstance(block.get("text"), str):
+                raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+            text.append(block["text"])
+    joined = "".join(text)
+    return AgentMessage(turn_id, joined, phase) if joined.strip() else None
+
+
 def scan_codex(records):
     latest, messages, completions = None, [], {}
     for record in records:
-        payload = record.get("payload")
-        if record.get("type") != "event_msg" or not isinstance(payload, dict):
+        if record.get("type") != "event_msg":
             continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
         kind, turn_id = payload.get("type"), payload.get("turn_id")
+        if kind not in CODEX_TURN_EVENTS:
+            continue
+        if turn_id is not None and not isinstance(turn_id, str):
+            raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
         if kind == "task_started":
             latest = TurnState(turn_id, "inProgress")
         elif kind == "task_complete":
-            latest = TurnState(turn_id, "failed" if payload.get("error") else "completed")
-            completions[turn_id] = payload.get("last_agent_message")
+            error, final = payload.get("error"), payload.get("last_agent_message")
+            if ((error is not None and not isinstance(error, (dict, str)))
+                    or (final is not None and not isinstance(final, str))):
+                raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+            latest = TurnState(turn_id, "failed" if error else "completed")
+            completions[turn_id] = final
         elif kind == "turn_aborted":
             latest = TurnState(turn_id, "interrupted")
-        elif kind == "item_completed":
-            item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "AgentMessage":
-                text = text_of(item.get("content"), "Text")
-                if text.strip():
-                    messages.append(AgentMessage(turn_id, text, item.get("phase")))
+        elif message := codex_agent_message(payload.get("item"), turn_id):
+            messages.append(message)
     return Scan(latest, messages, completions)
 
 

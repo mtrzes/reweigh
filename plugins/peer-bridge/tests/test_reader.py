@@ -174,14 +174,12 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(rows[1]["updated_at"], "1970-01-01T00:16:40+00:00")
 
     def test_history_with_unexpected_value_types_is_refused_with_a_reason(self):
-        codex_thread(self.codex_home, self.project, codex_turn(["t1"], "Done."), name="Codex types")
         claude_session(self.claude_home, self.project, claude_prompt(5), claude_reply("Done."), title="Claude types")
         claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."), entrypoint=5)
         # The bridge turns a value of the wrong type, which the parser meets as a TypeError, into a named refusal.
-        client = bridge.Bridge(readers={provider: self.reader(provider) for provider in ("claude", "codex")})
-        for provider, name in (("codex", "Codex types"), ("claude", "Claude types")):
-            with self.subTest(provider=provider), self.assertRaisesRegex(bridge.BridgeError, "malformed line"):
-                asyncio.run(client.thread(provider, str(self.project), name))
+        client = bridge.Bridge(readers={"claude": self.reader("claude")})
+        with self.assertRaisesRegex(bridge.BridgeError, "malformed line"):
+            asyncio.run(client.thread("claude", str(self.project), "Claude types"))
         self.assertEqual([thread["name"] for thread in self.threads("claude")["threads"]], ["Claude types"])
 
     def test_compressed_rollouts_are_listed_and_read_like_plain_ones(self):
