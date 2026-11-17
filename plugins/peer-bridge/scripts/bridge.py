@@ -35,7 +35,7 @@ from consultation import (
 from jobs import UNKNOWN_JOB, JobStore, run_job, spawn_runner
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
-from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, git_common_dir
+from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -43,6 +43,7 @@ MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
 BUNDLED_CODEX_PATH = Path("ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex")
 GIT_TIMEOUT_SECONDS = 120
+GIT_REPOSITORY_PROBE_SECONDS = 10
 SIGN_IN_PROBE_SECONDS = 30
 SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
@@ -208,15 +209,18 @@ def peer_executable(provider):
     raise BridgeError(f"{provider} CLI is unavailable. Install it and sign in before consulting it.")
 
 
-async def signed_in(provider, directory):
+async def signed_in(provider, directory, deadline, lock):
     """Ask the peer CLI whether it is signed in: True, False, or None when it cannot tell.
 
     The probe runs under the guard like the consultation, so a helper it starts cannot outlive a cancelled or timed
     out consultation, and a cancellation passes on only once the probe's group has stopped.
     """
+    timeout = min(SIGN_IN_PROBE_SECONDS, deadline - time.monotonic())
+    if timeout <= 0:
+        return None
     try:
         command = [peer_executable(provider), *SIGN_IN_PROBES[provider]]
-        return_code, output, _ = await run_command(command, None, directory, SIGN_IN_PROBE_SECONDS)
+        return_code, output, _ = await run_command(command, None, directory, timeout, lock=lock)
     except (BridgeError, OSError):
         return None
     return signed_in_from(provider, return_code, output.decode("utf-8", errors="replace"))
@@ -444,7 +448,7 @@ async def run_command(command, prompt, working_directory, timeout, environment=N
                     pipe.close()
 
 
-async def git(directory, *arguments, failure, config=(), allowed=(), lock=None):
+async def git(directory, *arguments, failure, config=(), allowed=(), lock=None, timeout=GIT_TIMEOUT_SECONDS):
     """Run git under the guard, isolated from the repository's hooks, monitor and transports and from inherited GIT_*
     variables, plus the settings in config; exit statuses in allowed count as success.
 
@@ -452,7 +456,7 @@ async def git(directory, *arguments, failure, config=(), allowed=(), lock=None):
     """
     try:
         return_code, output, _ = await run_command(
-            ["git", "-C", str(directory), *arguments], None, None, GIT_TIMEOUT_SECONDS,
+            ["git", "-C", str(directory), *arguments], None, None, timeout,
             environment=git_environment(os.environ, config), lock=lock,
         )
     except OSError as exc:
@@ -702,6 +706,7 @@ class Bridge:
                 depth = len(consulted.relative_to(worktree).parts) if commit else 0
                 handoff = build_handoff(provider, prompt, context, commit, depth)
                 failure = None
+                deadline = time.monotonic() + self.timeout
                 try:
                     return_code, output, errors = await run_command(
                         command, handoff, consulted, self.timeout,
@@ -718,12 +723,12 @@ class Bridge:
                 backend_session_id, reply = consultation_outcome(provider, return_code, output)
             except PeerFailure as exc:
                 facts = await self.failure_facts(provider, directory, record, output, errors,
-                                                 chose_model=bool(model or reasoning_effort))
+                                                 deadline=deadline, lock=lock, chose_model=bool(model or reasoning_effort))
                 raise BridgeError(failure_message(provider, facts, str(exc))) from exc
             self.store.save(path, completed_record(record, backend_session_id, commit))
             return consultation_result(provider, identifier, reply, commit, model, reasoning_effort)
 
-    async def failure_facts(self, provider, directory, record, output, errors, chose_model=False):
+    async def failure_facts(self, provider, directory, record, output, errors, *, deadline, lock, chose_model=False):
         """Establish what may explain a failed run, from exact fields and checks, never from the CLI's text."""
         session = record.get("backend_session_id")
         source = self.readers[provider].source
@@ -734,14 +739,22 @@ class Bridge:
             except OSError:
                 return None
 
-        facts = {"resuming": bool(session), "signed_in": await signed_in(provider, directory),
+        facts = {"resuming": bool(session), "signed_in": await signed_in(provider, directory, deadline, lock),
                  **output_signals(provider, output, errors)}
         if session:
             facts["history_present"] = await asyncio.to_thread(check, source.has_history, session)
         if provider == "codex":
             if session:
                 facts["writer_lock_present"] = check(source.writer_lock_present, session)
-            facts["in_git_repository"] = await asyncio.to_thread(git_common_dir, directory) is not None
+            timeout = min(GIT_REPOSITORY_PROBE_SECONDS, deadline - time.monotonic())
+            if timeout > 0:
+                try:
+                    facts["in_git_repository"] = bool(await git(
+                        directory, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                        failure="Cannot find the git repository.", lock=lock, timeout=timeout,
+                    ))
+                except BridgeError:
+                    facts["in_git_repository"] = False
             facts["model_setting"] = chose_model
         return FailureFacts(**facts)
 
@@ -887,7 +900,7 @@ def create_server(peer):
 
 
 async def until_terminated(operation):
-    # A background caller stops the CLI with SIGTERM or SIGHUP; cancelling lets consult() stop the peer's group.
+    # Convert termination signals to cancellation so the operation can clean up before the CLI exits.
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     for signal_number in (signal.SIGTERM, signal.SIGHUP):
@@ -913,7 +926,7 @@ def run_command_line(arguments):
             request = (arguments.provider, prompt, arguments.working_directory, context, arguments.conversation_id,
                        arguments.ref, arguments.seed_thread, arguments.model, arguments.reasoning_effort)
             if arguments.command == "start":
-                result = asyncio.run(Bridge().start(*request))
+                result = asyncio.run(until_terminated(lambda: Bridge().start(*request)))
             else:
                 result = asyncio.run(until_terminated(lambda: Bridge().consult(*request)))
         elif arguments.command == "run-job":

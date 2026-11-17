@@ -118,9 +118,10 @@ cause only when an exact field or a check establishes it, and never by reading t
 | A model Claude Code does not know | A stderr line starting with Claude Code's `[claude-code:unrecognized_model]` tag |
 | Codex outside a git repository | `git rev-parse` failing in `working_directory` |
 
-Otherwise the message is a generic one that names the exit status. When a Codex model or reasoning effort was chosen,
-per call or by environment, a failed Codex consultation adds that the choice may be the cause, because Codex reports a
-rejected choice only in prose.
+The bridge runs the sign-in and git checks only while time remains from the consultation timeout. If the checks and
+result fields establish no cause, the bridge returns a generic error. When a Codex model or reasoning effort was
+chosen, per call or by environment, a failed Codex consultation adds that the choice may be the cause, because Codex
+reports a rejected choice only in prose.
 
 ### Pinned refs
 
@@ -175,7 +176,8 @@ and conversation store as the MCP tools, so a conversation started in one can co
 command with SIGTERM or SIGHUP, even repeatedly, also stops the peer and its child processes and removes a pinned
 checkout.
 
-`start` takes the same arguments as `ask` and prints the new job; `job --job-id ID [--wait SECONDS]` and
+`start` takes the same arguments as `ask` and prints the new job. SIGTERM or SIGHUP during job creation cancels the
+start and deletes the job's prompt and context. `job --job-id ID [--wait SECONDS]` and
 `cancel --job-id ID` match `get_consultation` and `cancel_consultation`:
 
 ```sh

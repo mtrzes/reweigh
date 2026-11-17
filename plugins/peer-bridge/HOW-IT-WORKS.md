@@ -56,12 +56,13 @@ flowchart TB
   `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the peer's process group and
   stops all of it when the consultation ends, times out or is cancelled, and when the bridge's own process dies, even
-  by SIGKILL. Sign-in probes and git commands run under a guard too. The guard holds the conversation's lock, so the
-  conversation and its checkout stay busy until the group has stopped. The bridge's last signal to a group always
-  comes before it reaps the guard, which would free the group's ID. A descendant that leaves the group, by starting
-  its own session or group, is not stopped.
+  by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, these probes use the time left
+  from the peer's timeout. Each guard holds the conversation's lock, so the conversation and its checkout stay busy
+  until the process group has stopped. The bridge's last signal to a group always comes before it reaps the guard,
+  which would free the group's ID. A descendant that leaves the group, by starting its own session or group, is not stopped.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
-  given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file.
+  given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file. Codex
+  events are separated by LF, so Unicode line separators inside a reply are preserved.
 
 ## Background jobs
 
@@ -79,7 +80,8 @@ A job lives in its own folder under the state directory. Its runner holds a lock
 runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
 dies, or does not start within two minutes, is stored as `lost`, and a runner that starts late honours that. While a
 cancel waits for the runner, `cancel_consultation` reports `cancelling`. The prompt and context are deleted as soon as
-the runner has read them.
+the runner has read them. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
+published during creation.
 
 ## Thread reading
 
