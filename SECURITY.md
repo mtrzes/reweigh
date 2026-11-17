@@ -21,8 +21,8 @@ line runs.
 - **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
   entries only, so a file in the repository named like a command never runs in place of it.
 - **The peer's process group ends with the consultation**, also when the bridge is killed, and so do the sign-in
-  probes and git commands the bridge runs. The conversation stays locked until its guard has stopped the group, so no
-  other consultation takes over a checkout that is still in use.
+  probes and git commands it runs during a consultation. Their guards all hold the conversation lock until their
+  process groups stop, so no other consultation takes over a checkout that is still in use.
 - **State files are private.** The state directory and everything in it are readable by the user only, and the bridge
   opens its files without following symlinks. Cleanup checks that the state directory and its folders are private,
   real directories before it lists or removes anything in them.

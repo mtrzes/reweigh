@@ -384,13 +384,51 @@ class ConsultationTests(BridgeTestCase):
              "login, version, and permissions." + consultation.MODEL_HINT),
             ("codex", {}, {"reasoning_effort": "ultra"}, "codex consultation failed (exit 1). Check CLI "
              "login, version, and permissions." + consultation.MODEL_HINT),
-            ("codex", {}, {"working_directory": str(self.other_project)}, "Codex runs only inside a git repository"),
         )
         for provider, environment, arguments, expected in cases:
             with self.subTest(provider=provider, environment=environment, arguments=arguments):
                 message = await self.failure_message(provider, environment, **arguments)
                 self.assertTrue(message.startswith(expected), message)
+        with patch.object(bridge, "run_command", wraps=bridge.run_command) as guarded:
+            message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
+        self.assertEqual(message, consultation.OUTSIDE_GIT)
+        self.assertEqual(guarded.await_args.args[0], [
+            "git", "-C", str(self.other_project), "rev-parse", "--path-format=absolute", "--git-common-dir",
+        ])
         self.assertEqual(list(self.state.glob("*.json")), [])
+
+    async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
+        self.client.timeout = 5
+        sign_in = str(self.peer), 2
+        for peer_seconds, sign_in_seconds, expected in (
+            (3, 1, [sign_in, ("git", 1)]),
+            (3, 2, [sign_in]),
+            (5, 0, []),
+        ):
+            with (
+                self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds),
+                patch.object(bridge, "time") as clock,
+                patch.object(bridge, "run_command") as guarded,
+            ):
+                clock.monotonic.return_value = 100
+
+                def command_result(command, prompt, directory, timeout, **options):
+                    if prompt is not None:
+                        clock.monotonic.return_value += peer_seconds
+                        return 7, b"", b""
+                    if command[1:] == ["login", "status"]:
+                        clock.monotonic.return_value += sign_in_seconds
+                    return 0, b"/project/.git\n", b""
+
+                guarded.side_effect = command_result
+                message = await self.failure_message("codex", {})
+                self.assertEqual(message, "codex consultation failed (exit 7). Check CLI login, version, and "
+                                 "permissions.")
+                peer, *probes = guarded.await_args_list
+                lock = peer.kwargs["lock"]
+                self.assertIsInstance(lock, int)
+                self.assertEqual([(call.args[0][0], call.args[3], call.kwargs.get("lock")) for call in probes],
+                                 [(executable, timeout, lock) for executable, timeout in expected])
 
     async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
         # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any
