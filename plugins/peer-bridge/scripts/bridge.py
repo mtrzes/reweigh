@@ -887,7 +887,7 @@ def create_server(peer):
 
 
 async def until_terminated(operation):
-    # A background caller stops the CLI with SIGTERM or SIGHUP; cancelling lets consult() stop the peer's group.
+    # Convert termination signals to cancellation so the operation can clean up before the CLI exits.
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     for signal_number in (signal.SIGTERM, signal.SIGHUP):
@@ -913,7 +913,7 @@ def run_command_line(arguments):
             request = (arguments.provider, prompt, arguments.working_directory, context, arguments.conversation_id,
                        arguments.ref, arguments.seed_thread, arguments.model, arguments.reasoning_effort)
             if arguments.command == "start":
-                result = asyncio.run(Bridge().start(*request))
+                result = asyncio.run(until_terminated(lambda: Bridge().start(*request)))
             else:
                 result = asyncio.run(until_terminated(lambda: Bridge().consult(*request)))
         elif arguments.command == "run-job":

@@ -175,7 +175,8 @@ and conversation store as the MCP tools, so a conversation started in one can co
 command with SIGTERM or SIGHUP, even repeatedly, also stops the peer and its child processes and removes a pinned
 checkout.
 
-`start` takes the same arguments as `ask` and prints the new job; `job --job-id ID [--wait SECONDS]` and
+`start` takes the same arguments as `ask` and prints the new job. SIGTERM or SIGHUP during job creation cancels the
+start and deletes the job's prompt and context. `job --job-id ID [--wait SECONDS]` and
 `cancel --job-id ID` match `get_consultation` and `cancel_consultation`:
 
 ```sh

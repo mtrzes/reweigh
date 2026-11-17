@@ -176,6 +176,46 @@ class CommandLineTests(BridgeTestCase):
         self.assertEqual(self.run_cli("job", "--job-id", "not-a-job"),
                          (1, {"error": "No consultation job with that ID."}))
 
+    def test_signalling_cli_start_after_publication_cancels_the_job(self):
+        script = f"""\
+import os, signal, sys, threading
+from pathlib import Path
+
+sys.argv = sys.argv[1:]
+sys.path.insert(0, str(Path(sys.argv[0]).parent))
+import bridge
+
+discarding = threading.Event()
+create = bridge.JobStore.create
+discard = bridge.Bridge.discard_created
+
+def create_and_signal(store, *arguments):
+    job_id = create(store, *arguments)
+    os.kill(os.getpid(), signal.SIGTERM)
+    # Keep creation pending until the CLI's task has entered its cancellation cleanup.
+    assert discarding.wait({DEADLINE_SECONDS})
+    return job_id
+
+async def discard_created(client, *arguments):
+    discarding.set()
+    await discard(client, *arguments)
+
+bridge.JobStore.create = create_and_signal
+bridge.Bridge.discard_created = discard_created
+bridge.main()
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(BRIDGE_PATH), "start", "--provider", "claude",
+             "--working-directory", str(self.project)],
+            input="PRIVATE QUESTION", capture_output=True, text=True, timeout=DEADLINE_SECONDS,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"error": "The consultation was cancelled."})
+        [folder] = (self.state / "jobs").iterdir()
+        self.assertFalse((folder / "request.json").exists())
+        code, job = self.run_cli("job", "--job-id", folder.name)
+        self.assertEqual((code, job["state"]), (1, "cancelled"))
+
     def test_threads_and_read_thread_print_the_tool_result(self):
         git_repository(self.project)
         codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Codex review")

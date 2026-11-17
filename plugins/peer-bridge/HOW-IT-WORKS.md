@@ -80,7 +80,8 @@ A job lives in its own folder under the state directory. Its runner holds a lock
 runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
 dies, or does not start within two minutes, is stored as `lost`, and a runner that starts late honours that. While a
 cancel waits for the runner, `cancel_consultation` reports `cancelling`. The prompt and context are deleted as soon as
-the runner has read them.
+the runner has read them. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
+published during creation.
 
 ## Thread reading
 

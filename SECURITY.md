@@ -51,7 +51,8 @@ line runs.
 
 - A background consultation's reply stays in the state directory until a later background start removes it, at the
   earliest seven days after the job finished; with no later start it stays until the user removes it. Its prompt and
-  context are deleted as soon as the runner has read them.
+  context are deleted as soon as the runner has read them. If SIGTERM or SIGHUP interrupts the CLI while it creates
+  a job, the bridge deletes that job's prompt and context during cancellation.
 - Conversation records, which bind a conversation to its peer and project, are kept until the user removes them.
 - Each peer CLI keeps its own transcript of every consultation, as long as it keeps any history.
 - The developer tool `dev/codex_app_server.py` keeps a full copy of the Codex history, without credentials, until it is
