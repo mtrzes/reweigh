@@ -102,34 +102,72 @@ class JobTests(BridgeTestCase):
         self.assertFalse(folder.exists())
 
     async def test_a_killed_runners_conversation_stays_locked_until_its_guard_has_stopped_the_peer(self):
-        # The runner's death frees its own lock at once, but the guard is still stopping a peer that ignores SIGTERM
-        # in a pinned checkout; until it has, no other consultation may take the conversation or sweep the checkout.
         git_repository(self.project)
-        with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang", "SIMULATED_PEER_IGNORES_SIGTERM": "1"}):
-            job_id = (await self.start(ref="HEAD"))["job_id"]
-            await self.wait_for_child()
-        [checkout] = (self.state / "worktrees").iterdir()
-        folder = self.folder(job_id)
-        os.kill(json.loads((folder / "job.json").read_text())["pid"], signal.SIGKILL)
+        real_git = shutil.which("git")
+        command = self.root / "blocking-peer"
+        command.write_text(f"""#!{sys.executable}
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-        def runner_gone():
-            with self.client.jobs.state_lock(folder):
-                return not self.client.jobs.runner_present(folder)
+if Path(sys.argv[0]).name == "git":
+    git = {real_git!r}
+    if sys.argv[4:6] != ["read-tree", "--reset"]:
+        os.execv(git, [git, *sys.argv[1:]])
+    subprocess.run([git, *sys.argv[1:]], check=True)
 
-        await eventually_async(runner_gone, "The killed runner still holds its job.")
-        with self.client.store.holding(checkout.name) as lock:
-            self.assertIsNone(lock)  # the guard's grace period for the SIGTERM-ignoring peer has not ended
-        await bridge.sweep_worktrees(self.client.store)
-        self.assertTrue(checkout.is_dir())
-        await self.assert_processes_stopped()
+root = Path({str(self.root)!r})
+(root / "guard.pid").write_text(str(os.getppid()))
+temporary = root / "command.pid.tmp"
+temporary.write_text(str(os.getpid()))
+temporary.replace(root / "command.pid")
+time.sleep({4 * DEADLINE_SECONDS})
+""")
+        command.chmod(0o700)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        shutil.copy2(command, bin_dir / "git")
+        ready = self.root / "command.pid"
 
-        def free():
-            with self.client.store.holding(checkout.name) as lock:
-                return lock is not None
+        for name, settings in (
+            ("peer", {"PEER_BRIDGE_CLAUDE_BIN": str(command)}),
+            ("read-tree", {"PATH": os.pathsep.join((str(bin_dir), os.environ["PATH"]))}),
+        ):
+            with self.subTest(command=name):
+                ready.unlink(missing_ok=True)
+                with patch.dict(os.environ, settings):
+                    job_id = (await self.start(ref="HEAD"))["job_id"]
+                await eventually_async(ready.exists, f"The guarded {name} command did not start.")
+                [checkout] = (self.state / "worktrees").iterdir()
+                folder = self.folder(job_id)
+                runner = json.loads((folder / "job.json").read_text())["pid"]
+                guard = int((self.root / "guard.pid").read_text())
 
-        await eventually_async(free, "The conversation stayed locked after its guard stopped.")
-        await bridge.sweep_worktrees(self.client.store)
-        self.assertFalse(checkout.exists())
+                def runner_gone():
+                    with self.client.jobs.state_lock(folder):
+                        return not self.client.jobs.runner_present(folder)
+
+                def free():
+                    with self.client.store.holding(checkout.name) as lock:
+                        return lock is not None
+
+                # Pause the guard before the lifeline closes. Only the test can let it begin shutdown.
+                os.kill(guard, signal.SIGSTOP)
+                try:
+                    os.kill(runner, signal.SIGKILL)
+                    await eventually_async(runner_gone, "The killed runner still holds its job.")
+                    self.assertFalse(free())
+                    await bridge.sweep_worktrees(self.client.store)
+                    self.assertTrue(checkout.is_dir())
+                finally:
+                    os.kill(guard, signal.SIGCONT)
+                    await self.assert_processes_stopped(("command.pid",))
+
+                await eventually_async(free, "The conversation stayed locked after its guard stopped.")
+                await bridge.sweep_worktrees(self.client.store)
+                self.assertFalse(checkout.exists())
 
     async def test_a_killed_runner_takes_its_peer_with_it_and_its_job_is_lost(self):
         with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang"}):
