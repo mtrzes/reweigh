@@ -10,7 +10,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 # Lets a single test file run on its own, as well as through discover.
@@ -20,11 +20,12 @@ from support import codex_thread, codex_turn  # noqa: E402  (support adds the pl
 import codex_app_server as app  # noqa: E402
 from thread_reader import CodexFilesSource  # noqa: E402
 
-# Answers from FAKE_SERVER_DATA; before its first thread/list answer it sends one server request.
+# Answers from FAKE_SERVER_DATA, sending one server request before the first list response by default.
 FAKE_SERVER = textwrap.dedent('''\
     import json, os, sys
     data = json.load(open(os.environ["FAKE_SERVER_DATA"]))
     log = open(os.environ["FAKE_SERVER_LOG"], "a")
+    ask_last = data.get("request_after_last_list")
     asked = False
     def send(message):
         sys.stdout.write(json.dumps(message) + "\\n")
@@ -34,12 +35,14 @@ FAKE_SERVER = textwrap.dedent('''\
         log.write(json.dumps(message) + "\\n")
         log.flush()
         method, params = message.get("method"), message.get("params") or {}
+        if ask_last and message.get("id") == "server-1":
+            break
         if "id" not in message or method is None:
             continue
         if method == "initialize":
             result = {"userAgent": "fake"}
         elif method == "thread/list":
-            if not asked:
+            if not asked and not ask_last:
                 asked = True
                 send({"id": "server-1", "method": "item/commandExecution/requestApproval", "params": {}})
                 send({"method": "thread/started", "params": {}})
@@ -51,7 +54,12 @@ FAKE_SERVER = textwrap.dedent('''\
         else:
             send({"id": message["id"], "error": {"code": -32601, "message": "unknown"}})
             continue
-        send({"id": message["id"], "result": result})
+        response = {"id": message["id"], "result": result}
+        if ask_last and method == "thread/list" and params["archived"]:
+            request = {"id": "server-1", "method": "item/commandExecution/requestApproval", "params": {}}
+            os.write(sys.stdout.fileno(), (json.dumps(response) + "\\n" + json.dumps(request) + "\\n").encode())
+        else:
+            send(response)
 ''')
 
 
@@ -76,6 +84,20 @@ class AppServerTests(unittest.TestCase):
 
     def sent(self):
         return [json.loads(line) for line in self.log_path.read_text().splitlines()]
+
+    def parity_run(self, version, **kwargs):
+        with patch.dict(os.environ, CODEX_HOME=str(self.home.resolve())), \
+                patch.object(app, "desktop_codex_executable", return_value=(str(self.server), "fake")), \
+                patch.object(app, "codex_version", return_value=version), \
+                patch.object(app, "AppServerClient", return_value=self.client()):
+            return app.run_parity(self.root.resolve() / "state", **kwargs)
+
+    def existing_parity_copy(self):
+        root = self.root.resolve() / "state" / "parity"
+        copy = root / "codex-home"
+        copy.mkdir(parents=True)
+        (copy / "copy.json").write_text(json.dumps({"copy_id": "c1", "created_at": "2026-11-01"}))
+        return root
 
     def add_thread(self, identifier, turns, cwd="/repo", **fields):
         self.data["threads"].append({"id": identifier, "source": "vscode", "cwd": cwd, "updatedAt": 1, **fields})
@@ -135,6 +157,66 @@ class AppServerTests(unittest.TestCase):
             with self.assertRaises(app.AppServerError):
                 client.write({"id": "server-1", "result": {}})
         self.assertNotIn("turn/start", self.log_path.read_text())
+
+    def test_parity_records_a_request_buffered_after_the_last_response(self):
+        self.existing_parity_copy()
+        self.data["request_after_last_list"] = True
+
+        def compare(_, source):
+            source.list_threads(lambda cwd: True)
+            return {"threads_compared": 1, "missing": [], "mismatches": []}
+
+        with patch.object(app, "compare", compare):
+            report = self.parity_run("codex-cli 1.2.3")
+        self.assertEqual(report["server_requests"], ["item/commandExecution/requestApproval"])
+        self.assertFalse(report["passed"])
+        self.assertIn({"id": "server-1", "error": app.REFUSAL}, self.sent())
+
+    def test_receive_stops_at_the_deadline_even_when_stdout_is_ready(self):
+        client = self.client()
+        client.selector, client.process = Mock(), Mock()
+        now = 0
+
+        def read(*args):
+            nonlocal now
+            now += 2
+            return b"{" if now == 2 else b"}\n"
+
+        with patch.object(app.time, "monotonic", lambda: now), patch.object(app.os, "read", read), \
+                self.assertRaisesRegex(app.AppServerError, "in time"):
+            client.receive(1)
+
+    def test_write_stops_at_the_deadline_even_when_stdin_accepts_partial_writes(self):
+        client = self.client()
+        client.process = Mock()
+        now = 0
+
+        def write(fd, data):
+            nonlocal now
+            now += 2
+            return 1
+
+        with patch.object(app, "REQUEST_TIMEOUT_SECONDS", 1), patch.object(app.time, "monotonic", lambda: now), \
+                patch.object(app.os, "write", write), self.assertRaisesRegex(app.AppServerError, "in time"):
+            client.write({"method": "initialized"})
+
+    def test_pagination_rejects_a_cursor_seen_on_an_earlier_page(self):
+        client = self.client()
+        pages = [{"data": [], "nextCursor": cursor} for cursor in ("a", "b", "a", None)]
+        with patch.object(client, "request", side_effect=pages), \
+                self.assertRaisesRegex(app.AppServerError, "repeated cursor"):
+            list(client.pages("thread/items/list", {}))
+
+    def test_teardown_sends_sigkill_to_the_group_even_when_the_leader_exits(self):
+        client = self.client()
+        client.selector, client.stderr = Mock(), Mock()
+        client.process = Mock(pid=42)
+        calls = Mock()
+        calls.attach_mock(client.process.wait, "wait")
+        with patch.object(app.os, "killpg", calls.killpg):
+            client.__exit__(app.AppServerError, None, None)
+        self.assertEqual([call.args for call in calls.mock_calls],
+                         [(42, app.signal.SIGTERM), (), (42, app.signal.SIGKILL), ()])
 
     def test_sandbox_paths_and_symlinks_cannot_reach_the_live_home(self):
         root = self.root.resolve()

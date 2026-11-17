@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +44,8 @@ from thread_reader import CodexFilesSource  # noqa: E402
 ALLOWED_REQUESTS = ("initialize", "thread/list", "thread/read", "thread/turns/list", "thread/items/list")
 ALLOWED_NOTIFICATIONS = ("initialized",)
 REQUEST_TIMEOUT_SECONDS = 60
+SHUTDOWN_DRAIN_SECONDS = 0.25
+TERMINATE_GRACE_SECONDS = 0.25
 PAGE_SIZE = 100
 # Files a sandboxed app-server must not change. SQLite rewrites a WAL database's -shm index whenever it is opened, even
 # by a reader, so it is neither cloned nor counted as a change to the database.
@@ -68,6 +71,13 @@ REFUSAL = {"code": -32601, "message": "Rejected by peer-bridge."}
 
 class AppServerError(Exception):
     """The app-server could not be used safely or did not answer."""
+
+
+def time_left(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AppServerError("The app-server did not answer in time.")
+    return remaining
 
 
 def check_outgoing(message):
@@ -104,49 +114,77 @@ class AppServerClient:
                             "TMPDIR": str(sandbox_home / "tmp")}
         self.executable = executable
         self.server_requests, self.notifications = [], []
-        self.process = None
+        self.process = self.selector = None
         self.buffer = b""
         self.next_id = 0
 
     def __enter__(self):
         self.stderr = open_private(Path(self.environment["HOME"]) / "app-server.log", append=True)
-        self.process = subprocess.Popen(
-            [self.executable, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
-            env=self.environment, start_new_session=True,
-        )
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(self.process.stdout, selectors.EVENT_READ)
         try:
+            self.process = subprocess.Popen(
+                [self.executable, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
+                env=self.environment, start_new_session=True,
+            )
+            os.set_blocking(self.process.stdin.fileno(), False)
+            os.set_blocking(self.process.stdout.fileno(), False)
+            self.selector = selectors.DefaultSelector()
+            self.selector.register(self.process.stdout, selectors.EVENT_READ)
             self.request("initialize", {"clientInfo": {"name": "peer-bridge", "version": "parity"},
                                         "capabilities": {"experimentalApi": True}})
             self.notify("initialized")
         except BaseException:
-            self.__exit__(None, None, None)  # a failed handshake must not leave the server running
+            self.__exit__(*sys.exc_info())
             raise
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc, traceback):
         try:
-            os.killpg(self.process.pid, signal.SIGTERM)
-            self.process.wait(timeout=10)
-        except ProcessLookupError:
-            pass
-        except subprocess.TimeoutExpired:
-            os.killpg(self.process.pid, signal.SIGKILL)
-            self.process.wait()
+            if exc_type is None:
+                deadline = time.monotonic() + SHUTDOWN_DRAIN_SECONDS
+                while (message := self.receive(deadline, allow_idle=True)) is not None:
+                    self.dispatch(message, deadline)
         finally:
-            self.selector.close()
-            for stream in (self.process.stdin, self.process.stdout, self.stderr):
-                try:
-                    stream.close()
-                except BrokenPipeError:
-                    pass
+            try:
+                if self.process is not None:
+                    self.stop_group()
+            finally:
+                if self.selector is not None:
+                    self.selector.close()
+                if self.process is not None:
+                    self.process.stdin.close()
+                    self.process.stdout.close()
+                self.stderr.close()
 
-    def write(self, message):
-        check_outgoing(message)
+    def stop_group(self):
         try:
-            self.process.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
-            self.process.stdin.flush()
+            # macOS can return EPERM for a group whose leader exited and has yet to be reaped.
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, signal.SIGTERM)
+            self.process.wait(timeout=TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            # The leader's exit does not imply that its helpers exited.
+            with suppress(ProcessLookupError):
+                os.killpg(self.process.pid, signal.SIGKILL)
+            self.process.wait(timeout=10)
+
+    def write(self, message, deadline=None):
+        check_outgoing(message)
+        if deadline is None:
+            deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        fd = self.process.stdin.fileno()
+        data = memoryview((json.dumps(message) + "\n").encode("utf-8"))
+        try:
+            while data:
+                time_left(deadline)
+                try:
+                    data = data[os.write(fd, data):]
+                except BlockingIOError:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(fd, selectors.EVENT_WRITE)
+                        if not selector.select(time_left(deadline)):
+                            raise AppServerError("The app-server did not read its input in time.")
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise AppServerError("The app-server closed its input.") from exc
 
@@ -154,33 +192,48 @@ class AppServerClient:
         self.write({"method": method})
 
     def request(self, method, params):
+        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
         check_outgoing({"id": self.next_id + 1, "method": method, "params": params})
         self.next_id += 1
-        self.write({"id": self.next_id, "method": method, "params": params})
-        deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+        self.write({"id": self.next_id, "method": method, "params": params}, deadline)
         while True:
             message = self.receive(deadline)
-            if "method" in message and "id" in message:
-                # The source never answers a server request with anything but a refusal.
-                self.server_requests.append(message["method"])
-                self.write({"id": message["id"], "error": REFUSAL})
-            elif "method" in message:
-                self.notifications.append(message["method"])
-            elif message.get("id") == self.next_id:
+            if message is None:
+                raise AppServerError("The app-server exited.")
+            if not self.dispatch(message, deadline) and message.get("id") == self.next_id:
                 if "error" in message:
                     raise AppServerError(f"{method} failed with code {message['error'].get('code')}.")
                 return message.get("result")
 
-    def receive(self, deadline):
+    def dispatch(self, message, deadline):
+        if "method" not in message:
+            return False
+        if "id" in message:
+            self.server_requests.append(message["method"])
+            self.write({"id": message["id"], "error": REFUSAL}, deadline)
+        else:
+            self.notifications.append(message["method"])
+        return True
+
+    def receive(self, deadline, *, allow_idle=False):
         while b"\n" not in self.buffer:
-            if not self.selector.select(timeout=max(0, deadline - time.monotonic())):
+            if not self.selector.select(time_left(deadline)):
+                if allow_idle and not self.buffer:
+                    return None
                 raise AppServerError("The app-server did not answer in time.")
-            chunk = os.read(self.process.stdout.fileno(), 65536)
+            time_left(deadline)
+            try:
+                chunk = os.read(self.process.stdout.fileno(), 65536)
+            except BlockingIOError:
+                continue
             if not chunk:
-                raise AppServerError("The app-server exited.")
+                if self.buffer:
+                    raise AppServerError("The app-server exited inside a message.")
+                return None
             self.buffer += chunk
             if len(self.buffer) > MAX_MESSAGE_BYTES:
                 raise AppServerError("The app-server sent a message larger than the limit.")
+        time_left(deadline)
         line, self.buffer = self.buffer.split(b"\n", 1)
         try:
             message = json.loads(line)
@@ -192,10 +245,17 @@ class AppServerClient:
 
     def pages(self, method, params):
         cursor = None
+        seen = set()
         while True:
             result = self.request(method, {**params, "cursor": cursor} if cursor else params)
-            yield from result.get("data") or []
+            if not isinstance(result, dict):
+                raise AppServerError(f"{method} returned a malformed page.")
             cursor = result.get("nextCursor")
+            if cursor:
+                if not isinstance(cursor, str) or cursor in seen:
+                    raise AppServerError(f"{method} returned an invalid or repeated cursor.")
+                seen.add(cursor)
+            yield from result.get("data") or []
             if not cursor:
                 return
 
@@ -465,7 +525,7 @@ def run_locked_parity(root, live, fresh_copy):
     with AppServerClient(executable, copy, sandbox) as client:
         report["codex_version"] = codex_version(executable, client.environment)
         report.update(compare(CodexFilesSource(copy), AppServerSource(client)))
-        report["server_requests"] = sorted(set(client.server_requests))
+    report["server_requests"] = sorted(set(client.server_requests))
     changes = changed_paths(before, fingerprint(copy))
     remove_symlinks(copy)
     report["thread_data_changes"] = [path for path in changes if is_thread_data(path)]
