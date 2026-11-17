@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 MAX_MESSAGE_CHARACTERS = 24_000
+MAX_TAIL_RECORDS = 128 * 1024
 CODEX_MAIN_SOURCES = {"vscode", "cli"}
 CODEX_TURN_EVENTS = ("task_started", "task_complete", "turn_aborted", "item_completed")
 CODEX_MESSAGE_PHASES = (None, "commentary", "final_answer")
@@ -113,15 +114,28 @@ def parse_line(line):
 
 
 def complete_records(data, from_start):
-    """Parse the complete lines in a block of bytes read from the end of a file.
+    """Yield the complete records in a bounded tail window one at a time.
 
     Unless the block starts at the beginning of the file, its leading partial line is dropped. An unterminated last
     line, which the app may still be writing, is always dropped.
     """
-    lines = data.split(b"\n")[:-1]
     if not from_start:
-        lines = lines[1:]
-    return [parse_line(line) for line in lines if line.strip()]
+        first_newline = data.find(b"\n")
+        if first_newline == -1:
+            return
+        start = first_newline + 1
+    else:
+        start = 0
+    for count in range(MAX_TAIL_RECORDS + 1):
+        end = data.find(b"\n", start)
+        if end == -1:
+            return
+        if count == MAX_TAIL_RECORDS:
+            raise ThreadUnavailable("The thread's recent history contains too many records.")
+        line = data[start:end]
+        if line.strip():
+            yield parse_line(line)
+        start = end + 1
 
 
 def scan_is_enough(scan, max_messages):

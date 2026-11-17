@@ -6,6 +6,7 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import consultation as c  # noqa: E402
@@ -469,12 +470,20 @@ class JobRuleTests(unittest.TestCase):
 class RecordParsingTests(unittest.TestCase):
     def test_complete_records(self):
         data = b'partial"}\n{"a": 1}\n\n{"b": 2}\n{"unfinished'
-        self.assertEqual(t.complete_records(data, from_start=False), [{"a": 1}, {"b": 2}])
-        self.assertEqual(t.complete_records(b'{"a": 1}\n{"b": 2}\n', from_start=True), [{"a": 1}, {"b": 2}])
+        self.assertEqual(list(t.complete_records(data, from_start=False)), [{"a": 1}, {"b": 2}])
+        self.assertEqual(list(t.complete_records(b'{"a": 1}\n{"b": 2}\n', from_start=True)), [{"a": 1}, {"b": 2}])
         for data in (b"{bad}\n", b"[1]\n"):
             with self.subTest(data=data):
                 with self.assertRaises(t.ThreadUnavailable):
-                    t.complete_records(data, from_start=True)
+                    list(t.complete_records(data, from_start=True))
+
+    def test_tail_decodes_only_during_iteration_and_stops_at_its_record_budget(self):
+        with patch.object(t, "MAX_TAIL_RECORDS", 2, create=True):
+            records = iter(t.complete_records(b'{"a": 1}\n{}\n{bad}\n', True))
+            self.assertEqual(next(records), {"a": 1})
+            self.assertEqual(next(records), {})
+            with self.assertRaisesRegex(t.ThreadUnavailable, "too many records"):
+                next(records)
 
     def test_text_of(self):
         blocks = [{"type": "text", "text": "a"}, {"type": "tool_use"}, {"type": "text", "text": 1}, "x",
