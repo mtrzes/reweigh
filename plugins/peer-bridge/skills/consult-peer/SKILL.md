@@ -1,6 +1,6 @@
 ---
 name: consult-peer
-description: Consult Codex from Claude Code or Claude Code from Codex when the user requests a peer opinion, a review or delegation, or asks to send or hand something to the other app or one of its sessions, with scoped context and resumable follow-ups; also read the other app's recent thread in the same repository, such as a review left in Codex Desktop. It cannot write into the other app's existing sessions: a handoff goes in your reply, which that session reads with read_codex_thread or read_claude_thread; never operate the other app's interface.
+description: Consult Codex from Claude Code or Claude Code from Codex when the user requests a peer opinion, a review, a steelman, a double-crux or delegation, or asks to send or hand something to the other app or one of its sessions, with scoped context and resumable follow-ups; also read the other app's recent thread in the same repository, such as a review left in Codex Desktop. It cannot write into the other app's existing sessions: a handoff goes in your reply, which that session reads with read_codex_thread or read_claude_thread; never operate the other app's interface.
 ---
 
 # Consult a peer
@@ -55,6 +55,15 @@ IDs are not accepted.
 The peer uses restricted consultation tools and cannot delegate through the bridge. If a request times out or reports
 unavailable authentication, report that limitation and continue independent work within the authorized task. Do not
 switch to a permission bypass or an unrestricted peer invocation to complete the consultation.
+
+## Steelman and double-crux
+
+Two request shapes sharpen a consultation:
+
+- **Steelman**: when the operator asks to steelman a change, proposal or design, or before you reject one, read
+  [steelman.md](steelman.md).
+- **Double-crux**: when you dispute a peer finding and the answer changes what the operator does, or the operator asks
+  for a double-crux, even before any consultation, read [double-crux.md](double-crux.md).
 
 ## Threads in the other app
 
