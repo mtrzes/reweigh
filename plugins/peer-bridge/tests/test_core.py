@@ -6,6 +6,7 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import consultation as c  # noqa: E402
@@ -482,12 +483,20 @@ class JobRuleTests(unittest.TestCase):
 class RecordParsingTests(unittest.TestCase):
     def test_complete_records(self):
         data = b'partial"}\n{"a": 1}\n\n{"b": 2}\n{"unfinished'
-        self.assertEqual(t.complete_records(data, from_start=False), [{"a": 1}, {"b": 2}])
-        self.assertEqual(t.complete_records(b'{"a": 1}\n{"b": 2}\n', from_start=True), [{"a": 1}, {"b": 2}])
+        self.assertEqual(list(t.complete_records(data, from_start=False)), [{"a": 1}, {"b": 2}])
+        self.assertEqual(list(t.complete_records(b'{"a": 1}\n{"b": 2}\n', from_start=True)), [{"a": 1}, {"b": 2}])
         for data in (b"{bad}\n", b"[1]\n"):
             with self.subTest(data=data):
                 with self.assertRaises(t.ThreadUnavailable):
-                    t.complete_records(data, from_start=True)
+                    list(t.complete_records(data, from_start=True))
+
+    def test_tail_decodes_only_during_iteration_and_stops_at_its_record_budget(self):
+        with patch.object(t, "MAX_TAIL_RECORDS", 2, create=True):
+            records = iter(t.complete_records(b'{"a": 1}\n{}\n{bad}\n', True))
+            self.assertEqual(next(records), {"a": 1})
+            self.assertEqual(next(records), {})
+            with self.assertRaisesRegex(t.ThreadUnavailable, "too many records"):
+                next(records)
 
     def test_text_of(self):
         blocks = [{"type": "text", "text": "a"}, {"type": "tool_use"}, {"type": "text", "text": 1}, "x",
@@ -520,7 +529,7 @@ class CodexParsingTests(unittest.TestCase):
 
     def test_codex_main_thread(self):
         def meta(**payload):
-            return {"type": "session_meta", "payload": {"cwd": "/repo"} | payload}
+            return {"type": "session_meta", "payload": {"cwd": "/repo", "id": "id-1"} | payload}
         cases = (
             (meta(source="cli"), ("cli", "/repo", None)),
             (meta(source="vscode", forked_from_id="p"), ("vscode", "/repo", "p")),
@@ -529,7 +538,7 @@ class CodexParsingTests(unittest.TestCase):
         )
         for record, expected in cases:
             with self.subTest(record=record):
-                self.assertEqual(t.codex_main_thread(record), expected)
+                self.assertEqual(t.codex_main_thread(record, "id-1"), expected)
 
     @staticmethod
     def event(kind, turn, **fields):
@@ -537,7 +546,7 @@ class CodexParsingTests(unittest.TestCase):
 
     def message(self, turn, text):
         return self.event("item_completed", turn, item={"type": "AgentMessage", "content": [
-            {"type": "Text", "text": text}], "phase": "final"})
+            {"type": "Text", "text": text}], "phase": "final_answer"})
 
     def test_turn_states(self):
         e = self.event
@@ -559,7 +568,7 @@ class CodexParsingTests(unittest.TestCase):
         records = [self.message("t1", "one"), {"type": "response_item"}, self.message("t1", " "),
                    self.message("t1", "two"), self.event("task_complete", "t1", last_agent_message="two")]
         snapshot = t.codex_snapshot(self.SUMMARY, t.scan_codex(records), 1)
-        self.assertEqual(snapshot.messages, [t.AgentMessage("t1", "two", "final")])
+        self.assertEqual(snapshot.messages, [t.AgentMessage("t1", "two", "final_answer")])
         records[-1] = self.event("task_complete", "t1", last_agent_message="something else")
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not match"):
             t.codex_snapshot(self.SUMMARY, t.scan_codex(records), 1)
@@ -569,6 +578,26 @@ class CodexParsingTests(unittest.TestCase):
                  self.event("task_started", "t1"), self.event("task_complete", "t1", last_agent_message="new")]
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not match"):
             t.codex_snapshot(self.SUMMARY, t.scan_codex(older), 3)
+
+    def test_malformed_codex_turn_and_message_fields_are_refused(self):
+        e = self.event
+        text_block = {"type": "Text", "text": "new"}
+        agent = {"type": "AgentMessage", "content": [text_block]}
+        older = [self.message("t0", "old"), e("task_complete", "t0", last_agent_message="old")]
+        cases = (
+            e("task_complete", "t1", last_agent_message={"text": "new"}),
+            e("task_complete", "t1", error=True),
+            e("task_started", ["t1"]),
+            e("turn_aborted", {}),
+            e("item_completed", "t1", item=[]),
+            e("item_completed", "t1", item=agent | {"phase": {"text": "new"}}),
+            e("item_completed", "t1", item=agent | {"phase": "unexpected phase"}),
+            e("item_completed", "t1", item=agent | {"content": {"text": "new"}}),
+            e("item_completed", "t1", item=agent | {"content": [text_block | {"text": 42}]}),
+        )
+        for malformed in cases:
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(t.ThreadUnavailable, "malformed line"):
+                t.scan_codex([*older, malformed])
 
 
 class ClaudeParsingTests(unittest.TestCase):
@@ -582,12 +611,13 @@ class ClaudeParsingTests(unittest.TestCase):
     def scan(self, records):
         return t.scan_claude(records, self.belongs)
 
-    def test_head_title_and_interactivity(self):
-        self.assertEqual(t.claude_head(lines({"type": "summary"}, {"cwd": "/repo", "entrypoint": "cli"})),
+    def test_session_directories_and_interactivity(self):
+        head = {"cwd": "/repo", "entrypoint": "cli", "sessionId": "id-1"}
+        self.assertEqual(t.claude_head(lines({"type": "summary"}, head), "id-1"),
                          ("/repo", "cli"))
-        self.assertEqual(t.claude_head([b"broken\n", *lines({"cwd": "/repo"})]), ("/repo", None))
-        self.assertEqual(t.claude_head(lines({"cwd": 3})), (None, None))
-        self.assertEqual(t.claude_head([b"[" * 100_000 + b"\n", *lines({"cwd": "/repo", "entrypoint": "cli"})]),
+        self.assertEqual(t.claude_head([b"broken\n", *lines(head | {"entrypoint": None})], "id-1"), ("/repo", None))
+        self.assertEqual(t.claude_head(lines({"cwd": 3}), "id-1"), (None, None))
+        self.assertEqual(t.claude_head([b"[" * 100_000 + b"\n", *lines(head)], "id-1"),
                          ("/repo", "cli"))  # nesting too deep to parse is skipped like any broken line
         # A session that moved after it started belongs where its latest records are.
         self.assertEqual(t.claude_last_cwd([{"cwd": "/start"}, {"type": "x"}, {"cwd": "/repo"}, {"cwd": 3}]), "/repo")
@@ -595,10 +625,6 @@ class ClaudeParsingTests(unittest.TestCase):
         for entrypoint, expected in (("cli", True), ("", False), ("sdk-cli", False), (None, False), (3, False)):
             with self.subTest(entrypoint=entrypoint):
                 self.assertEqual(t.is_interactive_claude_session(entrypoint), expected)
-        titles = lines({"type": "ai-title", "aiTitle": "Generated"}, {"type": "custom-title", "customTitle": "Mine"})
-        self.assertEqual(t.claude_title(titles), "Mine")
-        self.assertEqual(t.claude_title(titles[:1]), "Generated")
-        self.assertIsNone(t.claude_title(lines({"type": "user"})))
 
     @staticmethod
     def user(text, uuid_="u1", cwd="/repo"):
@@ -638,6 +664,31 @@ class ClaudeParsingTests(unittest.TestCase):
         scan = self.scan(records)
         self.assertEqual(scan.latest, t.TurnState("u1", "completed"))
         self.assertEqual([message.text for message in scan.messages], ["calling", "answer"])
+
+    def test_sidechains_cannot_change_main_session_ownership(self):
+        for main, side, expected in (("/other", "/repo", []), ("/repo", "/other", ["answer"])):
+            with self.subTest(main=main):
+                assistant = self.assistant("answer", "end_turn")
+                del assistant["cwd"]
+                records = [self.user("q", cwd=main), {**self.user("side", cwd=side), "isSidechain": True}, assistant]
+                self.assertEqual((t.claude_last_cwd(records), [m.text for m in self.scan(records).messages]),
+                                 (main, expected))
+
+    def test_claude_rewind_uses_only_the_current_leafs_ancestors(self):
+        records = [
+            self.user("q1", "u1") | {"parentUuid": None},
+            self.assistant("a1", "end_turn", uuid="a1", parentUuid="u1"),
+            self.user("q2", "u2") | {"parentUuid": "a1"},
+            self.assistant("a2", "end_turn", uuid="a2", parentUuid="u2"),
+            self.user("q3", "u3") | {"parentUuid": "a1"},
+            self.assistant("a3", "end_turn", uuid="a3", parentUuid="u3"),
+        ]
+        scan = self.scan(records)
+        self.assertEqual((scan.latest, [message.text for message in scan.messages]),
+                         (t.TurnState("u3", "completed"), ["a1", "a3"]))
+        for parent in ("missing", "a3"):
+            with self.subTest(parent=parent), self.assertRaisesRegex(t.ThreadUnavailable, "ancestry"):
+                self.scan([*records[:-2], records[-2] | {"parentUuid": parent}, records[-1]])
 
     def test_only_the_current_stay_in_the_repository_counts(self):
         user, reply = self.user, self.assistant

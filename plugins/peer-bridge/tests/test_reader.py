@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import stat
+import struct
 import sys
 import tempfile
 import unittest
@@ -133,15 +134,63 @@ class ReaderTests(unittest.TestCase):
             errors.add(str(raised.exception))
         self.assertEqual(errors, {"No readable thread with that ID or name belongs to this repository."})
 
+    def test_history_entries_must_be_regular_files_with_the_recorded_id(self):
+        for provider, make_history in (
+            ("codex", lambda: codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."))),
+            ("claude", lambda: claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."))),
+        ):
+            identifier, path = make_history()
+            alternate_id = str(uuid.uuid4())
+            copy = path.with_name(path.name.replace(identifier, alternate_id))
+            copy.write_bytes(path.read_bytes())
+            with self.subTest(provider=provider, entry="different recorded ID"):
+                self.assertEqual([row["id"] for row in self.threads(provider)["threads"]], [identifier])
+                with self.assertRaisesRegex(ThreadUnavailable, "^No readable thread"):
+                    self.read(provider, alternate_id)
+            copy.unlink()
+            outside = self.root / path.name
+            path.rename(outside)
+            path.symlink_to(outside)
+            with self.subTest(provider=provider, entry="symlink with matching ID"):
+                self.assertEqual(self.threads(provider)["threads"], [])
+                with self.assertRaisesRegex(ThreadUnavailable, "^No readable thread"):
+                    self.read(provider, identifier)
+
+    def test_archiving_a_rollout_after_its_header_is_read_keeps_the_listing(self):
+        moving, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), mtime=1_000)
+        other, _ = codex_thread(self.codex_home, self.project, codex_turn("t2", "Also done."), mtime=2_000)
+        archive = self.codex_home / "archived_sessions"
+        archive.mkdir()
+        parse = thread_reader.parse_line
+
+        def archive_after_header(line):
+            record = parse(line)
+            if record.get("payload", {}).get("id") == moving:
+                path.rename(archive / path.name)
+            return record
+
+        with patch.object(thread_reader, "parse_line", archive_after_header):
+            rows = self.threads("codex")["threads"]
+        self.assertEqual([row["id"] for row in rows], [other, moving])
+        self.assertEqual(rows[1]["updated_at"], "1970-01-01T00:16:40+00:00")
+
+    def test_codex_index_only_reads_recent_complete_lines_within_its_budget(self):
+        older, _ = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Older")
+        newer, _ = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Newer")
+        index = self.codex_home / "session_index.jsonl"
+        first, second = index.read_bytes().splitlines(keepends=True)
+        index.write_bytes(first + b"x" * 1024 + b"\n" + second)
+        with patch.object(thread_reader, "MAX_METADATA_BYTES", len(second) + 10, create=True):
+            names = {row["id"]: row["name"] for row in self.threads("codex")["threads"]}
+        self.assertEqual(names, {older: None, newer: "Newer"})
+
     def test_history_with_unexpected_value_types_is_refused_with_a_reason(self):
-        codex_thread(self.codex_home, self.project, codex_turn(["t1"], "Done."), name="Codex types")
         claude_session(self.claude_home, self.project, claude_prompt(5), claude_reply("Done."), title="Claude types")
         claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."), entrypoint=5)
         # The bridge turns a value of the wrong type, which the parser meets as a TypeError, into a named refusal.
-        client = bridge.Bridge(readers={provider: self.reader(provider) for provider in ("claude", "codex")})
-        for provider, name in (("codex", "Codex types"), ("claude", "Claude types")):
-            with self.subTest(provider=provider), self.assertRaisesRegex(bridge.BridgeError, "malformed line"):
-                asyncio.run(client.thread(provider, str(self.project), name))
+        client = bridge.Bridge(readers={"claude": self.reader("claude")})
+        with self.assertRaisesRegex(bridge.BridgeError, "malformed line"):
+            asyncio.run(client.thread("claude", str(self.project), "Claude types"))
         self.assertEqual([thread["name"] for thread in self.threads("claude")["threads"]], ["Claude types"])
 
     def test_compressed_rollouts_are_listed_and_read_like_plain_ones(self):
@@ -196,6 +245,65 @@ class ReaderTests(unittest.TestCase):
                      suffix=".jsonl.zst", tail="\n" + later_turn)
         with self.assertRaisesRegex(ThreadUnavailable, "ends inside a record"):
             self.read("codex", "Mid record")
+
+    def test_compressed_input_budgets_count_zstd_skippable_frames(self):
+        identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
+                                        suffix=".jsonl.zst")
+        content = path.read_bytes()
+        skippable = struct.pack("<II", 0x184D2A50, 4096) + bytes(4096)
+        path.write_bytes(skippable + content)
+        with patch.object(thread_reader, "MAX_METADATA_BYTES", 1024, create=True):
+            self.assertEqual(self.threads("codex")["threads"], [])
+        path.write_bytes(content + skippable)
+        self.assertEqual([row["id"] for row in self.threads("codex")["threads"]], [identifier])
+        with patch.object(thread_reader, "MAX_COMPRESSED_BYTES", 1024, create=True):
+            with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
+                self.read("codex", identifier)
+
+    def test_compressed_read_retries_a_parse_error_when_the_file_changed(self):
+        identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
+                                        suffix=".jsonl.zst")
+        content = path.read_bytes()
+        decompress = thread_reader.decompress_history
+        attempts = []
+
+        def change_during_decompression(source, limit=None):
+            attempts.append(1)
+            if len(attempts) == 1:
+                path.write_bytes(b"\x00" * len(content))
+                try:
+                    return decompress(source, limit)
+                finally:
+                    path.write_bytes(content)
+            return decompress(source, limit)
+
+        with patch.object(thread_reader, "decompress_history", change_during_decompression):
+            self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
+        self.assertEqual(len(attempts), 2)
+
+    def test_each_compressed_read_attempt_uses_its_open_extent(self):
+        import zstandard
+
+        identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "First."),
+                                        suffix=".jsonl.zst")
+        records = "".join(json.dumps(record) + "\n" for record in codex_turn("t2", "Second.")).encode()
+        frame = zstandard.ZstdCompressor().compress(records)
+        decompress = thread_reader.decompress_history
+        decoded = []
+
+        def append_during_decompression(source, limit=None):
+            if not decoded:
+                with path.open("ab") as output:
+                    output.write(frame)
+            result = decompress(source, limit)
+            decoded.append(result[1])
+            return result
+
+        with patch.object(thread_reader, "decompress_history", append_during_decompression):
+            self.assertEqual(self.read("codex", identifier)["messages"][-1]["text"], "Second.")
+        self.assertEqual(len(decoded), 2)
+        self.assertFalse(decoded[0].endswith(records))
+        self.assertEqual(decoded[1], decoded[0] + records)
 
     def test_a_history_that_changes_while_it_is_read_is_read_once_more_then_refused(self):
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Moving")
@@ -267,6 +375,24 @@ class ReaderTests(unittest.TestCase):
                          {"status": "inProgress", "finished": False, "liveness": "unknown"})
         self.assertEqual(self.read("claude", stopped)["latest_turn"]["status"], "interrupted")
 
+    def test_claude_read_expands_the_tail_to_resolve_a_rewind(self):
+        records = [
+            claude_prompt() | {"uuid": "u1", "parentUuid": None},
+            claude_reply("Kept.") | {"uuid": "a1", "parentUuid": "u1"},
+            {"type": "file-history-snapshot", "snapshot": "x" * 4096},
+            claude_prompt() | {"uuid": "u2", "parentUuid": "a1"},
+            claude_reply("Abandoned.") | {"uuid": "a2", "parentUuid": "u2"},
+            claude_prompt() | {"uuid": "u3", "parentUuid": "a1"},
+            claude_reply("After rewind.") | {"uuid": "a3", "parentUuid": "u3"},
+        ]
+        identifier, _ = claude_session(self.claude_home, self.project, *records)
+        with patch.object(thread_reader, "INITIAL_TAIL_BYTES", 2048):
+            self.assertEqual([m["text"] for m in self.read("claude", identifier, max_messages=1)["messages"]],
+                             ["After rewind."])
+            with patch.object(thread_reader, "MAX_TAIL_BYTES", 2048):
+                with self.assertRaisesRegex(ThreadUnavailable, "active ancestry could not be resolved"):
+                    self.read("claude", identifier, max_messages=1)
+
     def test_a_claude_session_belongs_where_its_latest_records_are(self):
         home = self.claude_home
         moved_in, path = claude_session(home, self.other, claude_prompt(), claude_reply("Started elsewhere."),
@@ -308,9 +434,24 @@ class ReaderTests(unittest.TestCase):
                 path, {**claude_prompt(), **elsewhere}, {**claude_reply("Elsewhere."), **elsewhere})))
             return lambda: self.read("claude", thread), "^No readable thread with that ID"
 
+        def cwd_symlink_retargeted_after_selection(stack, codex, claude):
+            linked = claude.parent / "linked"
+            linked.parent.mkdir()
+            linked.symlink_to(self.worktree)
+            thread, path = claude_session(claude, linked, claude_prompt(), claude_reply("Here."))
+
+            def retarget():
+                linked.unlink()
+                linked.symlink_to(self.other)
+                append(path, {**claude_reply("Elsewhere."), "cwd": str(linked)})
+
+            stack.enter_context(at_selection(retarget))
+            return lambda: self.read("claude", thread), "^No readable thread with that ID"
+
         def codex_replaced_after_selection(stack, codex, claude):
             thread, path = codex_thread(codex, self.project, codex_turn("t1", "Here."))
-            _, foreign = codex_thread(codex.parent / "elsewhere-codex", self.other, codex_turn("t1", "Elsewhere."))
+            _, foreign = codex_thread(codex.parent / "elsewhere-codex", self.other, codex_turn("t1", "Elsewhere."),
+                                      meta={"id": thread})
             stack.enter_context(at_selection(lambda: os.replace(foreign, path)))
             return lambda: self.read("codex", thread), "^No readable thread with that ID"
 
@@ -334,11 +475,15 @@ class ReaderTests(unittest.TestCase):
             thread, path = claude_session(claude, self.other, claude_prompt(), claude_reply("Started elsewhere."),
                                           {"type": "custom-title", "customTitle": "Elsewhere title"}, project="other")
             append(path, {**claude_prompt(), "cwd": str(self.project)})
+            listing = self.threads("claude")["threads"]
+            self.assertEqual([(entry["id"], entry["name"]) for entry in listing], [(thread, None)])
+            with self.assertRaisesRegex(ThreadUnavailable, "^No readable thread with that ID"):
+                self.read("claude", "Elsewhere title")
             return (lambda: self.read("claude", thread),
                     ([], {"status": "inProgress", "finished": False, "liveness": "unknown"}, None))
 
-        rows = (claude_append_after_selection, codex_replaced_after_selection, move_hidden_beyond_the_first_window,
-                directory_beyond_the_cap, moved_in_after_a_foreign_answer)
+        rows = (claude_append_after_selection, cwd_symlink_retargeted_after_selection, codex_replaced_after_selection,
+                move_hidden_beyond_the_first_window, directory_beyond_the_cap, moved_in_after_a_foreign_answer)
         for row in rows:
             homes = self.root / row.__name__
             codex, claude = homes / "codex-home", homes / "claude-home"
@@ -356,21 +501,27 @@ class ReaderTests(unittest.TestCase):
     def fixture(self, name):
         """A real session file with every text replaced (dev/scrub_fixture.py), placed in this test's project."""
         text = (Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8")
-        return text.replace("{CWD}", json.dumps(str(self.project))[1:-1])
+        return [json.loads(line) for line in text.replace("{CWD}", json.dumps(str(self.project))[1:-1]).splitlines()]
 
     def test_real_histories_of_both_apps_are_read(self):
         # Synthetic records prove each rule; these prove the parsers still fit what the apps actually write.
         identifier = str(uuid.uuid4())
         rollout = self.codex_home / "sessions" / "2026" / "04" / "16" / f"rollout-2026-04-16T12-22-13-{identifier}.jsonl"
         rollout.parent.mkdir(parents=True)
-        rollout.write_text(self.fixture("codex-desktop-rollout.jsonl"), encoding="utf-8")
-        events = [json.loads(line)["payload"] for line in rollout.read_text(encoding="utf-8").splitlines()]
+        records = self.fixture("codex-desktop-rollout.jsonl")
+        records[0]["payload"]["id"] = identifier
+        rollout.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        events = [record["payload"] for record in records]
         final = [event["last_agent_message"] for event in events if event.get("type") == "task_complete"][-1]
         result = self.read("codex", identifier)
         self.assertEqual((result["latest_turn"]["status"], result["messages"][-1]["text"]), ("completed", final))
         session = self.claude_home / "projects" / "project" / f"{uuid.uuid4()}.jsonl"
         session.parent.mkdir(parents=True)
-        session.write_text(self.fixture("claude-desktop-session.jsonl"), encoding="utf-8")
+        records = self.fixture("claude-desktop-session.jsonl")
+        for record in records:
+            if "sessionId" in record:
+                record["sessionId"] = session.stem
+        session.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         result = self.read("claude", session.stem)
         self.assertEqual(result["latest_turn"]["status"], "completed")
         self.assertTrue(result["messages"])

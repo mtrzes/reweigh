@@ -211,9 +211,11 @@ which no consultation can continue:
 A thread is readable only when its recorded working directory belongs to the same git repository as
 `working_directory`, worktrees included; a thread whose worktree has since been deleted is not. The read checks this
 again on the same open file it reads the messages from, and refuses a file that changes while it is read, after one
-more try. A Claude Code session that moved between repositories returns only the replies and title recorded since it
-last entered this one; a session whose latest working directory is not named within its last 32 MB is refused. Only
-agent messages come back, never prompts, tool calls, tool output or reasoning, up to 24,000 characters. `latest_turn`
+more try. For Claude Code, replies, listed titles and exact-name selection use the main session's current stay in
+the repository. After a rewind, replies follow the active branch. The reader looks back up to 32 MiB for the
+main session's working directory and active branch links. It refuses a session when those records cannot establish
+its directory or resolve a branch gap. Only agent messages come back, never prompts, tool calls, tool output or
+reasoning, up to 24,000 characters. `latest_turn`
 gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut
 off at its output limit counts as `completed` and a refusal as `failed`. For an unfinished turn, `liveness` is `abandoned` when
 Codex keeps no writer-lock file for the thread, and `unknown` otherwise: the listing's `writer_lock_file` usually means

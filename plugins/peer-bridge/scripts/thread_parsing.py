@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 MAX_MESSAGE_CHARACTERS = 24_000
+MAX_TAIL_RECORDS = 128 * 1024
 CODEX_MAIN_SOURCES = {"vscode", "cli"}
+CODEX_TURN_EVENTS = ("task_started", "task_complete", "turn_aborted", "item_completed")
+CODEX_MESSAGE_PHASES = (None, "commentary", "final_answer")
+MALFORMED_CODEX_EVENT = "The thread's history file has a malformed line for a Codex event."
 # Codex compresses older rollouts with zstd; the records inside are the same JSONL.
 ROLLOUT_FORMATS = ((".jsonl", "jsonl"), (".jsonl.zst", "zstd"))
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -35,6 +39,10 @@ NOT_IN_REPOSITORY = "No readable thread with that ID or name belongs to this rep
 
 class ThreadUnavailable(Exception):
     """A thread cannot be read safely. The message names the reason and never quotes the thread."""
+
+
+class ClaudeAncestryGap(ThreadUnavailable):
+    """An active parent may be further back than the current tail window."""
 
 
 @dataclass(frozen=True)
@@ -106,15 +114,28 @@ def parse_line(line):
 
 
 def complete_records(data, from_start):
-    """Parse the complete lines in a block of bytes read from the end of a file.
+    """Yield the complete records in a bounded tail window one at a time.
 
     Unless the block starts at the beginning of the file, its leading partial line is dropped. An unterminated last
     line, which the app may still be writing, is always dropped.
     """
-    lines = data.split(b"\n")[:-1]
     if not from_start:
-        lines = lines[1:]
-    return [parse_line(line) for line in lines if line.strip()]
+        first_newline = data.find(b"\n")
+        if first_newline == -1:
+            return
+        start = first_newline + 1
+    else:
+        start = 0
+    for count in range(MAX_TAIL_RECORDS + 1):
+        end = data.find(b"\n", start)
+        if end == -1:
+            return
+        if count == MAX_TAIL_RECORDS:
+            raise ThreadUnavailable("The thread's recent history contains too many records.")
+        line = data[start:end]
+        if line.strip():
+            yield parse_line(line)
+        start = end + 1
 
 
 def scan_is_enough(scan, max_messages):
@@ -133,6 +154,11 @@ def text_of(blocks, block_type):
 
 def keep_recent(snapshot_messages, max_messages):
     return snapshot_messages[-max_messages:]
+
+
+def require_history_id(recorded, expected):
+    if recorded != expected:
+        raise ThreadUnavailable("The thread's recorded ID does not match its history filename.")
 
 
 # Codex
@@ -170,12 +196,14 @@ def parse_session_index(lines):
     return names
 
 
-def codex_main_thread(meta):
+def codex_main_thread(meta, identifier):
     """Return (source, cwd, forked_from_id) for a Desktop or interactive CLI thread's session_meta, else None.
 
     Subagent and guardian threads record their source as an object; consultations record "exec".
     """
     payload = meta.get("payload") if meta.get("type") == "session_meta" else None
+    if isinstance(payload, dict):
+        require_history_id(payload.get("id"), identifier)
     source = payload.get("source") if isinstance(payload, dict) else None
     if not isinstance(source, str) or source not in CODEX_MAIN_SOURCES:
         return None
@@ -185,26 +213,52 @@ def codex_main_thread(meta):
     return source, cwd, payload.get("forked_from_id")
 
 
+def codex_agent_message(item, turn_id):
+    if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+        raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+    if item["type"] != "AgentMessage":
+        return None
+    content, phase = item.get("content"), item.get("phase")
+    if not isinstance(content, list) or phase not in CODEX_MESSAGE_PHASES:
+        raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+    text = []
+    for block in content:
+        if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+            raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+        if block["type"] == "Text":
+            if not isinstance(block.get("text"), str):
+                raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+            text.append(block["text"])
+    joined = "".join(text)
+    return AgentMessage(turn_id, joined, phase) if joined.strip() else None
+
+
 def scan_codex(records):
     latest, messages, completions = None, [], {}
     for record in records:
-        payload = record.get("payload")
-        if record.get("type") != "event_msg" or not isinstance(payload, dict):
+        if record.get("type") != "event_msg":
             continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("type"), str):
+            raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
         kind, turn_id = payload.get("type"), payload.get("turn_id")
+        if kind not in CODEX_TURN_EVENTS:
+            continue
+        if turn_id is not None and not isinstance(turn_id, str):
+            raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
         if kind == "task_started":
             latest = TurnState(turn_id, "inProgress")
         elif kind == "task_complete":
-            latest = TurnState(turn_id, "failed" if payload.get("error") else "completed")
-            completions[turn_id] = payload.get("last_agent_message")
+            error, final = payload.get("error"), payload.get("last_agent_message")
+            if ((error is not None and not isinstance(error, (dict, str)))
+                    or (final is not None and not isinstance(final, str))):
+                raise ThreadUnavailable(MALFORMED_CODEX_EVENT)
+            latest = TurnState(turn_id, "failed" if error else "completed")
+            completions[turn_id] = final
         elif kind == "turn_aborted":
             latest = TurnState(turn_id, "interrupted")
-        elif kind == "item_completed":
-            item = payload.get("item")
-            if isinstance(item, dict) and item.get("type") == "AgentMessage":
-                text = text_of(item.get("content"), "Text")
-                if text.strip():
-                    messages.append(AgentMessage(turn_id, text, item.get("phase")))
+        elif message := codex_agent_message(payload.get("item"), turn_id):
+            messages.append(message)
     return Scan(latest, messages, completions)
 
 
@@ -225,25 +279,39 @@ def codex_snapshot(summary, scan, max_messages):
 # Claude Code
 
 
-def claude_head(lines):
+def is_main_claude_record(entry):
+    return entry.get("isSidechain", False) is False
+
+
+def main_claude_records(records, identifier):
+    for entry in records:
+        if is_main_claude_record(entry):
+            if identifier is not None and "sessionId" in entry:
+                require_history_id(entry["sessionId"], identifier)
+            yield entry
+
+
+def claude_head(lines, identifier):
     """Return the session's first recorded working directory and its entrypoint, None when it records none."""
     for line in lines:
         try:
             entry = json.loads(line)
         except (ValueError, RecursionError):
             continue
-        if isinstance(entry, dict) and isinstance(entry.get("cwd"), str):
+        if isinstance(entry, dict) and is_main_claude_record(entry) and isinstance(entry.get("cwd"), str):
+            require_history_id(entry.get("sessionId"), identifier)
             entrypoint = entry.get("entrypoint")
             return entry["cwd"], entrypoint if isinstance(entrypoint, str) and entrypoint else None
     return None, None
 
 
-def claude_last_cwd(records):
+def claude_last_cwd(records, identifier=None):
     """The working directory the session's most recent records name: a session can move after it starts."""
-    for entry in reversed(records):
+    cwd = None
+    for entry in main_claude_records(records, identifier):
         if isinstance(entry.get("cwd"), str):
-            return entry["cwd"]
-    return None
+            cwd = entry["cwd"]
+    return cwd
 
 
 def is_interactive_claude_session(entrypoint):
@@ -262,22 +330,39 @@ def chosen_title(titles):
     return titles.get("custom-title") or titles.get("ai-title")
 
 
-def claude_title(lines):
-    """Return the session's custom title, else its generated title, else None, for the listing."""
-    titles = {}
-    for line in lines:
-        if b'"custom-title"' not in line and b'"ai-title"' not in line:
+def claude_active_branch(records, identifier, whole):
+    """Return the last main node's ancestry, or None for histories without parent links."""
+    parents = {}
+    unlinked_chat = False
+    for entry in main_claude_records(records, identifier):
+        if "parentUuid" not in entry:
+            unlinked_chat |= entry.get("type") in ("user", "assistant")
             continue
-        try:
-            entry = json.loads(line)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(entry, dict):
-            keep_title(titles, entry)
-    return chosen_title(titles)
+        node, parent = entry.get("uuid"), entry["parentUuid"]
+        if not isinstance(node, str) or node in parents or (parent is not None and not isinstance(parent, str)):
+            raise ThreadUnavailable("The Claude session's history has malformed ancestry.")
+        parents[node] = parent, len(parents)
+    if not parents:
+        return None
+    if unlinked_chat:
+        raise ThreadUnavailable("The Claude session's history has missing ancestry links.")
+
+    active, position = set(), len(parents)
+    node = next(reversed(parents))
+    while node in parents:
+        parent, preceding_position = parents[node]
+        if preceding_position >= position:
+            raise ThreadUnavailable("The Claude session's history has malformed ancestry.")
+        active.add(node)
+        node, position = parent, preceding_position
+    # The oldest node of a cut-off window can have a parent just outside it. A gap later in the window needs a
+    # wider scan to find out where the session resumed.
+    if node is not None and (whole or position != 0):
+        raise ClaudeAncestryGap("The Claude session's active ancestry could not be resolved in recent history.")
+    return active
 
 
-def scan_claude(records, belongs):
+def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=True):
     """Find the latest turn, agent messages and title in the session's current stay in the requested repository.
 
     A record that names a working directory sets where the following records are; belongs says whether a directory is
@@ -285,21 +370,27 @@ def scan_claude(records, belongs):
     session comes back later, and records before the first one that names a directory are not counted: at a window
     cut from the file's end, nothing says where they were.
     """
+    active = None if title_only else claude_active_branch(records, identifier, whole)
     latest, messages, turn_id, titles = None, [], None, {}
     inside, segment_start = None, False
-    for entry in records:
+    for entry in main_claude_records(records, identifier):
+        node = entry.get("uuid")
+        on_branch = active is None or (isinstance(node, str) and node in active)
         cwd = entry.get("cwd")
         if isinstance(cwd, str):
             here = belongs(cwd)
             if not here:
                 latest, messages, turn_id, titles = None, [], None, {}
-            elif inside is False:
-                segment_start = True
-            inside = here
+                inside = False
+            elif on_branch:
+                # An abandoned branch cannot grant ownership, but a recorded move out still ends the stay.
+                if inside is False:
+                    segment_start = True
+                inside = True
         if not inside:
             continue
         keep_title(titles, entry)
-        if entry.get("isSidechain") or entry.get("isMeta"):
+        if title_only or not on_branch or entry.get("isMeta"):
             continue
         message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
         content = message.get("content")

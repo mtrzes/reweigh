@@ -27,6 +27,12 @@ line runs.
   opens its files without following symlinks. Cleanup checks that the state directory and its folders are private,
   real directories before it lists or removes anything in them. Job cleanup requires a canonical UUID in each job,
   staging or deletion directory name. Only a regular file can mark a job for cancellation.
+- **Thread history is scoped to the requested repository.** Each read attempt checks recorded working directories
+  again against the repository resolved at the start of the request. A Claude sidechain cannot change the main
+  session's repository. Replies and titles come from the main session's current stay there, including titles used to
+  list and select sessions.
+- **History filenames are checked against the app's records.** The bridge opens only regular files and follows
+  no symlinks below the configured app home. A history's recorded session ID must match the filename.
 - **The tools' read-only hint.** `ask_*` and `start_*` are annotated read-only: they change nothing in the user's
   project. They do write the bridge's own records, jobs and checkouts in its state directory.
 
