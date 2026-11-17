@@ -85,6 +85,14 @@ plain or zstd-compressed. It returns only agent messages and the latest turn's s
 git repository. `seed_thread` carries a thread's recent messages into a new consultation, so a review left in Codex
 Desktop can be followed up without touching it.
 
+The listing only picks a thread. The read opens the thread's file once and decides again, from the same bytes it
+returns messages from, whether the thread is in this repository: for Codex from the rollout's `session_meta` (main
+thread, working directory, not forked), for Claude Code from the latest working directory the session records, searched
+back up to 32 MB and refused when none is found. A file that changes while it is read is read once more, then refused.
+A Claude Code session counts only from where it last entered this repository, worktrees included: its replies and
+title from before that, or from a stay in another repository, are left out, so a session that has just moved in shows
+an unfinished turn and no messages.
+
 The bridge never writes into the other app's sessions. To hand work to an existing session, an agent puts the handoff
 in its own reply, and that session reads it with `read_codex_thread` or `read_claude_thread`. Neither agent may reach
 the other by operating its desktop app; the bridge's tool descriptions and skill say so.

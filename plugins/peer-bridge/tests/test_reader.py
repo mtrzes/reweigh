@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,7 +24,7 @@ from support import (
     codex_thread, codex_turn, git, git_repository, isolate,
 )
 import thread_reader  # found through the script directory support.py adds
-from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
+from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadSummary, ThreadUnavailable
 
 
 class ReaderTests(unittest.TestCase):
@@ -162,10 +163,15 @@ class ReaderTests(unittest.TestCase):
         noise = [codex_event("token_count", "t1", info="x" * 200) for _ in range(200)]
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t0", "Old answer."), noise,
                                codex_turn("t1", "Answer."), suffix=".jsonl.zst")
-        whole, from_start = thread_reader.compressed_tail(path)
+        def decompressed(limit=None):
+            with thread_reader.open_history(path) as source:
+                return thread_reader.decompress_history(source, limit)
+
+        head, whole, from_start = decompressed()
         self.assertTrue(from_start)
-        tail, from_start = thread_reader.compressed_tail(path, limit=4096)
-        self.assertEqual((len(tail), from_start), (4096, False))
+        self.assertEqual(json.loads(head.split(b"\n")[0])["type"], "session_meta")
+        head_again, tail, from_start = decompressed(limit=4096)
+        self.assertEqual((head_again, len(tail), from_start), (head, 4096, False))
         self.assertTrue(whole.endswith(tail))
 
     def test_cut_off_or_damaged_compressed_rollouts_are_refused_with_a_reason(self):
@@ -184,17 +190,31 @@ class ReaderTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ThreadUnavailable, reason):
                 self.read("codex", name)
 
-    def test_compressed_rollout_must_end_with_a_whole_record_and_stay_unchanged(self):
+    def test_compressed_rollout_must_end_with_a_whole_record(self):
         later_turn = json.dumps(codex_event("task_started", "t2"))[:-5]
         codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Mid record",
                      suffix=".jsonl.zst", tail="\n" + later_turn)
         with self.assertRaisesRegex(ThreadUnavailable, "ends inside a record"):
             self.read("codex", "Mid record")
-        codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Moving", suffix=".jsonl.zst")
-        identities = iter([(1, 1, 1), (1, 1, 2), (1, 1, 2)])
+
+    def test_a_history_that_changes_while_it_is_read_is_read_once_more_then_refused(self):
+        _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Moving")
+        real_scan = thread_reader.scan_codex
+
+        def scan_while_appending(times):
+            def scan(records):
+                if times:
+                    times.pop()
+                    with path.open("a", encoding="utf-8") as history:
+                        history.write(json.dumps(codex_event("token_count", "t1")) + "\n")
+                return real_scan(records)
+            return scan
+
+        with patch.object(thread_reader, "scan_codex", scan_while_appending([1])):
+            self.assertEqual([message["text"] for message in self.read("codex", "Moving")["messages"]], ["Done."])
         with (
-            patch.object(thread_reader, "file_identity", lambda _: next(identities)),
-            self.assertRaisesRegex(ThreadUnavailable, "changed while it was read"),
+            patch.object(thread_reader, "scan_codex", scan_while_appending([1, 1])),
+            self.assertRaisesRegex(ThreadUnavailable, "^The thread's history file changed while it was read.$"),
         ):
             self.read("codex", "Moving")
 
@@ -264,6 +284,74 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual([thread["id"] for thread in listing["threads"]], [moved_in])
         self.assertEqual(listing["unsupported_threads_machine_wide"], 1)
         self.assertNotIn(moved_out, json.dumps(listing))
+        # The read decides again from the bytes it returns: each row runs in homes of its own.
+        elsewhere = {"cwd": str(self.other)}
+        large_record = json.dumps({"type": "file-history-snapshot", "snapshot": "x" * 4096}) + "\n"
+
+        def append(path, *records):
+            with path.open("a", encoding="utf-8") as history:
+                history.write("".join(record if isinstance(record, str) else json.dumps(record) + "\n"
+                                      for record in records))
+
+        def at_selection(action):
+            """Run action after the listing has picked the thread and before the source reads it."""
+            def selected(threads, thread):
+                summary = real_match(threads, thread)
+                action()
+                return summary
+            real_match = thread_reader.match_thread
+            return patch.object(thread_reader, "match_thread", selected)
+
+        def claude_append_after_selection(stack, codex, claude):
+            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
+            stack.enter_context(at_selection(lambda: append(
+                path, {**claude_prompt(), **elsewhere}, {**claude_reply("Elsewhere."), **elsewhere})))
+            return lambda: self.read("claude", thread), "^No readable thread with that ID"
+
+        def codex_replaced_after_selection(stack, codex, claude):
+            thread, path = codex_thread(codex, self.project, codex_turn("t1", "Here."))
+            _, foreign = codex_thread(codex.parent / "elsewhere-codex", self.other, codex_turn("t1", "Elsewhere."))
+            stack.enter_context(at_selection(lambda: os.replace(foreign, path)))
+            return lambda: self.read("codex", thread), "^No readable thread with that ID"
+
+        def move_hidden_beyond_the_first_window(stack, codex, claude):
+            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
+            append(path, {**claude_prompt(), **elsewhere}, {**claude_reply("Elsewhere."), **elsewhere}, large_record)
+            stack.enter_context(patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024))
+            return lambda: self.read("claude", thread), "^No readable thread with that ID"
+
+        def directory_beyond_the_cap(stack, codex, claude):
+            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
+            append(path, large_record)
+            stack.enter_context(patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024))
+            stack.enter_context(patch.object(thread_reader, "MAX_TAIL_BYTES", 2048))
+            include = self.reader("claude").same_repository(self.project)
+            summary = ThreadSummary(thread, None, str(self.project), 0.0)
+            return (lambda: ClaudeSessionsSource().read_thread(summary, 3, include),
+                    "^The session's recent history does not name its working directory.$")
+
+        def moved_in_after_a_foreign_answer(stack, codex, claude):
+            thread, path = claude_session(claude, self.other, claude_prompt(), claude_reply("Started elsewhere."),
+                                          {"type": "custom-title", "customTitle": "Elsewhere title"}, project="other")
+            append(path, {**claude_prompt(), "cwd": str(self.project)})
+            return (lambda: self.read("claude", thread),
+                    ([], {"status": "inProgress", "finished": False, "liveness": "unknown"}, None))
+
+        rows = (claude_append_after_selection, codex_replaced_after_selection, move_hidden_beyond_the_first_window,
+                directory_beyond_the_cap, moved_in_after_a_foreign_answer)
+        for row in rows:
+            homes = self.root / row.__name__
+            codex, claude = homes / "codex-home", homes / "claude-home"
+            with self.subTest(row.__name__), ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, CODEX_HOME=str(codex), CLAUDE_CONFIG_DIR=str(claude)))
+                read, expected = row(stack, codex, claude)
+                if isinstance(expected, str):
+                    with self.assertRaisesRegex(ThreadUnavailable, expected):
+                        read()
+                else:
+                    result = read()
+                    self.assertEqual(([message["text"] for message in result["messages"]], result["latest_turn"],
+                                      result["name"]), expected)
 
     def fixture(self, name):
         """A real session file with every text replaced (dev/scrub_fixture.py), placed in this test's project."""
