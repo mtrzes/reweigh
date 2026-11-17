@@ -23,6 +23,7 @@ Later hardening, from the 1.0.0 reviews:
 - [ ] Make the model-catalogue check advisory, so a stale `models_cache.json` cannot block a new model.
 - [ ] Contain a peer's whole process tree, not only its group.
 - [ ] Linux: require a local state directory (flock is per process on NFS) and name a missing Codex sandbox.
+- [ ] Make seed thread enumeration cancellable. Its repository checks run `git` through `subprocess.run` in a worker thread that cancellation cannot stop.
 
 ## Move the Codex thread reader to Codex's app-server API
 
