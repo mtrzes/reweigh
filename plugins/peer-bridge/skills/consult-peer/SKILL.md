@@ -35,7 +35,7 @@ A consultation that may take minutes, such as a review, runs better in the backg
 call `get_consultation` with its `job_id`, passing `wait_seconds` (at most 60) to wait for it. A `failed`, `cancelled` or
 `lost` job carries an `error` to report; `cancel_consultation` stops a job the task no longer needs. Where the tools are not
 available, the `start`, `job` and `cancel` commands of `../../scripts/bridge.py` (relative to this skill's directory)
-do the same; usage is in [the plugin README](../../README.md#background-consultations).
+do the same; usage is in [the plugin README](../../README.md#command-line-consultations).
 
 ## Review requests
 

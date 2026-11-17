@@ -51,7 +51,7 @@ flowchart TB
   temporary folder, and wherever the user's own settings add a directory or allow a read. Codex runs as `codex exec` in
   its read-only sandbox, without the user's "always allow" rules, with MCP servers, plugins and web search off and only
   the core environment for its commands; it can read any file the user can. Neither can start another consultation. See
-  [SECURITY.md](../../SECURITY.md) for what this does not cover.
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/main/SECURITY.md) for what this does not cover.
 - **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`;
   `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the peer's process group and
@@ -65,7 +65,7 @@ flowchart TB
 ```mermaid
 flowchart LR
     queued["queued<br/>job ID returned"] --> running["running<br/>runner holds lock"]
-    running --> completed["completed<br/>reply kept seven days"]
+    running --> completed["completed<br/>reply kept, pruned after 7 days"]
     running --> failed["failed<br/>fixed error message"]
     running --> cancelled["cancelled<br/>marker, no signals"]
     queued -. runner never starts .-> lost["lost<br/>stored, honoured"]
@@ -92,11 +92,12 @@ the other by operating its desktop app; the bridge's tool descriptions and skill
 To split work, the operator starts the other app in a worktree of its own (`claude --worktree` or
 `codex --worktree`) with the handoff. The lead follows that session with `read_*_thread` and reviews its branch with
 `ask_codex` or `ask_claude` and `ref`. No peer the bridge starts ever edits;
-[ADR 0003](../../docs/adr/0003-peers-only-read.md) records why.
+[ADR 0003](https://github.com/mtrzes/peer-bridge/blob/main/docs/adr/0003-peers-only-read.md) records why.
 
 Codex's session files are an internal format. A developer tool outside the plugin, `dev/codex_app_server.py`, tests
-whether Codex's app-server API could replace reading them; [ADR 0001](../../docs/adr/0001-codex-thread-reader-source.md)
-sets when it may take over.
+whether Codex's app-server API could replace reading them;
+[ADR 0001](https://github.com/mtrzes/peer-bridge/blob/main/docs/adr/0001-codex-thread-reader-source.md) sets when it may
+take over.
 
 ## Scope
 
