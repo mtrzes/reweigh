@@ -18,9 +18,9 @@ In Codex, ask Claude Code the same question. A pinned review runs in a separate 
 hash, so you can keep editing meanwhile. You can ask a follow-up in the same consultation, or run a long review in the
 background and collect it later.
 
-Already have a review open in the other app? The experimental thread reader brings that thread's latest agent replies
-into a new consultation. It reads interactive threads from the same Git repository. The bridge never posts into the
-original chat.
+Already have a review open in the other app? The experimental thread reader, off unless you set
+`PEER_BRIDGE_THREADS=1`, brings that thread's latest agent replies into a new consultation. It reads interactive
+threads from the same Git repository. The bridge never posts into the original chat.
 
 ## What the peer can read
 

@@ -800,6 +800,24 @@ class ConsultationTests(BridgeTestCase):
         names = [Path(line.split(" ", 1)[1]).name for line in self.registered_worktrees()]
         self.assertEqual(names, [self.project.name, "unmounted"])
 
+    async def test_thread_reading_and_seed_thread_are_off_unless_turned_on(self):
+        git_repository(self.project)
+        codex_thread(self.codex_home, self.project, codex_turn("t1", "Verdict: ship it."), name="Desktop review")
+        spawned = []
+        self.client.spawn = spawned.append
+        request = {"prompt": "Explain the query.", "working_directory": str(self.project), "seed_thread": "t1"}
+        for value in (None, "true", "0"):
+            with self.subTest(value=value), patch.dict(os.environ, {"PEER_BRIDGE_THREADS": value or ""}):
+                if value is None:
+                    del os.environ["PEER_BRIDGE_THREADS"]
+                for call in (lambda: self.client.threads("codex", str(self.project)),
+                             lambda: self.client.thread("codex", str(self.project), "t1"),
+                             lambda: self.client.consult("codex", **request),
+                             lambda: self.client.start("codex", **request)):
+                    with self.assertRaisesRegex(bridge.BridgeError, "PEER_BRIDGE_THREADS=1"):
+                        await call()
+        self.assertEqual((self.calls(), spawned, list((self.state / "jobs").glob("*"))), ([], [], []))
+
     async def test_seed_thread_carries_recent_agent_messages_into_a_fresh_consultation(self):
         git_repository(self.project)
         codex_thread(self.codex_home, self.project, codex_turn("t1", "Looking at it.", "Verdict: ship it."),

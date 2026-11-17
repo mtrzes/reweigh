@@ -32,7 +32,7 @@ class ReaderTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-threads-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        isolate(self, self.root)
+        isolate(self, self.root, PEER_BRIDGE_THREADS="1")
         self.codex_home, self.claude_home = self.root / "codex-home", self.root / "claude-home"
         self.project, self.worktree, self.other = (self.root / name for name in ("project", "worktree", "other"))
         repositories = {self.project: "repository", self.worktree: "repository", self.other: "other"}

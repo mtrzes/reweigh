@@ -80,6 +80,8 @@ def main():
     if sys.argv[3] != "--" or len(sys.argv) < 5:
         sys.exit(2)
     command = sys.argv[4:]
+    # An inherited SIG_IGN would let the kernel reap the peer, and poll() would then report exit status 0.
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     for signal_number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signal_number, ignore)
     peer = None

@@ -27,7 +27,7 @@ from consultation import (
     check_limit, check_prompt, check_provider, check_thread_request, codex_mcp_server_names, completed_record,
     consultation_outcome, consultation_result, consultation_timeout, consulted_ref, executable_variable,
     failure_message, filter_overrides, git_environment, new_record, output_signals, peer_environment, resumed_record,
-    safe_path, seed_context, signed_in_from, validate_commit, validate_session_id, with_seed,
+    THREADS_OFF, safe_path, seed_context, threads_enabled, signed_in_from, validate_commit, validate_session_id, with_seed,
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
@@ -186,7 +186,8 @@ def peer_executable(provider):
     variable = executable_variable(provider)
     configured = os.environ.get(variable)
     if configured:
-        executable = shutil.which(configured)
+        # A bare name is searched on the same safe PATH; a path with a slash is taken as given.
+        executable = shutil.which(configured, path=safe_path(os.environ.get("PATH")))
         if not executable:
             raise BridgeError(f"{variable} does not name an executable {provider} CLI.")
         # Absolute, because the peer starts in the consulted directory, where a relative path would resolve again.
@@ -505,7 +506,10 @@ async def sweep_worktree(store, identifier):
             repository = await git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir",
                                    failure="Not a checkout.", lock=lock)
         except BridgeError:
-            shutil.rmtree(worktree, ignore_errors=True)
+            # Without its .git link the folder is no checkout, only what an interrupted pin left; with one, git
+            # could not answer now (a repository on an unmounted volume, say), so it is left for a later sweep.
+            if not os.path.lexists(worktree / ".git"):
+                shutil.rmtree(worktree, ignore_errors=True)
             return
         # The shared git directory itself, which is right whatever the repository's layout.
         await discard_worktree(Path(repository), worktree, lock)
@@ -586,6 +590,8 @@ class Bridge:
         """Start a consultation in a detached runner and return its job at once."""
         directory, model, reasoning_effort = self.checked_request(provider, prompt, working_directory, conversation_id,
                                                                   model, reasoning_effort)
+        if seed_thread:
+            self.check_threads_enabled()  # refused now, not once the runner reads the thread
         request = {"provider": provider, "prompt": prompt, "working_directory": str(directory), "context": context,
                    "conversation_id": conversation_id or None, "ref": ref or None, "seed_thread": seed_thread or None,
                    "model": model, "reasoning_effort": reasoning_effort}
@@ -642,13 +648,20 @@ class Bridge:
             raise BridgeError("working_directory must be an absolute path to an existing directory.")
         return directory.resolve()
 
+    @staticmethod
+    def check_threads_enabled():
+        if not threads_enabled(os.environ):
+            raise BridgeError(THREADS_OFF)
+
     async def threads(self, provider, working_directory, limit=20):
         """List the provider's recent threads that belong to the working directory's git repository."""
+        self.check_threads_enabled()
         directory = self.project_directory(provider, working_directory)
         return await self.read_history(self.readers[provider].list, directory, check_limit(limit))
 
     async def thread(self, provider, working_directory, thread, max_messages=3):
         """Return one thread's latest agent messages and whether its latest turn has finished."""
+        self.check_threads_enabled()
         directory = self.project_directory(provider, working_directory)
         thread = check_thread_request(thread, max_messages)
         return await self.read_history(self.readers[provider].read, directory, thread, max_messages)
@@ -937,6 +950,9 @@ def run_command_line(arguments):
 
 
 def main():
+    # An inherited SIG_IGN would let the kernel reap an exited guard at once, freeing its group's ID before the
+    # bridge's last signal to that group.
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--peer", choices=("claude", "codex", "both"), default="both",
                         help="peer tools the MCP server exposes when no command is given")

@@ -118,4 +118,4 @@ take over.
 - **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write, push or use
   tools beyond reading, nesting consultations, network access of its own, and Windows.
 - **Experimental:** the thread tools, `seed_thread` and `list_codex_models` read the apps' internal files, which can
-  change in any release.
+  change in any release. The thread tools and `seed_thread` are off unless `PEER_BRIDGE_THREADS=1` is set.

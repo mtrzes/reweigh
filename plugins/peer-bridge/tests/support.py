@@ -26,7 +26,8 @@ POLL_SECONDS = 0.01
 PRIVATE_MARKERS = ("SUBAGENT TRAFFIC", "TOOL OUTPUT", "PRIVATE REASONING", "USER PROMPT")
 # Inherited settings that would change what a test exercises.
 UNSET = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "XDG_STATE_HOME", bridge.ACTIVE_ENV,
-         "PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT", "PEER_BRIDGE_TIMEOUT_SECONDS")
+         "PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT", "PEER_BRIDGE_TIMEOUT_SECONDS",
+         "PEER_BRIDGE_THREADS")
 GIT_ISOLATION = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 GIT_IDENTITY = ("-c", "user.name=Bridge Tests", "-c", "user.email=tests@example.invalid", "-c", "commit.gpgsign=false",
                 "-c", "init.defaultBranch=main")
@@ -229,7 +230,7 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
             "PEER_BRIDGE_CLAUDE_BIN": str(self.peer), "PEER_BRIDGE_CODEX_BIN": str(self.peer),
             "PEER_BRIDGE_TIMEOUT_SECONDS": str(DEADLINE_SECONDS), "SIMULATED_PEER_MODE": "success",
             "SIMULATED_PEER_LOG": str(self.log), "SIMULATED_PEER_PID_DIR": str(self.root),
-            "CLAUDECODE": "test-parent-marker",
+            "CLAUDECODE": "test-parent-marker", "PEER_BRIDGE_THREADS": "1",
         })
         self.store = bridge.SessionStore(self.state)
         self.client = bridge.Bridge(store=self.store, timeout=DEADLINE_SECONDS)

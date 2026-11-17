@@ -286,6 +286,16 @@ def filter_overrides(listing):
             for setting, value in (("smudge", ""), ("process", ""), ("required", "false"))]
 
 
+THREADS_ENV = "PEER_BRIDGE_THREADS"
+THREADS_OFF = (f"Reading the other app's threads is off. It is experimental; set {THREADS_ENV}=1 for the MCP server "
+               "to turn it on, with seed_thread.")
+
+
+def threads_enabled(environ):
+    """Whether the experimental thread tools and seed_thread are on: only the exact value 1 turns them on."""
+    return environ.get(THREADS_ENV) == "1"
+
+
 def safe_path(value):
     """PATH with only its absolute entries, in order; the system default's when none is left.
 

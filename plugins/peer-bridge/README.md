@@ -56,7 +56,9 @@ Codex installs a copy of the plugin; after updating the repository, run `codex p
 and add the plugin again. Restart Codex to load it.
 
 Without the plugin, register the script directly and give it the same timeouts in the generated
-`[mcp_servers.peer-bridge]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`):
+`[mcp_servers.peer-bridge]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`),
+and the `env_vars` list from the plugin's `codex-mcp.json`: Codex passes an MCP server only the environment variables
+it names.
 
 ```sh
 codex mcp add peer-bridge -- uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py --peer claude
@@ -187,8 +189,10 @@ before making changes or posting replies.
 
 ## Reading desktop threads
 
-These tools are experimental: they parse each app's internal history files, which can change in any release, and
-refuse a file they cannot be sure of rather than guess.
+These tools are experimental and off unless `PEER_BRIDGE_THREADS=1` is set for the MCP server: they parse each app's
+internal history files, which can change in any release, and refuse a file they cannot be sure of rather than guess.
+`seed_thread` is off with them. In Claude Code, set the variable in the environment Claude Code starts from; the Codex
+plugin forwards it from the environment Codex starts from.
 
 `list_codex_threads` and `read_codex_thread` in Claude Code, and `list_claude_threads` and `read_claude_thread` in
 Codex, read the other app's recent threads without writing to them, for example a review still open in Codex Desktop,
@@ -207,8 +211,8 @@ again on the same open file it reads the messages from, and refuses a file that 
 more try. A Claude Code session that moved between repositories returns only the replies and title recorded since it
 last entered this one; a session whose latest working directory is not named within its last 32 MB is refused. Only
 agent messages come back, never prompts, tool calls, tool output or reasoning, up to 24,000 characters. `latest_turn`
-gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut off at its
-output limit counts as `completed` and a refusal as `failed`. For an unfinished turn, `liveness` is `abandoned` when
+gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut
+off at its output limit counts as `completed` and a refusal as `failed`. For an unfinished turn, `liveness` is `abandoned` when
 Codex keeps no writer-lock file for the thread, and `unknown` otherwise: the listing's `writer_lock_file` usually means
 an app holds the thread, but a crash can leave the file behind, and Claude Code sessions record neither. Codex lists
 only Desktop and interactive CLI threads and Claude Code only sessions with a person at the keyboard, so subagents and
@@ -265,6 +269,7 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI bundled with ChatGPT.app. A set value that does not resolve is an error, not a fallback. |
 | `PEER_BRIDGE_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
 | `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The bridge refuses a model or effort missing from Codex's catalogue before Codex starts. |
+| `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 
