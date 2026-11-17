@@ -26,6 +26,19 @@ def ensure_private(*directories):
             raise BridgeError(PRIVATE)
 
 
+def check_private(*directories):
+    """Whether every directory exists, checked before anything is listed or removed inside it: False when one is
+    missing; BridgeError when one is a symlink, not a directory, another user's, or open to group or other."""
+    for directory in directories:
+        try:
+            info = os.lstat(directory)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise BridgeError(PRIVATE)
+    return True
+
+
 def open_regular(path, flags, mode=0o600, unreadable=UNREADABLE):
     """Open a regular file, never through a symlink and without waiting: O_NONBLOCK keeps a FIFO in its place from
     blocking the open, and the type is checked before anything else."""

@@ -27,13 +27,13 @@ from consultation import (
     check_limit, check_prompt, check_provider, check_thread_request, codex_mcp_server_names, completed_record,
     consultation_outcome, consultation_result, consultation_timeout, consulted_ref, executable_variable,
     failure_message, filter_overrides, git_environment, new_record, output_signals, peer_environment, resumed_record,
-    seed_context, signed_in_from, validate_commit, validate_session_id, with_seed,
+    safe_path, seed_context, signed_in_from, validate_commit, validate_session_id, with_seed,
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
 )
 from jobs import UNKNOWN_JOB, JobStore, run_job, spawn_runner
-from state_files import ensure_private, open_regular, read_json, write_json
+from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, git_common_dir
 
@@ -53,6 +53,10 @@ PIPE_DRAIN_SECONDS = 1
 SEED_MESSAGES = 3
 # How often a caller waiting on a background consultation rereads its state.
 JOB_POLL_SECONDS = 0.5
+
+
+class CommandTimeout(BridgeError):
+    """A command the bridge ran did not finish within its timeout."""
 
 
 class InputClosed(Exception):
@@ -98,8 +102,8 @@ class SessionStore:
             ensure_private(self.directory)
         except OSError as exc:
             raise BridgeError("Cannot create the bridge's state directory.") from exc
-        with self.holding(identifier) as held:
-            if not held:
+        with self.holding(identifier) as lock:
+            if lock is None:
                 raise BridgeError("This conversation is busy. Wait for its current consultation to finish.")
             path = self.directory / f"{identifier}.json"
             record = new_record(provider, working_directory)
@@ -108,20 +112,24 @@ class SessionStore:
                 if saved is None:
                     raise BridgeError(UNKNOWN_CONVERSATION)
                 record = resumed_record(saved, provider, working_directory)
-            yield identifier, record, path
+            yield identifier, record, path, lock
 
     def idle_worktrees(self):
-        """The conversations with a pinned checkout folder, whatever their state; holding() tells which are idle."""
-        try:
-            names = [entry.name for entry in (self.directory / "worktrees").iterdir()]
-        except FileNotFoundError:
+        """The conversations with a pinned checkout folder, whatever their state; holding() tells which are idle.
+
+        Only real folders named as this bridge names them, a conversation's canonical UUID, in a private worktrees
+        folder checked before it is listed: cleanup must never reach through a symlink.
+        """
+        worktrees = self.directory / "worktrees"
+        if not check_private(self.directory, worktrees):
             return []
-        # Only folders named as this bridge names them, a conversation's canonical UUID.
-        return [name for name in names if is_conversation_id(name)]
+        return [entry.name for entry in worktrees.iterdir()
+                if is_conversation_id(entry.name) and entry.is_dir() and not entry.is_symlink()]
 
     @contextmanager
     def holding(self, identifier):
-        """Hold a conversation's lock while it is free: yields True when held, False when a consultation has it."""
+        """Hold a conversation's lock while it is free: yields its locked descriptor, or None when a consultation has
+        it. A guard given the descriptor keeps the lock after this context ends, for as long as the guard lives."""
         try:
             descriptor = open_regular(self.directory / f"{identifier}.lock", os.O_CREAT | os.O_RDWR)
         except OSError as exc:
@@ -130,9 +138,9 @@ class SessionStore:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                yield False
+                yield None
                 return
-            yield True
+            yield lock.fileno()
 
     @staticmethod
     def save(path, record):
@@ -183,7 +191,8 @@ def peer_executable(provider):
             raise BridgeError(f"{variable} does not name an executable {provider} CLI.")
         # Absolute, because the peer starts in the consulted directory, where a relative path would resolve again.
         return os.path.abspath(executable)
-    executable = shutil.which(provider)
+    # The same PATH the peer is launched with, so the peer found is the peer that runs.
+    executable = shutil.which(provider, path=safe_path(os.environ.get("PATH")))
     if executable:
         return os.path.abspath(executable)
     candidates = bundled_codex_candidates() if provider == "codex" else []
@@ -198,17 +207,18 @@ def peer_executable(provider):
     raise BridgeError(f"{provider} CLI is unavailable. Install it and sign in before consulting it.")
 
 
-def signed_in(provider):
-    """Ask the peer CLI whether it is signed in: True, False, or None when it cannot tell."""
+async def signed_in(provider, directory):
+    """Ask the peer CLI whether it is signed in: True, False, or None when it cannot tell.
+
+    The probe runs under the guard like the consultation, so a helper it starts cannot outlive a cancelled or timed
+    out consultation, and a cancellation passes on only once the probe's group has stopped.
+    """
     try:
-        executable = peer_executable(provider)
-        probe = subprocess.run(
-            [executable, *SIGN_IN_PROBES[provider]], capture_output=True, text=True, timeout=SIGN_IN_PROBE_SECONDS,
-            env=peer_environment(os.environ), stdin=subprocess.DEVNULL, start_new_session=True,
-        )
-    except (BridgeError, OSError, subprocess.TimeoutExpired):
+        command = [peer_executable(provider), *SIGN_IN_PROBES[provider]]
+        return_code, output, _ = await run_command(command, None, directory, SIGN_IN_PROBE_SECONDS)
+    except (BridgeError, OSError):
         return None
-    return signed_in_from(provider, probe.returncode, probe.stdout)
+    return signed_in_from(provider, return_code, output.decode("utf-8", errors="replace"))
 
 
 def codex_catalogue():
@@ -220,13 +230,14 @@ def codex_catalogue():
         return []
 
 
-def command_for(provider, working_directory, backend_session_id, conversation_id, model=None, reasoning_effort=None):
+def command_for(provider, working_directory, backend_session_id, conversation_id, model=None, reasoning_effort=None,
+                pinned=False):
     executable = peer_executable(provider)
     if provider == "claude":
         return build_command(provider, executable, conversation_id, backend_session_id)
     return build_command(
         provider, executable, conversation_id, backend_session_id, model=model,
-        mcp_servers=codex_mcp_servers(), reasoning_effort=reasoning_effort,
+        mcp_servers=codex_mcp_servers(), reasoning_effort=reasoning_effort, pinned=pinned,
     )
 
 
@@ -285,16 +296,27 @@ async def peer_exit_status(status):
 
 
 async def guard_exit_status(guard):
-    """Return the guard's exit status once it has exited and been reaped.
+    """Reap the guard and return its exit status. Called only after the bridge's last signal to its group: reaping
+    frees the group's ID for reuse.
 
     The guard is a subprocess.Popen, so nothing else reaps it: only Popen.poll(), called from this event loop's thread,
-    does. While poll() returns None the guard is unreaped, running or a zombie, and its process group's ID is still its
-    own. (asyncio's child watcher would reap on another thread, ahead of what the bridge can see.)
-
+    does. (asyncio's child watcher would reap on another thread, ahead of what the bridge can see.)
     """
     while guard.poll() is None:
         await asyncio.sleep(0.05)
     return guard.returncode
+
+
+async def status_closed(status, deadline):
+    """Wait until the guard's status descriptor reaches its end, which happens only when the guard has exited, or
+    until the deadline; True at the end. Reading it, unlike poll(), leaves the guard unreaped."""
+    while time.monotonic() < deadline:
+        try:
+            if not os.read(status, 64):
+                return True
+        except BlockingIOError:
+            await asyncio.sleep(0.05)
+    return False
 
 
 def kill_group(group):
@@ -304,32 +326,26 @@ def kill_group(group):
         pass
 
 
-async def stop_peer(guard, lifeline):
-    """Close the guard's lifeline, which makes it stop the peer's whole group, and wait for that to finish.
+async def stop_peer(guard, lifeline, status):
+    """Close the guard's lifeline, which makes it stop the peer's whole group, wait for the guard to exit, then kill
+    whatever is left of the group, and only then reap the guard.
 
-    Normally the bridge sends no signal. If the guard does not finish in time, for example because it is stopped, it
-    is still unreaped, so its group's ID cannot belong to anyone else yet: the bridge kills that whole group, peer
-    included, and only then reaps the guard.
+    Until it is reaped the guard, even exited, holds its process ID, which is also its group's ID, so the last signal
+    reaches only the peer's own group: whether the guard stopped the group, was killed before it could, or stalled
+    past the deadline.
     """
-    # A guard ends only after its lifeline closes, so one already gone was killed and never stopped the peer. Its group
-    # is killed now: the peer's processes keep the group's ID in use, so it cannot belong to anyone else while there is
-    # still a member to kill.
-    if guard.poll() is not None:
-        kill_group(guard.pid)
     try:
         os.close(lifeline)
     except OSError:
         pass
-    try:
-        await asyncio.wait_for(guard_exit_status(guard), timeout=peer_guard.GRACE_SECONDS + GUARD_MARGIN_SECONDS)
-    except asyncio.TimeoutError:
-        if guard.returncode is None:
-            kill_group(guard.pid)
-        await guard_exit_status(guard)
+    await status_closed(status, time.monotonic() + peer_guard.GRACE_SECONDS + GUARD_MARGIN_SECONDS)
+    kill_group(guard.pid)
+    await guard_exit_status(guard)
 
 
 async def open_streams(guard):
-    """Asyncio streams over the guard's pipes, which the peer inherited: two readers and a writer."""
+    """Asyncio streams over the guard's pipes, which the peer inherited: two readers and a writer, or None for a
+    command given no input."""
     loop = asyncio.get_running_loop()
     readers, transports = [], []
     for pipe in (guard.stdout, guard.stderr):
@@ -337,12 +353,21 @@ async def open_streams(guard):
         transport, _ = await loop.connect_read_pipe(lambda reader=reader: asyncio.StreamReaderProtocol(reader), pipe)
         readers.append(reader)
         transports.append(transport)
+    if guard.stdin is None:
+        return readers, None, transports
     transport, protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, guard.stdin)
     transports.append(transport)
     return readers, asyncio.StreamWriter(transport, protocol, None, loop), transports
 
 
-async def run_command(command, prompt, working_directory, timeout):
+async def run_command(command, prompt, working_directory, timeout, environment=None, lock=None):
+    """Run a command under peer_guard and return its exit status, output and errors as bytes; prompt None gives it no
+    input. The environment defaults to the peer's.
+
+    Every process the bridge starts, peer, sign-in probe or git, runs here, so none outlives its consultation. lock, a
+    conversation's locked descriptor, is held by the guard and not by the command: the conversation stays locked until
+    the guard has exited, after its last signal to the group, even when the bridge's own process dies first.
+    """
     lifeline_read, lifeline_write = os.pipe()
     try:
         status_read, status_write = os.pipe()
@@ -354,8 +379,10 @@ async def run_command(command, prompt, working_directory, timeout):
     try:
         guard = subprocess.Popen(
             [sys.executable, "-I", str(GUARD_SCRIPT), str(lifeline_read), str(status_write), "--", *command],
-            cwd=working_directory, env=peer_environment(os.environ), pass_fds=(lifeline_read, status_write),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            cwd=working_directory, env=peer_environment(os.environ) if environment is None else environment,
+            pass_fds=(lifeline_read, status_write, *(() if lock is None else (lock,))),
+            stdin=subprocess.DEVNULL if prompt is None else subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, start_new_session=True,
         )
     except BaseException:
         os.close(lifeline_write)
@@ -375,12 +402,13 @@ async def run_command(command, prompt, working_directory, timeout):
         exited = asyncio.create_task(peer_exit_status(status_read))
         try:
             handed_off = True
-            try:
-                stdin.write(prompt.encode("utf-8"))
-                await stdin.drain()
-                stdin.close()
-            except (BrokenPipeError, ConnectionResetError):
-                handed_off = False
+            if stdin is not None:
+                try:
+                    stdin.write(prompt.encode("utf-8"))
+                    await stdin.drain()
+                    stdin.close()
+                except (BrokenPipeError, ConnectionResetError):
+                    handed_off = False
             # Wait for the peer, not for the end of its pipes. A reader that fails on oversized output ends the wait.
             pending = {exited, *readers}
             while not exited.done():
@@ -390,7 +418,7 @@ async def run_command(command, prompt, working_directory, timeout):
             drained, _ = await asyncio.wait(readers, timeout=PIPE_DRAIN_SECONDS)
             for reader in drained:
                 reader.result()
-            output, errors = (b"".join(chunks).decode("utf-8", errors="replace") for chunks in collected)
+            output, errors = (b"".join(chunks) for chunks in collected)
             if not handed_off:
                 raise InputClosed(output, errors)
             return exited.result(), output, errors
@@ -402,106 +430,130 @@ async def run_command(command, prompt, working_directory, timeout):
     try:
         return await asyncio.wait_for(communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-        raise BridgeError("Consultation timed out. Narrow the question or increase the configured timeout.") from exc
+        raise CommandTimeout("Consultation timed out. Narrow the question or increase the configured timeout.") from exc
     finally:
         try:
-            await run_to_completion(stop_peer(guard, lifeline_write))
+            await run_to_completion(stop_peer(guard, lifeline_write, status_read))
         finally:
             os.close(status_read)
             for transport in transports:
                 transport.close()
             for pipe in (guard.stdin, guard.stdout, guard.stderr):
-                if not pipe.closed:
+                if pipe is not None and not pipe.closed:
                     pipe.close()
 
 
-async def git(directory, *arguments, failure, config=(), allowed=()):
-    """Run git with no hook or monitor of the repository's own, plus the settings in config; exit statuses in allowed
-    count as success."""
+async def git(directory, *arguments, failure, config=(), allowed=(), lock=None):
+    """Run git under the guard, isolated from the repository's hooks, monitor and transports and from inherited GIT_*
+    variables, plus the settings in config; exit statuses in allowed count as success.
+
+    The output keeps git's exact bytes, decoded as file names are, without its one terminating newline.
+    """
     try:
-        process = await asyncio.create_subprocess_exec(
-            "git", "-C", str(directory), *arguments, env=git_environment(os.environ, config),
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        return_code, output, _ = await run_command(
+            ["git", "-C", str(directory), *arguments], None, None, GIT_TIMEOUT_SECONDS,
+            environment=git_environment(os.environ, config), lock=lock,
         )
     except OSError as exc:
         raise BridgeError("git is unavailable. Install it to pin a consultation to a ref.") from exc
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=GIT_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as exc:
+    except CommandTimeout as exc:
         raise BridgeError("git did not finish in time while preparing the pinned ref.") from exc
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-    if process.returncode and process.returncode not in allowed:
+    except BridgeError as exc:
+        raise BridgeError(failure) from exc
+    if return_code and return_code not in allowed:
         raise BridgeError(failure)
-    return stdout.decode("utf-8", errors="replace").strip()
+    return os.fsdecode(output).removesuffix("\n")
 
 
-async def discard_worktree(repository, worktree):
-    """Remove a pinned checkout and git's record of it, also when the folder has already gone."""
-    if worktree.exists():
-        try:
-            await git(repository, "worktree", "remove", "--force", str(worktree), failure="Cannot remove the worktree.")
-        except BridgeError:
-            shutil.rmtree(worktree, ignore_errors=True)
+async def registered(repository, worktree, lock):
+    """Whether git records worktree as one of the repository's worktrees, read from its NUL-separated listing."""
+    listing = await git(repository, "worktree", "list", "--porcelain", "-z", failure="Cannot list the worktrees.",
+                        lock=lock)
+    target = os.path.realpath(worktree)
+    return any(field.startswith("worktree ") and os.path.realpath(field[len("worktree "):]) == target
+               for field in listing.split("\0"))
+
+
+async def discard_worktree(repository, worktree, lock):
+    """Remove a pinned checkout and git's record of it, also when the folder has already gone, and touch no other
+    worktree of the repository. A folder git does not record is deleted; one git records but will not remove, such as
+    a locked one, is left alone."""
     try:
-        await git(repository, "worktree", "prune", failure="Cannot prune worktrees.")
+        await git(repository, "worktree", "remove", "--force", "--", str(worktree.absolute()),
+                  failure="Cannot remove the worktree.", lock=lock)
     except BridgeError:
-        pass
+        if worktree.is_dir() and not worktree.is_symlink() and not await registered(repository, worktree, lock):
+            shutil.rmtree(worktree, ignore_errors=True)
 
 
 async def sweep_worktrees(store):
     """Remove pinned checkouts left by runs that died, which nothing else would remove: those whose conversation is
     not running, read from its lock."""
     for identifier in await asyncio.to_thread(store.idle_worktrees):
-        with store.holding(identifier) as held:
-            if not held:
-                continue
-            worktree = store.directory / "worktrees" / identifier
-            try:
-                repository = await git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                       failure="Not a checkout.")
-            except BridgeError:
-                shutil.rmtree(worktree, ignore_errors=True)
-                continue
-            # The shared git directory itself, which is right whatever the repository's layout.
-            await discard_worktree(Path(repository), worktree)
+        try:
+            await sweep_worktree(store, identifier)
+        except BridgeError:
+            continue  # this conversation's lock cannot be taken, or git failed; the next sweep tries again
+
+
+async def sweep_worktree(store, identifier):
+    with store.holding(identifier) as lock:
+        if lock is None:
+            return
+        worktree = store.directory / "worktrees" / identifier
+        try:
+            repository = await git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                                   failure="Not a checkout.", lock=lock)
+        except BridgeError:
+            shutil.rmtree(worktree, ignore_errors=True)
+            return
+        # The shared git directory itself, which is right whatever the repository's layout.
+        await discard_worktree(Path(repository), worktree, lock)
 
 
 @asynccontextmanager
-async def pinned_checkout(worktree, directory, ref):
+async def pinned_checkout(worktree, directory, ref, lock):
     """Yield the directory to consult in: the request's own, or the same subdirectory of a detached ref checkout.
 
     The worktree path is fixed per conversation, because Claude resumes a session only from the directory it ran in.
+    The checkout is registered without files first, so the filter drivers disabled are those configured where the
+    files are written, which conditional includes and per-worktree configuration can make differ from the source's.
     """
     if ref is None:
         yield directory, None
         return
     repository = Path(await git(
         directory, "rev-parse", "--show-toplevel",
-        failure="A ref needs a working_directory inside a git repository.",
+        failure="A ref needs a working_directory inside a git repository.", lock=lock,
     )).resolve()
-    commit = await git(
+    commit = validate_commit(await git(
         directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
-        failure="The ref does not name a commit in this repository.",
-    )
-    worktree.parent.mkdir(mode=0o700, exist_ok=True)
-    await discard_worktree(repository, worktree)
-    filters = filter_overrides(await git(repository, "config", "--null", "--get-regexp", r"^filter\.",
-                                         failure="Cannot read the repository's git configuration.", allowed=(1,)))
+        failure="The ref does not name a commit in this repository.", lock=lock,
+    ))
     try:
-        await git(
-            repository, "worktree", "add", "--detach", "--force", "--quiet", str(worktree), validate_commit(commit),
-            failure="Cannot check out the ref in a temporary worktree.", config=filters,
-        )
+        ensure_private(worktree.parent)
+    except OSError as exc:
+        raise BridgeError("Cannot create the bridge's state directory.") from exc
+    if worktree.is_symlink():
+        raise BridgeError(PRIVATE)
+    await discard_worktree(repository, worktree, lock)
+    try:
+        await git(repository, "worktree", "add", "--detach", "--no-checkout", "--force", "--quiet", str(worktree),
+                  commit, failure="Cannot check out the ref in a temporary worktree.", lock=lock)
+        filters = filter_overrides(await git(worktree, "config", "--null", "--get-regexp", r"^filter\.",
+                                             failure="Cannot read the repository's git configuration.", allowed=(1,),
+                                             lock=lock))
+        # An explicit work tree, so a configured core.worktree cannot send the files elsewhere.
+        await git(worktree, f"--work-tree={worktree}", "read-tree", "--reset", "-u", "--no-sparse-checkout",
+                  "--no-recurse-submodules", commit, failure="Cannot check out the ref in a temporary worktree.",
+                  config=filters, lock=lock)
         consulted = worktree / directory.relative_to(repository)
         # A symlink at the ref could lead the peer out of the checkout.
         if not consulted.is_dir() or not consulted.resolve().is_relative_to(worktree.resolve()):
             raise BridgeError("working_directory does not exist at that ref.")
         yield consulted, commit
     finally:
-        await run_to_completion(discard_worktree(repository, worktree))
+        await run_to_completion(discard_worktree(repository, worktree, lock))
 
 
 class Bridge:
@@ -622,26 +674,31 @@ class Bridge:
         if seed_thread:
             seed = await self.thread(provider, directory, seed_thread, SEED_MESSAGES)
             context = with_seed(context, seed_context(seed))
+        # A state directory that is not private stops the consultation before any cleanup inside it.
+        check_private(self.store.directory)
         try:
             await sweep_worktrees(self.store)
-        except (OSError, BridgeError):
+        except OSError:
             pass  # best effort: a leftover checkout costs only disk space
-        with self.store.open(provider, directory, conversation_id) as (identifier, record, path):
+        with self.store.open(provider, directory, conversation_id) as (identifier, record, path, lock):
             ref = consulted_ref(record, ref)
             worktree = self.store.directory / "worktrees" / identifier
-            async with pinned_checkout(worktree, directory, ref) as (consulted, commit):
+            async with pinned_checkout(worktree, directory, ref, lock) as (consulted, commit):
                 command = command_for(provider, consulted, record.get("backend_session_id"), identifier, model,
-                                      reasoning_effort)
+                                      reasoning_effort, pinned=commit is not None)
                 depth = len(consulted.relative_to(worktree).parts) if commit else 0
                 handoff = build_handoff(provider, prompt, context, commit, depth)
                 failure = None
                 try:
-                    return_code, output, errors = await run_command(command, handoff, consulted, self.timeout)
+                    return_code, output, errors = await run_command(
+                        command, handoff, consulted, self.timeout,
+                        environment=peer_environment(os.environ, pinned=commit is not None), lock=lock)
                 except OSError as exc:
                     raise BridgeError(f"Cannot start {provider}. Check its executable and working directory.") from exc
                 except InputClosed as exc:
                     # An incomplete handoff is never a success, whatever the exit status.
                     output, errors, failure = exc.output, exc.errors, PeerFailure(CLOSED_INPUT)
+            output, errors = (text.decode("utf-8", errors="replace") for text in (output, errors))
             try:
                 if failure:
                     raise failure
@@ -664,7 +721,7 @@ class Bridge:
             except OSError:
                 return None
 
-        facts = {"resuming": bool(session), "signed_in": await asyncio.to_thread(signed_in, provider),
+        facts = {"resuming": bool(session), "signed_in": await signed_in(provider, directory),
                  **output_signals(provider, output, errors)}
         if session:
             facts["history_present"] = await asyncio.to_thread(check, source.has_history, session)

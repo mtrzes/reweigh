@@ -107,6 +107,14 @@ PEER_SOURCE = textwrap.dedent('''\
 
     arguments = sys.argv[1:]
     signed_in = os.environ.get("SIMULATED_SIGNED_IN", "1") == "1"
+    if arguments[:2] in (["auth", "status"], ["login", "status"]) and os.environ.get("SIMULATED_PROBE_HANGS"):
+        # A sign-in probe that starts a SIGTERM-ignoring helper, records its PID, then never answers.
+        folder = os.environ["SIMULATED_PEER_PID_DIR"]
+        subprocess.Popen([sys.executable, "-c", "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                          f"open(os.path.join({folder!r}, 'probe-child.pid.tmp'), 'w').write(str(os.getpid())); "
+                          f"os.replace(os.path.join({folder!r}, 'probe-child.pid.tmp'), "
+                          f"os.path.join({folder!r}, 'probe-child.pid')); time.sleep(60)"])
+        time.sleep(60)
     if arguments[:2] == ["auth", "status"]:
         print(json.dumps({"loggedIn": signed_in, "authMethod": "claude.ai"}))
         sys.exit(0)

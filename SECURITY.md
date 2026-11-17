@@ -11,12 +11,23 @@ line runs.
   policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers, apps or
   web search. A peer that tries to edit, run a command that writes, or reach the network is refused by its own CLI's
   restrictions; the bridge chooses those restrictions and checks the exact command line in its tests.
-- **The peer cannot start another consultation.** The bridge refuses to run inside a consultation.
+- **A consultation does not nest by accident.** The bridge marks the peer's environment, and the commands Codex runs,
+  and refuses to start inside a marked one. This guards against recursion, not against a process that drops the mark.
 - **Pinning runs no repository code.** Preparing a pinned checkout runs no git hook, file-system monitor or filter
-  driver, and Git LFS downloads nothing.
-- **The peer's process group ends with the consultation**, also when the bridge is killed.
+  driver, including one configured only for linked worktrees; git uses no transport, so a partial clone's missing
+  object fails instead of being fetched, and no replacement object, so the checkout holds the commit named; Git LFS
+  downloads nothing; and no inherited `GIT_*` variable reaches the bridge's git. Removing the checkout touches no other
+  worktree of the repository. This assumes the repository's configuration does not change while the checkout is made.
+- **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
+  entries only, so a file in the repository named like a command never runs in place of it.
+- **The peer's process group ends with the consultation**, also when the bridge is killed, and so do the sign-in
+  probes and git commands the bridge runs. The conversation stays locked until its guard has stopped the group, so no
+  other consultation takes over a checkout that is still in use.
 - **State files are private.** The state directory and everything in it are readable by the user only, and the bridge
-  opens its files without following symlinks.
+  opens its files without following symlinks. Cleanup checks that the state directory and its folders are private,
+  real directories before it lists or removes anything in them.
+- **The tools' read-only hint.** `ask_*` and `start_*` are annotated read-only: they change nothing in the user's
+  project. They do write the bridge's own records, jobs and checkouts in its state directory.
 
 ## What it does not protect against
 

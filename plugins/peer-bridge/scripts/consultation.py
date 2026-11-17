@@ -5,6 +5,7 @@ them in, and acts on what comes back.
 """
 
 import json
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -246,22 +247,22 @@ def executable_variable(provider):
 GIT_SAFE_CONFIG = (("core.hooksPath", "/dev/null"), ("core.fsmonitor", "false"))
 
 
-def is_inherited_git_config(name):
-    """Variables that pass configuration to git, which could undo the bridge's own."""
-    return name in ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS") or name.startswith(("GIT_CONFIG_KEY_",
-                                                                                     "GIT_CONFIG_VALUE_"))
+# An empty GIT_ALLOW_PROTOCOL allows no transport at all, file:// included; unset, it would allow the usual ones.
+GIT_ISOLATION_ENV = {"GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+                     "GIT_LFS_SKIP_SMUDGE": "1"}
 
 
 def git_environment(environ, config=()):
-    """The environment for git commands: without variables that point git at another checkout or pass it
-    configuration, with Git LFS downloading nothing, and with the bridge's settings and config's passed to git.
+    """The environment for git commands the bridge runs on the host: no inherited GIT_* variable, which could point git
+    at another checkout, pass it configuration or trace into a file; no transport, so a missing object fails instead of
+    being fetched by a command the repository configures; no replacement objects, so the commit read is the commit
+    named; Git LFS downloading nothing; and the bridge's settings and config's passed to git.
 
     Settings go through GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n, which keep a key and its value apart; `-c key=value`
     would split a key that contains "=" at the wrong place.
     """
-    environment = {name: value for name, value in environ.items()
-                   if name not in GIT_LOCATION_ENV and not is_inherited_git_config(name)}
-    environment["GIT_LFS_SKIP_SMUDGE"] = "1"
+    environment = {name: value for name, value in environ.items() if not name.startswith("GIT_")}
+    environment.update(GIT_ISOLATION_ENV, PATH=safe_path(environ.get("PATH")))
     settings = (*GIT_SAFE_CONFIG, *config)
     environment["GIT_CONFIG_COUNT"] = str(len(settings))
     for number, (key, value) in enumerate(settings):
@@ -285,12 +286,26 @@ def filter_overrides(listing):
             for setting, value in (("smudge", ""), ("process", ""), ("required", "false"))]
 
 
-def peer_environment(environ):
-    """The peer's environment: marked as a consultation, without the host session or git location variables.
+def safe_path(value):
+    """PATH with only its absolute entries, in order; the system default's when none is left.
+
+    An empty or relative entry is searched from the current directory, which for the peer, its helpers and git is the
+    consulted repository: a file there named like a command would run outside any sandbox.
+    """
+    entries = [entry for entry in (value or "").split(os.pathsep) if os.path.isabs(entry)]
+    return os.pathsep.join(entries or [entry for entry in os.defpath.split(os.pathsep) if os.path.isabs(entry)])
+
+
+def peer_environment(environ, pinned=False):
+    """The peer's environment: marked as a consultation, with a PATH of absolute entries only, and without the host
+    session or git location variables; for a pinned checkout, without replacement objects, so the peer's own git reads
+    show the commit the bridge checked out.
 
     Git location variables would point the peer's git commands at another checkout than the one consulted.
     """
-    environment = {**environ, ACTIVE_ENV: "1"}
+    environment = {**environ, ACTIVE_ENV: "1", "PATH": safe_path(environ.get("PATH"))}
+    if pinned:
+        environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     for name in (*CLAUDE_HOST_SESSION_ENV, *GIT_LOCATION_ENV):
         environment.pop(name, None)
     return environment
@@ -310,8 +325,8 @@ def codex_mcp_server_names(config):
 
 
 def build_command(provider, executable, conversation_id, backend_session_id=None, model=None, mcp_servers=(),
-                  reasoning_effort=None):
-    """The peer CLI's argument list. model, mcp_servers and reasoning_effort apply to Codex only."""
+                  reasoning_effort=None, pinned=False):
+    """The peer CLI's argument list. model, mcp_servers, reasoning_effort and pinned apply to Codex only."""
     if provider == "claude":
         command = [
             executable, "--print", "--output-format", "json",
@@ -333,8 +348,12 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
         command.extend(["--model", model])
     for feature in CODEX_DISABLED_FEATURES:
         command.extend(["--disable", feature])
-    # Commands Codex runs see only the core environment, never the user's tokens.
-    overrides = ['web_search="disabled"', 'shell_environment_policy.inherit="core"']
+    # Commands Codex runs see only the core environment, never the user's tokens, plus the consultation marker, so a
+    # bridge started from one refuses to nest, and in a pinned checkout no replacement objects.
+    overrides = ['web_search="disabled"', 'shell_environment_policy.inherit="core"',
+                 f'shell_environment_policy.set.{ACTIVE_ENV}="1"']
+    if pinned:
+        overrides.append('shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"')
     if reasoning_effort:
         # Quoted as a TOML string, so the value can carry no other setting; Codex validates it.
         overrides.append(f"model_reasoning_effort={json.dumps(reasoning_effort)}")

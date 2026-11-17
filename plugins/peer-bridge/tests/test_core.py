@@ -1,6 +1,7 @@
 """Table-driven tests for the pure consultation and thread rules. No process, file or environment access."""
 
 import json
+import os
 import sys
 import unittest
 import uuid
@@ -86,18 +87,25 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_peer_environment_marks_the_consultation_and_drops_host_and_git_location(self):
         environ = {name: "x" for name in (*self.HOST_SESSION_NAMES, *self.GIT_LOCATION_NAMES)}
-        environ |= {"PATH": "/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept", "ANTHROPIC_API_KEY": "kept"}
+        environ |= {"PATH": "::.:bin:/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept", "ANTHROPIC_API_KEY": "kept"}
         original = dict(environ)
         result = c.peer_environment(environ)
-        self.assertEqual(result, {"PATH": "/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept", "ANTHROPIC_API_KEY": "kept",
-                                  c.ACTIVE_ENV: "1"})
+        # Empty and relative PATH entries would search the consulted repository.
+        self.assertEqual(result, {"PATH": "/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept",
+                                  "ANTHROPIC_API_KEY": "kept", c.ACTIVE_ENV: "1"})
         self.assertEqual(environ, original)
+        self.assertEqual(c.peer_environment(environ, pinned=True)["GIT_NO_REPLACE_OBJECTS"], "1")
+        defaults = [entry for entry in os.defpath.split(os.pathsep) if entry.startswith("/")]
+        self.assertEqual(c.safe_path(".:bin"), os.pathsep.join(defaults))
+        self.assertEqual(c.safe_path(None), os.pathsep.join(defaults))
 
     def test_git_environment_passes_only_the_bridge_settings(self):
-        environ = {"GIT_DIR": "/elsewhere", "GIT_AUTHOR_NAME": "kept", "GIT_CONFIG_COUNT": "1",
-                   "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "hooks", "GIT_CONFIG_PARAMETERS": "x"}
+        environ = {"GIT_DIR": "/elsewhere", "GIT_CONFIG": "/elsewhere/config", "GIT_TRACE": "/a/history/file",
+                   "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "hooks",
+                   "GIT_CONFIG_PARAMETERS": "x", "GIT_ALLOW_PROTOCOL": "ssh", "PATH": "/bin"}
         self.assertEqual(c.git_environment(environ, [("filter.a=b.smudge", "")]), {
-            "GIT_AUTHOR_NAME": "kept", "GIT_LFS_SKIP_SMUDGE": "1", "GIT_CONFIG_COUNT": "3",
+            "PATH": "/bin", "GIT_ALLOW_PROTOCOL": "", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_LFS_SKIP_SMUDGE": "1", "GIT_CONFIG_COUNT": "3",
             "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": "/dev/null",
             "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "false",
             "GIT_CONFIG_KEY_2": "filter.a=b.smudge", "GIT_CONFIG_VALUE_2": "",
@@ -206,15 +214,17 @@ class CommandTests(unittest.TestCase):
         disabled = ["--disable", "apps", "--disable", "plugins", "--disable", "hooks", "--disable", "multi_agent",
                     "--disable", "computer_use", "--disable", "browser_use", "--disable", "browser_use_external"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv"), [
-            *sandbox, *disabled, "-c", 'web_search="disabled"', "-c", 'shell_environment_policy.inherit="core"', "exec", "--json",
+            *sandbox, *disabled, "-c", 'web_search="disabled"', "-c", 'shell_environment_policy.inherit="core"',
+            "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', "exec", "--json",
             "--ignore-user-config", "--ignore-rules", "-",
         ])
         # The effort is quoted as one TOML string, so a crafted value cannot add another setting.
         command = c.build_command("codex", "/bin/codex", "conv", SESSION, model="gpt-x", mcp_servers={"b", "a\"q"},
-                                  reasoning_effort='xhigh"\nsandbox_mode="danger')
+                                  reasoning_effort='xhigh"\nsandbox_mode="danger', pinned=True)
         self.assertEqual(command, [
             *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="disabled"',
-            "-c", 'shell_environment_policy.inherit="core"',
+            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
+            "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
             "-c", 'model_reasoning_effort="xhigh\\"\\nsandbox_mode=\\"danger"',
             "-c", 'mcp_servers."a\\"q".enabled=false', "-c", 'mcp_servers."b".enabled=false',
             "exec", "--json", "resume", SESSION, "--ignore-user-config", "--ignore-rules", "-",

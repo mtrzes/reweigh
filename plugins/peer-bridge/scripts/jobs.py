@@ -29,7 +29,7 @@ from consultation import (
     JOB_RETENTION_SECONDS, JOB_START_GRACE_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state,
     job_view, new_job_record, valid_job_outcome, valid_job_record, validate_session_id,
 )
-from state_files import PRIVATE, ensure_private, open_regular, read_json, write_json
+from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 
 UNKNOWN_JOB = "No consultation job with that ID."
 UNREADABLE = "The consultation job's files are unreadable."
@@ -63,8 +63,8 @@ class JobStore:
             job_id = validate_session_id(job_id)
         except BridgeError as exc:
             raise BridgeError(UNKNOWN_JOB) from exc
-        if self.directory.is_symlink() or self.directory.parent.is_symlink():
-            raise BridgeError(PRIVATE)
+        if not check_private(self.directory.parent, self.directory):
+            raise BridgeError(UNKNOWN_JOB)
         folder = self.directory / job_id
         if folder.is_symlink() or not folder.is_dir():
             raise BridgeError(UNKNOWN_JOB)
@@ -198,7 +198,7 @@ class JobStore:
     def prune(self, now):
         """Remove jobs no runner holds that finished, or were created, longer ago than the retention period, and
         folders a crash left in staging or mid-removal. One unreadable job never stops the others' removal."""
-        if not self.directory.is_dir() or self.directory.is_symlink():
+        if not check_private(self.directory.parent, self.directory):
             return
         for entry in list(self.directory.iterdir()):
             try:

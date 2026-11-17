@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -23,6 +24,7 @@ from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, bridge, codex_thread, codex_turn, consultation,
     eventually_async, git, git_repository, read_pid, running,
 )
+import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
 
 
 class ConsultationTests(BridgeTestCase):
@@ -111,6 +113,24 @@ class ConsultationTests(BridgeTestCase):
             await self.consult("codex")
         self.assertEqual([call["executable"] for call in self.calls()], [str(bundled)])
 
+    async def test_only_absolute_path_entries_find_the_peer_and_what_its_launcher_runs(self):
+        # Empty and relative PATH entries search the current directory, which is the consulted repository for the
+        # peer and for a launcher script that finds its helper by name, as ChatGPT's bundled codex does.
+        trusted = self.root / "trusted-bin"
+        trusted.mkdir()
+        for folder, name, body in ((trusted, "claude", "exec helper \"$@\""), (trusted, "helper", f'exec "{self.peer}" "$@"'),
+                                   (self.project, "claude", f"touch {self.root}/ran-claude; exit 1"),
+                                   (self.project, "helper", f"touch {self.root}/ran-helper; exit 1")):
+            (folder / name).write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+            (folder / name).chmod(0o755)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.project)
+        del os.environ["PEER_BRIDGE_CLAUDE_BIN"]
+        with patch.dict(os.environ, {"PATH": os.pathsep.join(["", ".", "bin", str(trusted)])}):
+            await self.consult()
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(sorted(path.name for path in self.root.glob("ran-*")), [])
+
     async def test_missing_peer_cli_is_reported_without_starting_a_peer(self):
         with self.without_peer_on_path(), patch.object(bridge, "MACOS_APPLICATION_DIRECTORIES", (str(self.root),)):
             os.environ["PEER_BRIDGE_CODEX_BIN"] = str(self.root / "missing-codex")
@@ -160,6 +180,66 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o750)
         self.assertEqual(list(self.state.iterdir()), [marker])
         self.assertEqual((self.calls(), spawned), ([], []))
+
+    async def test_cleanup_never_reaches_through_a_state_directory_that_is_not_private(self):
+        # Each layout hides something cleanup would delete (a leftover checkout, a half-removed job) behind a path
+        # that is shared or a symlink; checks that ran only after cleanup would have let it go.
+        elsewhere = self.root / "elsewhere"
+        spawned = []
+        self.client.spawn = spawned.append
+        leftover = str(uuid.uuid4())
+
+        def candidates(base):
+            for folder in (base / "worktrees" / leftover, base / "jobs" / f"{jobs.DELETING_PREFIX}{uuid.uuid4()}"):
+                folder.mkdir(parents=True, mode=0o700)
+                (folder / "sentinel").write_text("keep", encoding="utf-8")
+
+        def shared_root():
+            self.state.mkdir(mode=0o700)
+            candidates(self.state)
+            self.state.chmod(0o750)
+
+        def linked_root():
+            elsewhere.mkdir(mode=0o700)
+            candidates(elsewhere)
+            self.state.symlink_to(elsewhere, target_is_directory=True)
+
+        def linked_children():
+            self.state.mkdir(mode=0o700)
+            elsewhere.mkdir(mode=0o700)
+            candidates(elsewhere)
+            for name in ("worktrees", "jobs"):
+                (self.state / name).symlink_to(elsewhere / name, target_is_directory=True)
+
+        def linked_checkout():
+            (self.state / "worktrees").mkdir(parents=True, mode=0o700)
+            self.state.chmod(0o700)
+            elsewhere.mkdir(mode=0o700)
+            candidates(elsewhere)
+            (self.state / "worktrees" / leftover).symlink_to(elsewhere / "worktrees" / leftover)
+
+        request = {"prompt": "Explain the query.", "working_directory": str(self.project)}
+        for layout, refused in ((shared_root, True), (linked_root, True), (linked_children, True),
+                                (linked_checkout, False)):
+            with self.subTest(layout=layout.__name__):
+                layout()
+                try:
+                    for call in (self.client.consult, self.client.start):
+                        if refused:
+                            with self.assertRaisesRegex(bridge.BridgeError, "private directory"):
+                                await call("claude", **request)
+                        elif call == self.client.consult:
+                            await call("claude", **request)
+                    sentinels = sorted((self.state if layout is shared_root else elsewhere).rglob("sentinel"))
+                    self.assertEqual(len(sentinels), 2)
+                    self.assertEqual(spawned, [])
+                finally:
+                    if self.state.is_symlink():
+                        self.state.unlink()
+                    elif self.state.exists():
+                        self.state.chmod(0o700)
+                        shutil.rmtree(self.state)
+                    shutil.rmtree(elsewhere, ignore_errors=True)
 
     def pinned_repository(self):
         git_repository(self.project)
@@ -312,6 +392,17 @@ class ConsultationTests(BridgeTestCase):
                 self.assertTrue(message.startswith(expected), message)
         self.assertEqual(list(self.state.glob("*.json")), [])
 
+    async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
+        # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any
+        # helper it started, has stopped.
+        with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "failure", "SIMULATED_PROBE_HANGS": "1"}):
+            task = asyncio.create_task(self.consult())
+            await eventually_async((self.root / "probe-child.pid").exists, "The sign-in probe did not start.")
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertFalse(running(read_pid(self.root / "probe-child.pid")))
+
     async def test_resumed_consultation_failures_check_the_peer_history_and_writer_lock(self):
         git_repository(self.project)
         for provider in ("claude", "codex"):
@@ -436,42 +527,52 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(len(self.registered_worktrees()), 1)
         self.assertEqual(list((self.state / "worktrees").iterdir()), [])
 
-    async def test_stopping_a_guard_signals_nothing_unless_it_is_still_unreaped_at_the_deadline(self):
-        class Guard:
-            """Stands in for the guard's Popen: only poll() reaps it, as only the bridge's own poll() does."""
-            pid = 2 ** 22 + 7
+    async def test_the_last_group_signal_comes_before_the_guard_is_reaped(self):
+        # Reaping frees the guard's ID, which is also its group's, so no signal may follow it, whether the guard exited
+        # early (killed), exits once its lifeline closes, or stalls past the deadline.
+        events = []
 
-            def __init__(self, exits_after_polls):
-                self.polls, self.exits_after_polls, self.returncode = 0, exits_after_polls, None
+        class Guard:
+            """Stands in for the guard's Popen: poll() reaps it, as only the bridge's own poll() does."""
+            pid = 2 ** 22 + 7
+            returncode = None
 
             def poll(self):
-                self.polls += 1
-                if self.returncode is None and self.polls > self.exits_after_polls:
-                    self.returncode = 0
+                if self.returncode is None:
+                    events.append("reap")
+                    self.returncode = -signal.SIGKILL
                 return self.returncode
 
-        # Only the guard that never exits meets the short deadline; the other gets the full one, so a stalled event
-        # loop cannot turn a timely exit into a kill.
-        for exits_after_polls, signalled, margin in ((2, False, DEADLINE_SECONDS), (10 ** 9, True, 0.2)):
+        loop = asyncio.get_running_loop()
+        for case, margin in (("exited before", DEADLINE_SECONDS), ("exits on lifeline", DEADLINE_SECONDS),
+                             ("stalled", 0.2)):
+            events.clear()
             reading, lifeline = os.pipe()
-            self.addCleanup(os.close, reading)
-            guard = Guard(exits_after_polls)
-            kills = []
-
-            def kill_group(pid, number):
-                kills.append((pid, number, guard.returncode))
-                guard.exits_after_polls = guard.polls  # the group dies, so the next poll() reaps the guard
-
+            status, writer = os.pipe()
+            os.set_blocking(status, False)
+            self.addCleanup(self.close_quietly, reading, status)
+            if case == "stalled":
+                self.addCleanup(os.close, writer)
+            elif case == "exited before":
+                os.close(writer)  # the guard's end of its status pipe closes only when it exits
+            elif case == "exits on lifeline":
+                loop.add_reader(reading, lambda: (loop.remove_reader(reading), os.close(writer)))
             with (
-                self.subTest(signalled=signalled),
-                patch.object(bridge.os, "killpg", kill_group),
+                self.subTest(case=case),
+                patch.object(bridge.os, "killpg", lambda pid, number: events.append(("signal", pid, number))),
                 patch.object(bridge, "GUARD_MARGIN_SECONDS", margin),
                 patch.object(bridge.peer_guard, "GRACE_SECONDS", 0),
             ):
-                await bridge.stop_peer(guard, lifeline)
-                # A group is signalled only while its guard is unreaped, and the guard is reaped afterwards.
-                self.assertEqual(kills, [(guard.pid, signal.SIGKILL, None)] if signalled else [])
-                self.assertIsNotNone(guard.returncode)
+                await bridge.stop_peer(Guard(), lifeline, status)
+                self.assertEqual(events, [("signal", Guard.pid, signal.SIGKILL), "reap"])
+
+    @staticmethod
+    def close_quietly(*descriptors):
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
     async def test_a_stalled_guard_is_killed_with_its_whole_group(self):
         # A guard that cannot act on its closed lifeline, here stopped, must not leave its peer behind. Only the
@@ -645,6 +746,59 @@ class ConsultationTests(BridgeTestCase):
             await self.consult(working_directory=str(package), ref=linked)
         self.assertEqual(sorted(path.name for path in self.root.iterdir() if path.name.startswith("ran")), [])
         self.assertEqual(len(self.calls()), 1)
+
+    async def test_pinning_ignores_what_would_change_the_checkout_or_run_a_command(self):
+        # Configuration seen only where the files are written, an inherited GIT_CONFIG, a replacement object and a
+        # partial clone's lazy fetch each would run repository code or check out other content than the commit named.
+        ran = self.root / "ran"
+        with self.subTest("filter configured only for linked worktrees, with an inherited GIT_CONFIG"):
+            git_repository(self.project)
+            (self.project / ".gitattributes").write_text("*.txt filter=late\n", encoding="utf-8")
+            (self.project / "marker.txt").write_text("stored\n", encoding="utf-8")
+            git(self.project, "add", ".")
+            git(self.project, "commit", "--quiet", "-m", "filtered")
+            linked_only = self.root / "linked-only.config"
+            linked_only.write_text(f'[filter "late"]\n\tsmudge = "touch {ran}-late; cat"\n\trequired = true\n',
+                                   encoding="utf-8")
+            git(self.project, "config", "includeIf.gitdir:**/worktrees/**.path", str(linked_only))
+            empty = self.root / "empty.config"
+            empty.write_text("", encoding="utf-8")
+            with patch.dict(os.environ, {"GIT_CONFIG": str(empty)}):
+                pinned = await self.consult(ref="HEAD")
+            self.assertEqual(self.calls()[-1]["marker"], "stored\n")
+            self.assertFalse(ran.with_name("ran-late").exists())
+        with self.subTest("replacement object"):
+            original = pinned["commit"]
+            (self.project / "marker.txt").write_text("replaced\n", encoding="utf-8")
+            git(self.project, "commit", "--quiet", "-am", "replacement")
+            git(self.project, "replace", original, git(self.project, "rev-parse", "HEAD"))
+            replaced = await self.consult(ref=original)
+            self.assertEqual((replaced["commit"], self.calls()[-1]["marker"]), (original, "stored\n"))
+        with self.subTest("partial clone with a promisor remote"):
+            git(self.project, "config", "uploadpack.allowFilter", "true")
+            clone = self.root / "partial"
+            git(self.root, "clone", "--quiet", "--filter=blob:none", "--no-checkout", f"file://{self.project}",
+                str(clone))
+            transport = self.root / "transport.sh"
+            transport.write_text(f"#!/bin/sh\ntouch {ran}-transport\nexit 1\n", encoding="utf-8")
+            transport.chmod(0o755)
+            git(clone, "config", "remote.origin.url", f"ext::{transport}")
+            git(clone, "config", "protocol.ext.allow", "always")
+            calls = len(self.calls())
+            with self.assertRaisesRegex(bridge.BridgeError, "Cannot check out the ref"):
+                await self.consult(working_directory=str(clone), ref="HEAD")
+            self.assertFalse(ran.with_name("ran-transport").exists())
+            self.assertEqual(len(self.calls()), calls)
+
+    async def test_removing_a_pinned_checkout_leaves_other_worktrees_registered(self):
+        # A worktree on a drive that is not mounted looks just like a deleted one; only the bridge's own record goes.
+        git_repository(self.project)
+        unmounted = self.root / "unmounted"
+        git(self.project, "worktree", "add", "--detach", "--quiet", str(unmounted))
+        shutil.rmtree(unmounted)
+        await self.consult(ref="HEAD")
+        names = [Path(line.split(" ", 1)[1]).name for line in self.registered_worktrees()]
+        self.assertEqual(names, [self.project.name, "unmounted"])
 
     async def test_seed_thread_carries_recent_agent_messages_into_a_fresh_consultation(self):
         git_repository(self.project)

@@ -8,7 +8,8 @@ its group: SIGTERM, a grace period, then SIGKILL, which ends the guard too. What
 the peer starts, including a status descriptor nobody reads any more, ends in that same stop.
 
 The guard stays a live member of its group until that last signal, so the group's ID cannot pass to another process
-while it is being signalled.
+while it is being signalled. It keeps its status descriptor open until it exits, so the bridge reads the end of that
+descriptor as the guard's exit without reaping it, and can still signal the group safely afterwards.
 
 Usage: peer_guard.py LIFELINE_FD STATUS_FD -- COMMAND...  (standard library only; run with python -I)
 """
@@ -40,10 +41,10 @@ def release_standard_streams():
 
 
 def report(status, token):
-    """Write a status token; False when the bridge no longer reads it, which the guard treats as a shutdown."""
+    """Write a status token, keeping the descriptor open until the guard exits; False when the bridge no longer reads
+    it, which the guard treats as a shutdown."""
     try:
         os.write(status, token + b"\n")
-        os.close(status)
         return True
     except OSError:
         return False
@@ -62,7 +63,7 @@ def wait_for_lifeline(lifeline, peer, status):
 
     A selector, unlike select(), accepts any descriptor number the bridge passes.
     """
-    reported = status is None
+    reported = peer is None
     with selectors.DefaultSelector() as selector:
         selector.register(lifeline, selectors.EVENT_READ)
         while True:
@@ -88,7 +89,6 @@ def main():
             peer = subprocess.Popen(command)
         except OSError:
             report(status, START_FAILED)
-            status = None
         release_standard_streams()
         wait_for_lifeline(lifeline, peer, status)
     finally:
