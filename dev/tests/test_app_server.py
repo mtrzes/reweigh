@@ -1,7 +1,9 @@
 """Exercise the shadow app-server source and the parity check against a stand-in `codex app-server`."""
 
+import fcntl
 import json
 import os
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -183,6 +185,108 @@ class AppServerTests(unittest.TestCase):
             output.write("{}")
         self.assertEqual((root / "report.json").stat().st_mode & 0o777, 0o600)
 
+    @staticmethod
+    def copy_input(arguments, **kwargs):
+        source, target = map(Path, arguments[-2:])
+        if source.is_dir():
+            shutil.copytree(source, target, symlinks=True)
+        else:
+            shutil.copy2(source, target, follow_symlinks=False)
+        return SimpleNamespace(returncode=0)
+
+    def test_clone_passes_only_allowlisted_inputs_to_cp(self):
+        live, copy = self.home.resolve(), self.root.resolve() / "copy"
+        _, rollout = codex_thread(live, "/repo", name="One")
+        _, compressed = codex_thread(live, "/repo", suffix=".jsonl.zst")
+        archives = live / "archived_sessions"
+        archives.mkdir()
+        archived = compressed.rename(archives / compressed.name)
+        inputs = [rollout, archived, live / "session_index.jsonl"]
+        for name in ("state_5.sqlite", "state_5.sqlite-wal", "thread_history_1.sqlite", "thread_history_1.sqlite-wal"):
+            path = live / name
+            path.write_bytes(name.encode())
+            inputs.append(path)
+        for path in (live / "auth.json", live / "config.toml", live / ".credentials.json", live / ".env",
+                     live / "state_other.sqlite", live / "logs_2.sqlite", live / "state_5.sqlite-shm",
+                     rollout.parent / ".env"):
+            path.write_text("private")
+        (archives / rollout.name).symlink_to(live / "auth.json")
+        with patch.object(app.sys, "platform", "darwin"), \
+                patch.object(app.subprocess, "run", side_effect=self.copy_input) as cp:
+            app.clone_home(live, copy)
+        self.assertCountEqual([Path(call.args[0][-2]) for call in cp.call_args_list], inputs)
+        self.assertEqual({str(path.relative_to(copy)) for path in copy.rglob("*") if path.is_file()},
+                         {"copy.json", *(str(path.relative_to(live)) for path in inputs)})
+        for call in cp.call_args_list:
+            self.assertEqual(call.args[0][0], "/bin/cp")
+            self.assertEqual(call.kwargs["env"], {"PATH": "/usr/bin:/bin"})
+
+    def test_failed_copy_is_never_published(self):
+        live, copy = self.home.resolve(), self.root.resolve() / "copy"
+        codex_thread(live, "/repo")
+        (live / "state_5.sqlite").touch()
+
+        def failed_copy(arguments, **kwargs):
+            self.copy_input(arguments, **kwargs)
+            return SimpleNamespace(returncode=1)
+
+        with patch.object(app.sys, "platform", "darwin"), patch.object(app.subprocess, "run", failed_copy), \
+                self.assertRaises(app.AppServerError):
+            app.clone_home(live, copy)
+        self.assertFalse(copy.exists())
+        self.assertFalse(copy.with_suffix(".partial").exists())
+
+    def test_clone_identity_exists_when_the_copy_is_published(self):
+        live, copy = self.home.resolve(), self.root.resolve() / "copy"
+        codex_thread(live, "/repo")
+        (live / "state_5.sqlite").touch()
+        rename = os.rename
+        published = []
+
+        def publish(staging, destination):
+            published.append(json.loads((staging / "copy.json").read_text()))
+            rename(staging, destination)
+
+        with patch.object(app.sys, "platform", "darwin"), patch.object(app.subprocess, "run", self.copy_input), \
+                patch.object(app.os, "rename", publish):
+            app.clone_home(live, copy)
+        self.assertEqual(published, [json.loads((copy / "copy.json").read_text())])
+        self.assertTrue(published[0]["copy_id"])
+
+    def test_run_rebuilds_an_orphaned_copy_and_holds_the_lock_through_reporting(self):
+        live, state = self.home.resolve(), self.root.resolve() / "state"
+        _, rollout = codex_thread(live, "/repo")
+        (live / "state_5.sqlite").touch()
+        root = state / "parity"
+        orphan = root / "codex-home"
+        orphan.mkdir(parents=True)
+        (orphan / ".credentials.json").touch()
+        verdict = app.parity_verdict
+
+        def assert_locked():
+            with (root / "parity.lock").open("ab") as other, self.assertRaises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def copy_input(arguments, **kwargs):
+            assert_locked()
+            return self.copy_input(arguments, **kwargs)
+
+        def read_reports(reports):
+            assert_locked()
+            self.assertEqual(len(reports), 1)
+            return verdict(reports)
+
+        client = self.client()
+        with patch.dict(os.environ, CODEX_HOME=str(live)), patch.object(app.sys, "platform", "darwin"), \
+                patch.object(app.subprocess, "run", copy_input), patch.object(app, "AppServerClient", return_value=client), \
+                patch.object(app, "desktop_codex_executable", return_value=(str(self.server), "fake")), \
+                patch.object(app, "codex_version", return_value="codex-cli 1.2.3"), \
+                patch.object(app, "parity_verdict", read_reports):
+            report = app.run_parity(state)
+        self.assertEqual(report["copy_id"], json.loads((orphan / "copy.json").read_text())["copy_id"])
+        self.assertTrue((orphan / rollout.relative_to(live)).is_file())
+        self.assertFalse((orphan / ".credentials.json").exists())
+
     def test_parity_compares_latest_turn_status_and_final_message(self):
         same, _ = codex_thread(self.home, "/repo", codex_turn("t1", "Draft.", "First."), codex_turn("t2", "Final."))
         changed, _ = codex_thread(self.home, "/repo", codex_turn("t3", "Final."))
@@ -205,17 +309,21 @@ class AppServerTests(unittest.TestCase):
         bundled.write_text("")
         impostor = self.root / "elsewhere" / "ChatGPT.app" / "codex"
 
-        def ps(arguments, **_):
-            output = f"41 {impostor}\n42 {bundled}\n" if "-axo" in arguments else (
-                f"{impostor} app-server" if "41" in arguments else f"{bundled} other")
+        team = app.DESKTOP_TEAM
+
+        def system_tool(arguments, *, env=None, **kwargs):
+            self.assertEqual(env, {"PATH": "/usr/bin:/bin"})
+            if arguments[0] == "/usr/bin/codesign":
+                return SimpleNamespace(returncode=0, stderr=f"TeamIdentifier={team}\n")
+            self.assertEqual(arguments[0], "/bin/ps")
+            output = f"41 {impostor}\n42 {bundled}\n" if arguments[1] == "-axo" else f"{bundled} other"
             return SimpleNamespace(stdout=output)
 
-        with patch.object(app, "BUNDLED_DESKTOP_CODEX", bundled), patch.object(app.subprocess, "run", ps):
-            with patch.object(app, "signed_desktop_app", lambda: True):
-                self.assertEqual(app.desktop_codex_executable(),
-                                 (str(bundled), "ChatGPT.app's bundled Codex (no desktop app-server running)"))
-            with patch.object(app, "signed_desktop_app", lambda: False), \
-                    self.assertRaisesRegex(app.AppServerError, "signature"):
+        with patch.object(app, "BUNDLED_DESKTOP_CODEX", bundled), patch.object(app.subprocess, "run", system_tool):
+            self.assertEqual(app.desktop_codex_executable(),
+                             (str(bundled), "ChatGPT.app's bundled Codex (no desktop app-server running)"))
+            team = f"{app.DESKTOP_TEAM}0"
+            with self.assertRaisesRegex(app.AppServerError, "signature"):
                 app.desktop_codex_executable()
 
     def test_fingerprint_hashes_content_and_counts_only_an_empty_wal_as_absent(self):

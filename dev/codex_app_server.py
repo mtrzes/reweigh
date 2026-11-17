@@ -15,12 +15,14 @@ home, so this source is never pointed at a live Codex home.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import selectors
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -35,7 +37,7 @@ from parity_rules import (  # noqa: E402
     app_server_agent_messages, app_server_snapshot, app_server_summary, parity_differences, parity_passed,
     parity_verdict,
 )
-from thread_parsing import ThreadListing, ThreadUnavailable  # noqa: E402
+from thread_parsing import ThreadListing, ThreadUnavailable, rollout_format, rollout_identifier  # noqa: E402
 from thread_reader import CodexFilesSource  # noqa: E402
 
 ALLOWED_REQUESTS = ("initialize", "thread/list", "thread/read", "thread/turns/list", "thread/items/list")
@@ -43,14 +45,17 @@ ALLOWED_NOTIFICATIONS = ("initialized",)
 REQUEST_TIMEOUT_SECONDS = 60
 PAGE_SIZE = 100
 # Files a sandboxed app-server must not change. SQLite rewrites a WAL database's -shm index whenever it is opened, even
-# by a reader, so that file is reported separately, not counted as a change to the database.
+# by a reader, so it is neither cloned nor counted as a change to the database.
 DURABLE_FOLDERS = ("sessions", "archived_sessions")
 DURABLE_FILES = ("session_index.jsonl",)
 DURABLE_DATABASE_SUFFIXES = (".sqlite", ".sqlite-wal")
 # Databases that hold thread state; any other database, such as Codex's own log database, is reported apart.
 THREAD_DATABASE_PREFIXES = ("state_", "thread_history_")
-# Left out of the copied home: credentials, and configuration that could start MCP servers or select providers.
-EXCLUDED_FROM_COPY = ("auth.json", "auth.lock", "config.toml")
+# The database names used by the supported desktop app-server for thread/list and turn history.
+STATE_DATABASE = "state_5.sqlite"
+THREAD_DATABASES = (STATE_DATABASE, "thread_history_1.sqlite")
+COPY_RECORD = "copy.json"
+SYSTEM_ENVIRONMENT = {"PATH": "/usr/bin:/bin"}
 DESKTOP_APP = Path("/Applications/ChatGPT.app")
 BUNDLED_DESKTOP_CODEX = DESKTOP_APP / "Contents" / "Resources" / "codex-cli" / "bin" / "codex"
 # The Apple team that signs ChatGPT.app; its seal covers the bundled Codex executable.
@@ -95,7 +100,7 @@ class AppServerClient:
     def __init__(self, executable, codex_home, sandbox_home):
         sandbox_home = Path(sandbox_home)
         (sandbox_home / "tmp").mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.environment = {"PATH": "/usr/bin:/bin", "HOME": str(sandbox_home), "CODEX_HOME": str(codex_home),
+        self.environment = {**SYSTEM_ENVIRONMENT, "HOME": str(sandbox_home), "CODEX_HOME": str(codex_home),
                             "TMPDIR": str(sandbox_home / "tmp")}
         self.executable = executable
         self.server_requests, self.notifications = [], []
@@ -232,11 +237,13 @@ class AppServerSource:
 
 def signed_desktop_app():
     """Whether ChatGPT.app's seal is intact and its signing team is OpenAI's, read from codesign's exact fields."""
-    verified = subprocess.run(["codesign", "--verify", "--strict", str(DESKTOP_APP)], capture_output=True)
+    verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(DESKTOP_APP)],
+                              capture_output=True, env=SYSTEM_ENVIRONMENT)
     if verified.returncode:
         return False
-    details = subprocess.run(["codesign", "-d", "--verbose=2", str(DESKTOP_APP)], capture_output=True, text=True)
-    return f"TeamIdentifier={DESKTOP_TEAM}" in details.stderr.splitlines()
+    details = subprocess.run(["/usr/bin/codesign", "-d", "--verbose=2", str(DESKTOP_APP)],
+                             capture_output=True, text=True, env=SYSTEM_ENVIRONMENT)
+    return details.returncode == 0 and f"TeamIdentifier={DESKTOP_TEAM}" in details.stderr.splitlines()
 
 
 def desktop_codex_executable():
@@ -245,12 +252,14 @@ def desktop_codex_executable():
     bundled = os.path.realpath(BUNDLED_DESKTOP_CODEX)
     if not Path(bundled).is_file() or not signed_desktop_app():
         raise AppServerError("Cannot find a ChatGPT.app whose signature covers its Codex executable.")
-    listing = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True).stdout
+    listing = subprocess.run(["/bin/ps", "-axo", "pid=,comm="], capture_output=True, text=True,
+                             env=SYSTEM_ENVIRONMENT).stdout
     for line in listing.splitlines():
         pid, _, command = line.strip().partition(" ")
         if os.path.realpath(command) != bundled:
             continue
-        arguments = subprocess.run(["ps", "-o", "args=", "-p", pid], capture_output=True, text=True).stdout.split()
+        arguments = subprocess.run(["/bin/ps", "-o", "args=", "-p", pid], capture_output=True, text=True,
+                                   env=SYSTEM_ENVIRONMENT).stdout.split()
         if "app-server" in arguments[1:2]:
             return bundled, "running desktop app-server"
     return bundled, "ChatGPT.app's bundled Codex (no desktop app-server running)"
@@ -292,37 +301,60 @@ def open_private(path, append=False):
         raise AppServerError(f"Cannot write {path.name} in the parity sandbox; it may be a symlink.") from exc
 
 
-def clone_home(source, destination):
-    """Copy a Codex home as an APFS clone, which uses no space until a file changes, without credentials or config.
+def clone_inputs(source):
+    """Select only regular rollouts, the session index and the supported thread databases and WAL files."""
+    def rollouts(directory):
+        for path in directory.iterdir():
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                yield from rollouts(path)
+            elif path.name.startswith("rollout-") and rollout_identifier(path.name):
+                if not rollout_format(path.name):
+                    raise AppServerError("Cannot clone an unsupported Codex rollout format.")
+                yield path
 
-    source must already be resolved: cp copies a symlink operand as a link, and the cleanup below would then reach
-    the live home through it.
-    """
+    state = source / STATE_DATABASE
+    if state.is_symlink() or not state.is_file():
+        raise AppServerError(f"Cannot clone the Codex home without {STATE_DATABASE}.")
+    for name in (*DURABLE_FILES, *THREAD_DATABASES, *(database + "-wal" for database in THREAD_DATABASES)):
+        path = source / name
+        if path.exists() and not path.is_symlink():
+            yield path
+    for name in DURABLE_FOLDERS:
+        directory = source / name
+        if directory.is_dir() and not directory.is_symlink():
+            yield from rollouts(directory)
+
+
+def clone_home(source, destination):
+    """Stage a macOS clone containing only parity inputs, then publish it with its copy identity."""
     if sys.platform != "darwin":
         raise AppServerError("The parity check clones the Codex home with APFS, which needs macOS.")
     if Path(source).resolve() != Path(source) or not Path(source).is_dir():
         raise AppServerError("The live Codex home must be given as a resolved directory.")
-    # The clone is made under a partial name and renamed into place only once credentials are gone, so an
-    # interrupted clone never becomes the copy; the next run removes it.
     partial = destination.with_name(destination.name + ".partial")
     for path in (destination, partial):
         check_isolated(path, source)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     discard_partial(partial)
-    # cp warns about sockets it cannot copy; the clone is still complete for files.
-    subprocess.run(["cp", "-c", "-R", str(source), str(partial)], capture_output=True)
-    if partial.is_symlink() or not partial.is_dir():
+    partial.mkdir(mode=0o700)
+    try:
+        for path in clone_inputs(source):
+            target = partial / path.relative_to(source)
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise AppServerError(f"Cannot clone non-regular input {path.name}.")
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            result = subprocess.run(["/bin/cp", "-c", "-p", "-P", str(path), str(target)],
+                                    capture_output=True, env=SYSTEM_ENVIRONMENT)
+            if result.returncode or target.is_symlink() or not target.is_file():
+                raise AppServerError(f"Cannot clone {path.name}.")
+        with open_private(partial / COPY_RECORD) as output:
+            json.dump({"copy_id": str(uuid.uuid4()),
+                       "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}, output)
+        os.rename(partial, destination)
+    finally:
         discard_partial(partial)
-        raise AppServerError("Cannot clone the Codex home as a directory.")
-    # Nothing under the clone is touched before it is known to be a separate directory.
-    check_isolated(partial, source)
-    if not (partial / "sessions").is_dir():
-        discard_partial(partial)
-        raise AppServerError("Cannot clone the Codex home. The parity check needs an APFS volume.")
-    remove_symlinks(partial)
-    for name in EXCLUDED_FROM_COPY:
-        (partial / name).unlink(missing_ok=True)
-    os.rename(partial, destination)
 
 
 def discard_partial(partial):
@@ -401,23 +433,26 @@ def run_parity(state_directory, fresh_copy=False):
     """Run one parity check on the persistent copied home under the state directory and save its report."""
     live = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
     root = Path(state_directory) / "parity"
-    copy, sandbox, reports = root / "codex-home", root / "home", root / "reports"
-    copy_record = root / "copy.json"
-    # Every path is checked before anything is created or written.
-    for path in (root, copy, sandbox, sandbox / "tmp", reports, copy_record):
-        check_isolated(path, live)
+    check_isolated(root, live)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open_private(root / "parity.lock", append=True) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run_locked_parity(root, live, fresh_copy)
+
+
+def run_locked_parity(root, live, fresh_copy):
+    copy, sandbox, reports = root / "codex-home", root / "home", root / "reports"
+    copy_record = copy / COPY_RECORD
+    for path in (copy, sandbox, sandbox / "tmp", reports, copy_record):
+        check_isolated(path, live)
     discard_partial(copy.with_name(copy.name + ".partial"))
     if sandbox.is_dir():
         remove_symlinks(sandbox)
-    if fresh_copy:
-        shutil.rmtree(copy, ignore_errors=True)
-        copy_record.unlink(missing_ok=True)
+    # Clones made before the record moved inside may contain files outside the allowlist. Rebuild them.
+    if copy.is_dir() and (fresh_copy or not copy_record.is_file()):
+        shutil.rmtree(copy)
     if not copy.is_dir():
         clone_home(live, copy)
-        with open_private(copy_record) as output:
-            output.write(json.dumps({"copy_id": str(uuid.uuid4()),
-                                     "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}))
     record = json.loads(copy_record.read_text())
     executable, executable_source = desktop_codex_executable()
     report = {

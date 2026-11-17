@@ -22,9 +22,11 @@ writes its own log database, and was seen returning incomplete history and misla
   final message that disagrees with its turn record, and a compressed file that is cut off, ends inside a record,
   is damaged or changes while it is read.
 - The app-server source is a developer tool outside the plugin, `dev/codex_app_server.py`. It runs only on an APFS clone
-  of the Codex home without credentials or configuration, made under a partial name and moved into place once they are
-  removed, with every symlink removed and `HOME`, `CODEX_HOME` and `TMPDIR` inside a sandbox. It runs only the Codex
-  executable inside ChatGPT.app, after codesign confirms the app's seal and its signing team, sends only `initialize`,
+  containing the session and archived-session rollouts, the session index, and the supported thread state databases
+  with their WAL files. It publishes that clone with its identity in one rename and holds an exclusive lock from copy
+  selection through report publication. It removes symlinks and sets `HOME`, `CODEX_HOME` and `TMPDIR` inside a sandbox.
+  It runs only the Codex executable inside ChatGPT.app, after the system codesign confirms the app's seal and signing
+  team. It sends only `initialize`,
   `initialized`, `thread/list` with `useStateDbOnly`, `thread/read` without `includeTurns`, `thread/turns/list` and
   `thread/items/list`, and refuses every server request.
 - It may replace the file reader only when the parity check passes on two consecutive Codex releases over the same
