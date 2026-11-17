@@ -272,6 +272,49 @@ time.sleep({4 * DEADLINE_SECONDS})
         view = await self.client.job(job_id, CLAUDE)
         self.assertEqual((view["state"], view["error"]), ("cancelled", jobs.CANCELLED))
 
+    async def test_the_runner_can_be_cancelled_while_its_state_lock_is_held(self):
+        for phase in ("claim", "reply", "cancel"):
+            with self.subTest(phase=phase):
+                job_id = await self.queued()
+                store = self.client.jobs
+                folder = self.folder(job_id)
+                state_lock = folder / "state.lock"
+                attempted, consulting, reply = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                real_flock = store.flock
+                held = False
+
+                def flock(path, blocking):
+                    if path == state_lock and held:
+                        attempted.set()
+                        self.assertFalse(blocking)
+                    return real_flock(path, blocking)
+
+                async def consult(request):
+                    consulting.set()
+                    await reply.wait()
+                    return {"conversation_id": "conv", "reply": "done"}
+
+                with patch.object(store, "flock", flock):
+                    runner = asyncio.create_task(jobs.run_job(store, job_id, consult))
+                    try:
+                        if phase != "claim":
+                            await asyncio.wait_for(consulting.wait(), DEADLINE_SECONDS)
+                        with real_flock(state_lock, blocking=False) as held:
+                            self.assertTrue(held)
+                            if phase == "reply":
+                                reply.set()
+                            if phase != "cancel":
+                                await asyncio.wait_for(attempted.wait(), DEADLINE_SECONDS)
+                            runner.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(runner, DEADLINE_SECONDS)
+                    finally:
+                        if not runner.done():
+                            runner.cancel()
+                            await asyncio.gather(runner, return_exceptions=True)
+                with real_flock(folder / "runner.lock", blocking=False) as free:
+                    self.assertTrue(free)
+
     async def test_a_queued_job_cancelled_before_its_runner_starts_never_runs(self):
         job_id = await self.queued(prompt="PRIVATE QUESTION")
         self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelled")
@@ -335,7 +378,8 @@ time.sleep({4 * DEADLINE_SECONDS})
     async def test_a_job_reads_cancelling_until_its_runner_stops(self):
         job_id = await self.queued()
         store = self.client.jobs
-        with store.runner_lock(self.folder(job_id)):  # a runner that has not seen the marker yet
+        with store.flock(self.folder(job_id) / "runner.lock", blocking=False) as acquired:
+            self.assertTrue(acquired)  # a runner that has not seen the marker yet
             self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelling")
             self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelling")
         await jobs.run_job(self.client.jobs, job_id, self.never)  # the runner then honours the marker
@@ -347,6 +391,24 @@ time.sleep({4 * DEADLINE_SECONDS})
         with other.state_lock(self.folder(held)):
             await asyncio.wait_for(asyncio.to_thread(self.client.jobs.prune, time.time() + LATER), DEADLINE_SECONDS)
         self.assertEqual((self.folder(held).exists(), self.folder(free).exists()), (True, False))
+
+    async def test_job_apis_stop_waiting_for_a_busy_state_lock(self):
+        job_id = await self.queued()
+        state_lock = self.folder(job_id) / "state.lock"
+
+        def sleep(seconds):
+            clock.now += seconds
+
+        clock = SimpleNamespace(now=1000.0, monotonic=lambda: clock.now, sleep=sleep)
+        for call in (self.client.job, self.client.cancel):
+            clock.now = 1000.0
+            with self.subTest(call=call.__name__), patch.object(jobs, "time", clock):
+                with self.client.jobs.flock(state_lock, blocking=False) as acquired:
+                    self.assertTrue(acquired)
+                    with self.assertRaises(bridge.BridgeError) as error:
+                        await asyncio.wait_for(call(job_id, CLAUDE), timeout=1)
+                self.assertEqual(str(error.exception), "The consultation job is busy. Try again.")
+                self.assertEqual(clock.now, 1001.0)
 
     async def test_the_runner_lock_is_probed_only_under_the_state_lock(self):
         # A probe outside the state lock could meet another probe and take it for a runner.
@@ -390,12 +452,12 @@ time.sleep({4 * DEADLINE_SECONDS})
         store, other, seen = jobs.JobStore(self.state), jobs.JobStore(self.state), {}
         record = store.record_outcome
 
-        def at_the_outcome(folder, outcome):
+        async def at_the_outcome(folder, outcome):
             # The reply is in and its outcome not yet written; the runner still holds the job.
             seen["request kept"] = (folder / "request.json").exists()
             seen["view"] = other.view(job_id, CLAUDE)["state"]
             seen["cancel"] = other.cancel(job_id, CLAUDE)["state"]
-            record(folder, outcome)
+            await record(folder, outcome)
 
         store.record_outcome = at_the_outcome
 

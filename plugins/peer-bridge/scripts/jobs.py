@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from consultation import (
@@ -34,10 +34,13 @@ from state_files import PRIVATE, check_private, ensure_private, open_regular, re
 
 UNKNOWN_JOB = "No consultation job with that ID."
 UNREADABLE = "The consultation job's files are unreadable."
+LOCK_BUSY = "The consultation job is busy. Try again."
 CANCELLED = "The consultation was cancelled."
 UNEXPECTED = "The consultation stopped on an unexpected error."
 STOPPED_JOB_ERRORS = {"lost": LOST_JOB, "cancelled": CANCELLED}
 CANCEL_POLL_SECONDS = 0.2
+LOCK_POLL_SECONDS = 0.05
+STATE_LOCK_TIMEOUT_SECONDS = 1.0
 # A job folder is built under STAGING_PREFIX and renamed into place whole; an expired one is renamed under
 # DELETING_PREFIX before it is removed, so an interrupted removal is finished later, whatever is left in it.
 STAGING_PREFIX = ".staging-"
@@ -120,11 +123,31 @@ class JobStore:
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
+    @contextmanager
     def state_lock(self, folder):
-        return self.flock(folder / "state.lock", blocking=True)
+        deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            with self.flock(folder / "state.lock", blocking=False) as acquired:
+                if acquired:
+                    yield
+                    return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(LOCK_POLL_SECONDS, remaining))
+            if time.monotonic() >= deadline:
+                break
+        raise BridgeError(LOCK_BUSY)
 
-    def runner_lock(self, folder):
-        return self.flock(folder / "runner.lock", blocking=True)
+    @asynccontextmanager
+    async def runner_file_lock(self, path, *, retry=True):
+        """Retry on the event loop so the runner can be cancelled while waiting."""
+        while True:
+            with self.flock(path, blocking=False) as acquired:
+                if acquired or not retry:
+                    yield acquired
+                    return
+            await asyncio.sleep(LOCK_POLL_SECONDS)
 
     def runner_present(self, folder):
         """Whether a runner holds the job. Call only while holding the job's state lock."""
@@ -249,9 +272,9 @@ class JobStore:
 
     # Runner side
 
-    def claim(self, folder):
+    async def claim(self, folder):
         """Take the job's request for this runner, or None when the job must not run. Hold the runner lock."""
-        with self.state_lock(folder):
+        async with self.runner_file_lock(folder / "state.lock"):
             record = self.read(folder / "job.json")
             if record is None:
                 return None  # removed while this runner waited
@@ -280,9 +303,10 @@ class JobStore:
                                              "started_at": time.time()})
             return request
 
-    def record_outcome(self, folder, outcome):
-        with self.state_lock(folder):
-            self.finish(folder, outcome)
+    async def record_outcome(self, folder, outcome, *, retry=True):
+        async with self.runner_file_lock(folder / "state.lock", retry=retry) as acquired:
+            if acquired:
+                self.finish(folder, outcome)
 
 
 def spawn_runner(job_id):
@@ -309,8 +333,8 @@ async def run_job(store, job_id, consult):
     """
     try:
         folder = store.folder(job_id)
-        with store.runner_lock(folder):
-            request = store.claim(folder)
+        async with store.runner_file_lock(folder / "runner.lock"):
+            request = await store.claim(folder)
             if request is not None:
                 await consult_and_record(store, folder, request, consult)
     except (BridgeError, OSError):
@@ -329,12 +353,15 @@ async def consult_and_record(store, folder, request, consult):
         outcome = job_outcome("failed", time.time(), error=str(exc))
     except (asyncio.CancelledError, KeyboardInterrupt):
         # Cancelling consult() has already stopped the peer's guard and removed a pinned checkout.
-        store.record_outcome(folder, job_outcome("cancelled", time.time(), error=CANCELLED))
-        if watcher.done() and not watcher.cancelled():
+        marked = (not asyncio.current_task().cancelling()
+                  and watcher.done() and not watcher.cancelled() and watcher.exception() is None)
+        # A signalled runner must exit even if another process holds the state lock.
+        await store.record_outcome(folder, job_outcome("cancelled", time.time(), error=CANCELLED), retry=marked)
+        if marked:
             return  # cancelled through the marker: the job ends normally
         raise
     except Exception:
         outcome = job_outcome("failed", time.time(), error=UNEXPECTED)
     finally:
         watcher.cancel()
-    store.record_outcome(folder, outcome)
+    await store.record_outcome(folder, outcome)

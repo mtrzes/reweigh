@@ -83,6 +83,9 @@ deadline, cancellation of a queued job with no runner takes effect immediately. 
 the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
 `failed` with a fixed error.
 
+Each status read or cancellation waits at most one second for the lock on the job's state, then reports that the job
+is busy. The runner can respond to `SIGTERM` or `SIGHUP` while waiting for the lock.
+
 Job cleanup removes only folders named with a canonical job UUID, optionally preceded by `.staging-` or `.deleting-`.
 
 ## Thread reading

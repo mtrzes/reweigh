@@ -19,6 +19,7 @@ script header is followed by `uv lock --script plugins/peer-bridge/scripts/bridg
 
 Later hardening, from the 1.0.0 reviews:
 
+- [ ] Pass the `get_consultation` deadline into state-lock acquisition. `bridge.py` owns `wait_seconds` and was outside the scope of the background-job fixes.
 - [ ] Expire conversation records, and limit how many jobs and how large a prompt and context a start accepts.
 - [ ] Make the model-catalogue check advisory, so a stale `models_cache.json` cannot block a new model.
 - [ ] Contain a peer's whole process tree, not only its group.
