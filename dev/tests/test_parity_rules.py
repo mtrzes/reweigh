@@ -92,7 +92,7 @@ class AppServerParsingTests(unittest.TestCase):
         self.assertTrue(p.parity_passed(clean))
         for field, value in (("threads_compared", 0), ("missing", ["id"]), ("mismatches", [{"id": "id", "fields": ["status"]}]),
                              ("thread_data_changes", ["sessions/x.jsonl"]),
-                             ("other_database_changes", ["logs_2.sqlite"]),
+                             ("other_database_changes", ["logs_2.sqlite"]), ("file_unsupported", ["id"]),
                              ("server_requests", ["item/commandExecution/requestApproval"])):
             with self.subTest(field=field):
                 self.assertFalse(p.parity_passed(clean | {field: value}))

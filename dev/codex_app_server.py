@@ -473,16 +473,17 @@ def compare(file_source, app_source):
     everything = lambda cwd: True  # noqa: E731  (the copy is compared machine-wide, not per repository)
     app_threads = {summary.id: summary for summary in app_source.list_threads(everything).threads}
     compared, unreadable, missing, mismatches = 0, {}, [], []
-    for summary in file_source.list_threads(everything).threads:
+    listing = file_source.list_threads(everything)
+    for summary in listing.threads:
+        # Only the reader's own refusal leaves a thread out by design; any other error is a reader fault or an
+        # unreadable file, and stops the run rather than shrinking what was compared.
         try:
             expected = file_source.read_thread(summary, 3, everything)
         except ThreadUnavailable as exc:
             unreadable[str(exc)] = unreadable.get(str(exc), 0) + 1
             continue
-        except (OSError, TypeError, AttributeError):
-            unreadable["The thread's history file could not be read."] = unreadable.get(
-                "The thread's history file could not be read.", 0) + 1
-            continue
+        except (OSError, TypeError, AttributeError) as exc:
+            raise AppServerError(f"The file reader failed on thread {summary.id}.") from exc
         compared += 1
         if summary.id not in app_threads:
             missing.append(summary.id)
@@ -495,7 +496,8 @@ def compare(file_source, app_source):
         differences = parity_differences(expected, actual)
         if differences:
             mismatches.append({"id": summary.id, "fields": differences})
-    return {"threads_compared": compared, "file_unreadable": unreadable, "missing": missing, "mismatches": mismatches}
+    return {"threads_compared": compared, "file_unreadable": unreadable, "missing": missing, "mismatches": mismatches,
+            "file_unsupported": sorted(listing.unsupported)}
 
 
 def run_parity(state_directory, fresh_copy=False):
@@ -546,12 +548,14 @@ def run_locked_parity(root, live, fresh_copy):
         report["executable"], report["executable_source"] = desktop_codex_executable()
         executable = report["executable"]
         client = AppServerClient(executable, copy, sandbox)
+        # Taken before anything runs Codex against the copy, so even `codex --version` cannot change it unseen.
+        report["symlinks_removed"] = remove_symlinks(copy)
+        before = fingerprint(copy)
         report["codex_version"] = codex_version(executable, client.environment)
         # A run interrupted after startup must still count against the release.
         save_report(path, {**report, "error": "The parity run did not complete."})
         # The app-server makes symlinks to its executable on each start; clean them before and after each attempt.
-        report["symlinks_removed"] = remove_symlinks(copy)
-        before = fingerprint(copy)
+        report["symlinks_removed"] += remove_symlinks(copy)
         try:
             with client:
                 report.update(compare(CodexFilesSource(copy), AppServerSource(client)))
@@ -560,7 +564,10 @@ def run_locked_parity(root, live, fresh_copy):
             report["server_requests"] = sorted(set(client.server_requests))
             remove_symlinks(copy)
         report["thread_data_changes"] = [path for path in changes if is_thread_data(path)]
-        report["other_database_changes"] = [path for path in changes if not is_thread_data(path)]
+        # Databases the copy never held, such as Codex's logs, are created by the server in the copy: noted, not
+        # counted. A copied database that changes, or new thread data, fails the run.
+        report["other_database_changes"] = [path for path in changes if not is_thread_data(path) and path in before]
+        report["databases_created"] = [path for path in changes if not is_thread_data(path) and path not in before]
         report["passed"] = parity_passed(report)
     except (AppServerError, OSError, subprocess.SubprocessError) as exc:
         report["error"] = str(exc)
@@ -580,7 +587,7 @@ def main():
     except AppServerError as exc:
         result = {"error": str(exc)}
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 1 if "error" in result else 0
+    return 0 if result.get("passed") else 1
 
 
 if __name__ == "__main__":

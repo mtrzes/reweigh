@@ -61,11 +61,12 @@ def parity_differences(file_snapshot, app_snapshot):
 
 
 def parity_passed(report):
-    """Whether one parity run passed: every thread matched, the copy's files stayed unchanged and the server sent no
-    request. ADR 0001 requires the copy's rollouts and databases to stay unchanged, Codex's log database included."""
+    """Whether one parity run passed: every thread matched, none was left out as unsupported, the copy's files stayed
+    unchanged and the server sent no request. ADR 0001 requires the copy's rollouts and databases to stay unchanged; a
+    database the copy never held, such as Codex's logs, is created by the server and is not a change."""
     # A run that compared no thread proves nothing.
     return report["threads_compared"] > 0 and not (
-        report["missing"] or report["mismatches"] or report["thread_data_changes"]
+        report["missing"] or report["mismatches"] or report.get("file_unsupported") or report["thread_data_changes"]
         or report["other_database_changes"] or report["server_requests"])
 
 
