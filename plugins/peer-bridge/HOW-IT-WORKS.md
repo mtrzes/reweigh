@@ -83,6 +83,8 @@ deadline, cancellation of a queued job with no runner takes effect immediately. 
 the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
 `failed` with a fixed error.
 
+Job cleanup removes only folders named with a canonical job UUID, optionally preceded by `.staging-` or `.deleting-`.
+
 ## Thread reading
 
 The reader opens the other app's session files read-only: Claude Code's `projects/*/*.jsonl`, and Codex's rollouts,

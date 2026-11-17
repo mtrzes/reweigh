@@ -211,10 +211,15 @@ class JobStore:
             try:
                 if entry.is_symlink() or not entry.is_dir():
                     continue
-                if entry.name.startswith(DELETING_PREFIX):
+                prefix = next((prefix for prefix in (STAGING_PREFIX, DELETING_PREFIX) if entry.name.startswith(prefix)),
+                              "")
+                job_id = entry.name.removeprefix(prefix)
+                if validate_session_id(job_id) != job_id:
+                    continue
+                if prefix == DELETING_PREFIX:
                     shutil.rmtree(entry, ignore_errors=True)
                     continue
-                if entry.name.startswith(STAGING_PREFIX):
+                if prefix == STAGING_PREFIX:
                     # A concurrent start may publish this folder at any moment; a vanished one is skipped.
                     if now - entry.stat().st_mtime > STAGING_RETENTION_SECONDS:
                         shutil.rmtree(entry, ignore_errors=True)
@@ -225,7 +230,7 @@ class JobStore:
                     if not held or self.runner_present(entry):
                         continue
                     if self.expired(entry, now):
-                        tombstone = self.directory / f"{DELETING_PREFIX}{entry.name}"
+                        tombstone = self.directory / f"{DELETING_PREFIX}{job_id}"
                         os.rename(entry, tombstone)
                 if tombstone is not None:
                     shutil.rmtree(tombstone, ignore_errors=True)

@@ -415,7 +415,7 @@ class JobTests(BridgeTestCase):
             with self.assertRaisesRegex(bridge.BridgeError, "Cannot read or write the consultation job files"):
                 await self.start(prompt="PRIVATE QUESTION")
         self.assertEqual(list((self.state / "jobs").iterdir()), [])
-        stale = self.state / "jobs" / f"{jobs.STAGING_PREFIX}leftover"
+        stale = self.state / "jobs" / f"{jobs.STAGING_PREFIX}{uuid.uuid4()}"
         stale.mkdir()
         (stale / "request.json").write_text("PRIVATE QUESTION")
         self.client.jobs.prune(time.time() + jobs.STAGING_RETENTION_SECONDS + 60)
@@ -423,9 +423,9 @@ class JobTests(BridgeTestCase):
 
     async def test_prune_skips_a_staging_folder_published_meanwhile(self):
         await self.queued()
-        vanishing = self.state / "jobs" / f"{jobs.STAGING_PREFIX}being-published"
+        published = self.state / "jobs" / str(uuid.uuid4())
+        vanishing = published.with_name(f"{jobs.STAGING_PREFIX}{published.name}")
         vanishing.mkdir()
-        published = self.state / "jobs" / "published-meanwhile"
         real_is_dir = Path.is_dir
 
         def is_dir(path, *arguments, **keywords):
@@ -452,6 +452,19 @@ class JobTests(BridgeTestCase):
         (tombstone / "outcome.json").write_text(json.dumps({"result": {"reply": "PRIVATE REPLY"}}))
         self.client.jobs.prune(time.time())
         self.assertFalse(tombstone.exists())
+
+    async def test_prune_leaves_prefixed_directories_without_a_canonical_job_id(self):
+        await self.queued()
+        made = []
+        for prefix in (jobs.STAGING_PREFIX, jobs.DELETING_PREFIX):
+            for suffix in ("keep", "AAAAAAAA-AAAA-4AAA-AAAA-AAAAAAAAAAAA"):
+                entry = self.state / "jobs" / f"{prefix}{suffix}"
+                entry.mkdir()
+                made.append(entry)
+        self.client.jobs.prune(time.time() + LATER)
+        for entry in made:
+            with self.subTest(entry=entry.name):
+                self.assertTrue(entry.is_dir())
 
     async def test_unreadable_jobs_are_refused_with_a_reason_and_never_stop_pruning(self):
         broken_outcome = await self.queued()

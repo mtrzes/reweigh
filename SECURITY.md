@@ -25,7 +25,8 @@ line runs.
   other consultation takes over a checkout that is still in use.
 - **State files are private.** The state directory and everything in it are readable by the user only, and the bridge
   opens its files without following symlinks. Cleanup checks that the state directory and its folders are private,
-  real directories before it lists or removes anything in them. Only a regular file can mark a job for cancellation.
+  real directories before it lists or removes anything in them. Job cleanup requires a canonical UUID in each job,
+  staging or deletion directory name. Only a regular file can mark a job for cancellation.
 - **The tools' read-only hint.** `ask_*` and `start_*` are annotated read-only: they change nothing in the user's
   project. They do write the bridge's own records, jobs and checkouts in its state directory.
 
