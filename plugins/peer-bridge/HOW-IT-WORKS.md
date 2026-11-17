@@ -84,7 +84,9 @@ the runner has read them.
 ## Thread reading
 
 The reader opens the other app's session files read-only: Claude Code's `projects/*/*.jsonl`, and Codex's rollouts,
-plain or zstd-compressed. It returns only agent messages and the latest turn's state, and only for threads in the same
+plain or zstd-compressed. It opens regular files without following symlinks below the configured app home and
+checks the recorded session ID against the filename. The listing takes Codex recency from the open rollout so
+an archive move cannot interrupt the listing. It returns only agent messages and the latest turn's state, and only for threads in the same
 git repository. `seed_thread` carries a thread's recent messages into a new consultation, so a review left in Codex
 Desktop can be followed up without touching it.
 

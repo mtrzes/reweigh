@@ -53,10 +53,19 @@ IDENTITY_FIELDS = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
 CHANGED_WHILE_READ = "The thread's history file changed while it was read."
 
 
-def open_history(path):
-    """Open one of the apps' history files read-only, without blocking, and only if it is a regular file: a FIFO or a
-    device in its place is refused at once."""
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+def open_history(path, root=None):
+    """Open a regular history file without following symlinks below the app's configured home."""
+    root = path.parent if root is None else root
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY
+    parent = os.open(root, directory_flags)
+    try:
+        for part in path.relative_to(root).parts[:-1]:
+            child = os.open(part, directory_flags | os.O_NOFOLLOW, dir_fd=parent)
+            os.close(parent)
+            parent = child
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+    finally:
+        os.close(parent)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ThreadUnavailable("The thread's history file is not a regular file.")
@@ -119,11 +128,12 @@ def zstd_reader(source):
     return io.BufferedReader(decompressor.stream_reader(source, read_across_frames=True))
 
 
-def read_first_line(path):
-    with open_history(path) as raw, decompression_errors():
+def read_first_line(path, root):
+    with open_history(path, root) as raw, decompression_errors():
+        recency = os.fstat(raw.fileno()).st_mtime
         source = zstd_reader(raw) if rollout_format(path.name) == "zstd" else raw
         line = source.readline(MAX_FIRST_LINE_BYTES)
-    return first_record(line)
+    return first_record(line), recency
 
 
 def first_record(line):
@@ -234,12 +244,12 @@ def file_identity(stat_result):
 
 def path_identity(path):
     try:
-        return file_identity(os.stat(path))
+        return file_identity(path.lstat())
     except OSError:
         return None
 
 
-def read_unchanged(locate, read):
+def read_unchanged(root, locate, read):
     """Return read(history) for the file locate() names, opened once, if it stayed the same file throughout.
 
     The decision on which repository a thread belongs to and the messages returned come from the same descriptor and
@@ -248,7 +258,7 @@ def read_unchanged(locate, read):
     """
     for _ in range(2):
         path = locate()
-        with open_history(path) as source:
+        with open_history(path, root) as source:
             opened = os.fstat(source.fileno())
             if rollout_format(path.name) == "zstd":
                 history = CompressedHistory(source)
@@ -306,8 +316,12 @@ class CodexFilesSource:
                 continue
             for path in directory.rglob("rollout-*"):
                 identifier = rollout_identifier(path.name)
-                if path.is_file() and identifier:
-                    found.setdefault(identifier, []).append((path, archived))
+                if identifier:
+                    try:
+                        if stat.S_ISREG(path.lstat().st_mode):
+                            found.setdefault(identifier, []).append((path, archived))
+                    except FileNotFoundError:
+                        continue
         return found
 
     def has_history(self, session_id):
@@ -318,10 +332,11 @@ class CodexFilesSource:
 
     def names(self):
         index = self.home / "session_index.jsonl"
-        if not index.is_file():
+        try:
+            with open_history(index, self.home) as source:
+                return parse_session_index(bounded_lines(source))
+        except (OSError, ThreadUnavailable):
             return {}
-        with open_history(index) as source:
-            return parse_session_index(bounded_lines(source))
 
     def list_threads(self, include):
         names = self.names()
@@ -333,7 +348,8 @@ class CodexFilesSource:
                 continue
             path, archived = files[0]
             try:
-                main = codex_main_thread(read_first_line(path))
+                record, recency = read_first_line(path, self.home)
+                main = codex_main_thread(record, identifier)
             except (OSError, ThreadUnavailable):
                 # Counted, never silently dropped: a file this reader cannot open may be one Codex changed.
                 unsupported.append(identifier)
@@ -342,7 +358,7 @@ class CodexFilesSource:
                 continue
             source, cwd, forked_from_id = main
             threads.append(ThreadSummary(
-                id=identifier, name=names.get(identifier), cwd=cwd, recency_at=path.stat().st_mtime,
+                id=identifier, name=names.get(identifier), cwd=cwd, recency_at=recency,
                 archived=archived, source_kind=source, forked_from_id=forked_from_id,
                 writer_lock_present=self.writer_lock_present(identifier),
             ))
@@ -356,7 +372,7 @@ class CodexFilesSource:
 
     def read_thread(self, summary, max_messages, include):
         def read(history):
-            main = codex_main_thread(history.first_line())
+            main = codex_main_thread(history.first_line(), summary.id)
             if main is None or not include(main[1]):
                 raise ThreadUnavailable(NOT_IN_REPOSITORY)
             source, cwd, forked_from_id = main
@@ -365,7 +381,7 @@ class CodexFilesSource:
             current = replace(summary, cwd=cwd, source_kind=source, forked_from_id=forked_from_id)
             return codex_snapshot(current, scan_turns(history, max_messages, scan_codex), max_messages)
 
-        return read_unchanged(lambda: self.rollout(summary.id), read)
+        return read_unchanged(self.home, lambda: self.rollout(summary.id), read)
 
 
 class ClaudeSessionsSource:
@@ -387,20 +403,20 @@ class ClaudeSessionsSource:
         return paths[0]
 
     @staticmethod
-    def current_cwd(history):
+    def current_cwd(history, identifier):
         """The working directory the session's latest records name and its entrypoint, for an interactive session;
         else (None, None).
 
         The window grows until a record names a directory: a large record without one can follow the latest move. If
         none does within the cap, which repository the session is in is unknown, and the session is refused.
         """
-        first_cwd, entrypoint = claude_head(islice(history.lines(MAX_FIRST_LINE_BYTES), MAX_HEAD_LINES))
+        first_cwd, entrypoint = claude_head(islice(history.lines(MAX_FIRST_LINE_BYTES), MAX_HEAD_LINES), identifier)
         if first_cwd is None or not is_interactive_claude_session(entrypoint):
             return None, None
         window = INITIAL_TAIL_BYTES
         while True:
             records, whole = history.tail(window)
-            cwd = claude_last_cwd(records)
+            cwd = claude_last_cwd(records, identifier)
             if cwd is not None:
                 return cwd, entrypoint
             if whole or window >= MAX_TAIL_BYTES:
@@ -414,14 +430,16 @@ class ClaudeSessionsSource:
             if not UUID_PATTERN.fullmatch(path.stem):
                 continue
             try:
-                with open_history(path) as source:
+                with open_history(path, self.home) as source:
                     opened = os.fstat(source.fileno())
                     history = PlainHistory(source, opened.st_size)
-                    cwd, entrypoint = self.current_cwd(history)
+                    cwd, entrypoint = self.current_cwd(history, path.stem)
                     if cwd is None or not include(cwd):
                         continue
-                    name = scan_tail(history, lambda records: scan_claude(records, include, title_only=True),
-                                     lambda result: result.segment_start).title
+                    def scan(records):
+                        return scan_claude(records, include, title_only=True, identifier=path.stem)
+
+                    name = scan_tail(history, scan, lambda result: result.segment_start).title
                 threads.append(ThreadSummary(id=path.stem, name=name, cwd=cwd, recency_at=opened.st_mtime,
                                              source_kind=entrypoint))
             except (OSError, ThreadUnavailable, HistoryChanged):
@@ -431,15 +449,16 @@ class ClaudeSessionsSource:
     def read_thread(self, summary, max_messages, include):
         def read(history):
             belongs = cache(include)
-            cwd, entrypoint = self.current_cwd(history)
+            cwd, entrypoint = self.current_cwd(history, summary.id)
             if cwd is None or not belongs(cwd):
                 raise ThreadUnavailable(NOT_IN_REPOSITORY)
-            scan = scan_turns(history, max_messages, lambda records: scan_claude(records, belongs))
+            scan = scan_turns(history, max_messages,
+                              lambda records: scan_claude(records, belongs, identifier=summary.id))
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
             current = replace(summary, cwd=cwd, name=scan.title, source_kind=entrypoint)
             return claude_snapshot(current, scan, max_messages)
 
-        return read_unchanged(lambda: self.session_file(summary.id), read)
+        return read_unchanged(self.home, lambda: self.session_file(summary.id), read)
 
 
 def git_common_dir(directory):

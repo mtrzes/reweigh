@@ -507,7 +507,7 @@ class CodexParsingTests(unittest.TestCase):
 
     def test_codex_main_thread(self):
         def meta(**payload):
-            return {"type": "session_meta", "payload": {"cwd": "/repo"} | payload}
+            return {"type": "session_meta", "payload": {"cwd": "/repo", "id": "id-1"} | payload}
         cases = (
             (meta(source="cli"), ("cli", "/repo", None)),
             (meta(source="vscode", forked_from_id="p"), ("vscode", "/repo", "p")),
@@ -516,7 +516,7 @@ class CodexParsingTests(unittest.TestCase):
         )
         for record, expected in cases:
             with self.subTest(record=record):
-                self.assertEqual(t.codex_main_thread(record), expected)
+                self.assertEqual(t.codex_main_thread(record, "id-1"), expected)
 
     @staticmethod
     def event(kind, turn, **fields):
@@ -570,11 +570,12 @@ class ClaudeParsingTests(unittest.TestCase):
         return t.scan_claude(records, self.belongs)
 
     def test_session_directories_and_interactivity(self):
-        self.assertEqual(t.claude_head(lines({"type": "summary"}, {"cwd": "/repo", "entrypoint": "cli"})),
+        head = {"cwd": "/repo", "entrypoint": "cli", "sessionId": "id-1"}
+        self.assertEqual(t.claude_head(lines({"type": "summary"}, head), "id-1"),
                          ("/repo", "cli"))
-        self.assertEqual(t.claude_head([b"broken\n", *lines({"cwd": "/repo"})]), ("/repo", None))
-        self.assertEqual(t.claude_head(lines({"cwd": 3})), (None, None))
-        self.assertEqual(t.claude_head([b"[" * 100_000 + b"\n", *lines({"cwd": "/repo", "entrypoint": "cli"})]),
+        self.assertEqual(t.claude_head([b"broken\n", *lines(head | {"entrypoint": None})], "id-1"), ("/repo", None))
+        self.assertEqual(t.claude_head(lines({"cwd": 3}), "id-1"), (None, None))
+        self.assertEqual(t.claude_head([b"[" * 100_000 + b"\n", *lines(head)], "id-1"),
                          ("/repo", "cli"))  # nesting too deep to parse is skipped like any broken line
         # A session that moved after it started belongs where its latest records are.
         self.assertEqual(t.claude_last_cwd([{"cwd": "/start"}, {"type": "x"}, {"cwd": "/repo"}, {"cwd": 3}]), "/repo")

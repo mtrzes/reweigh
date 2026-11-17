@@ -135,6 +135,11 @@ def keep_recent(snapshot_messages, max_messages):
     return snapshot_messages[-max_messages:]
 
 
+def require_history_id(recorded, expected):
+    if recorded != expected:
+        raise ThreadUnavailable("The thread's recorded ID does not match its history filename.")
+
+
 # Codex
 
 
@@ -170,12 +175,14 @@ def parse_session_index(lines):
     return names
 
 
-def codex_main_thread(meta):
+def codex_main_thread(meta, identifier):
     """Return (source, cwd, forked_from_id) for a Desktop or interactive CLI thread's session_meta, else None.
 
     Subagent and guardian threads record their source as an object; consultations record "exec".
     """
     payload = meta.get("payload") if meta.get("type") == "session_meta" else None
+    if isinstance(payload, dict):
+        require_history_id(payload.get("id"), identifier)
     source = payload.get("source") if isinstance(payload, dict) else None
     if not isinstance(source, str) or source not in CODEX_MAIN_SOURCES:
         return None
@@ -229,7 +236,15 @@ def is_main_claude_record(entry):
     return entry.get("isSidechain", False) is False
 
 
-def claude_head(lines):
+def main_claude_records(records, identifier):
+    for entry in records:
+        if is_main_claude_record(entry):
+            if identifier is not None and "sessionId" in entry:
+                require_history_id(entry["sessionId"], identifier)
+            yield entry
+
+
+def claude_head(lines, identifier):
     """Return the session's first recorded working directory and its entrypoint, None when it records none."""
     for line in lines:
         try:
@@ -237,17 +252,19 @@ def claude_head(lines):
         except (ValueError, RecursionError):
             continue
         if isinstance(entry, dict) and is_main_claude_record(entry) and isinstance(entry.get("cwd"), str):
+            require_history_id(entry.get("sessionId"), identifier)
             entrypoint = entry.get("entrypoint")
             return entry["cwd"], entrypoint if isinstance(entrypoint, str) and entrypoint else None
     return None, None
 
 
-def claude_last_cwd(records):
+def claude_last_cwd(records, identifier=None):
     """The working directory the session's most recent records name: a session can move after it starts."""
-    for entry in reversed(records):
-        if is_main_claude_record(entry) and isinstance(entry.get("cwd"), str):
-            return entry["cwd"]
-    return None
+    cwd = None
+    for entry in main_claude_records(records, identifier):
+        if isinstance(entry.get("cwd"), str):
+            cwd = entry["cwd"]
+    return cwd
 
 
 def is_interactive_claude_session(entrypoint):
@@ -266,7 +283,7 @@ def chosen_title(titles):
     return titles.get("custom-title") or titles.get("ai-title")
 
 
-def scan_claude(records, belongs, *, title_only=False):
+def scan_claude(records, belongs, *, title_only=False, identifier=None):
     """Find the latest turn, agent messages and title in the session's current stay in the requested repository.
 
     A record that names a working directory sets where the following records are; belongs says whether a directory is
@@ -276,9 +293,7 @@ def scan_claude(records, belongs, *, title_only=False):
     """
     latest, messages, turn_id, titles = None, [], None, {}
     inside, segment_start = None, False
-    for entry in records:
-        if not is_main_claude_record(entry):
-            continue
+    for entry in main_claude_records(records, identifier):
         cwd = entry.get("cwd")
         if isinstance(cwd, str):
             here = belongs(cwd)

@@ -133,6 +133,46 @@ class ReaderTests(unittest.TestCase):
             errors.add(str(raised.exception))
         self.assertEqual(errors, {"No readable thread with that ID or name belongs to this repository."})
 
+    def test_history_entries_must_be_regular_files_with_the_recorded_id(self):
+        for provider, make_history in (
+            ("codex", lambda: codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."))),
+            ("claude", lambda: claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."))),
+        ):
+            identifier, path = make_history()
+            alternate_id = str(uuid.uuid4())
+            copy = path.with_name(path.name.replace(identifier, alternate_id))
+            copy.write_bytes(path.read_bytes())
+            with self.subTest(provider=provider, entry="different recorded ID"):
+                self.assertEqual([row["id"] for row in self.threads(provider)["threads"]], [identifier])
+                with self.assertRaisesRegex(ThreadUnavailable, "^No readable thread"):
+                    self.read(provider, alternate_id)
+            copy.unlink()
+            outside = self.root / path.name
+            path.rename(outside)
+            path.symlink_to(outside)
+            with self.subTest(provider=provider, entry="symlink with matching ID"):
+                self.assertEqual(self.threads(provider)["threads"], [])
+                with self.assertRaisesRegex(ThreadUnavailable, "^No readable thread"):
+                    self.read(provider, identifier)
+
+    def test_archiving_a_rollout_after_its_header_is_read_keeps_the_listing(self):
+        moving, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), mtime=1_000)
+        other, _ = codex_thread(self.codex_home, self.project, codex_turn("t2", "Also done."), mtime=2_000)
+        archive = self.codex_home / "archived_sessions"
+        archive.mkdir()
+        parse = thread_reader.parse_line
+
+        def archive_after_header(line):
+            record = parse(line)
+            if record.get("payload", {}).get("id") == moving:
+                path.rename(archive / path.name)
+            return record
+
+        with patch.object(thread_reader, "parse_line", archive_after_header):
+            rows = self.threads("codex")["threads"]
+        self.assertEqual([row["id"] for row in rows], [other, moving])
+        self.assertEqual(rows[1]["updated_at"], "1970-01-01T00:16:40+00:00")
+
     def test_history_with_unexpected_value_types_is_refused_with_a_reason(self):
         codex_thread(self.codex_home, self.project, codex_turn(["t1"], "Done."), name="Codex types")
         claude_session(self.claude_home, self.project, claude_prompt(5), claude_reply("Done."), title="Claude types")
@@ -324,7 +364,8 @@ class ReaderTests(unittest.TestCase):
 
         def codex_replaced_after_selection(stack, codex, claude):
             thread, path = codex_thread(codex, self.project, codex_turn("t1", "Here."))
-            _, foreign = codex_thread(codex.parent / "elsewhere-codex", self.other, codex_turn("t1", "Elsewhere."))
+            _, foreign = codex_thread(codex.parent / "elsewhere-codex", self.other, codex_turn("t1", "Elsewhere."),
+                                      meta={"id": thread})
             stack.enter_context(at_selection(lambda: os.replace(foreign, path)))
             return lambda: self.read("codex", thread), "^No readable thread with that ID"
 
@@ -374,21 +415,27 @@ class ReaderTests(unittest.TestCase):
     def fixture(self, name):
         """A real session file with every text replaced (dev/scrub_fixture.py), placed in this test's project."""
         text = (Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8")
-        return text.replace("{CWD}", json.dumps(str(self.project))[1:-1])
+        return [json.loads(line) for line in text.replace("{CWD}", json.dumps(str(self.project))[1:-1]).splitlines()]
 
     def test_real_histories_of_both_apps_are_read(self):
         # Synthetic records prove each rule; these prove the parsers still fit what the apps actually write.
         identifier = str(uuid.uuid4())
         rollout = self.codex_home / "sessions" / "2026" / "04" / "16" / f"rollout-2026-04-16T12-22-13-{identifier}.jsonl"
         rollout.parent.mkdir(parents=True)
-        rollout.write_text(self.fixture("codex-desktop-rollout.jsonl"), encoding="utf-8")
-        events = [json.loads(line)["payload"] for line in rollout.read_text(encoding="utf-8").splitlines()]
+        records = self.fixture("codex-desktop-rollout.jsonl")
+        records[0]["payload"]["id"] = identifier
+        rollout.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        events = [record["payload"] for record in records]
         final = [event["last_agent_message"] for event in events if event.get("type") == "task_complete"][-1]
         result = self.read("codex", identifier)
         self.assertEqual((result["latest_turn"]["status"], result["messages"][-1]["text"]), ("completed", final))
         session = self.claude_home / "projects" / "project" / f"{uuid.uuid4()}.jsonl"
         session.parent.mkdir(parents=True)
-        session.write_text(self.fixture("claude-desktop-session.jsonl"), encoding="utf-8")
+        records = self.fixture("claude-desktop-session.jsonl")
+        for record in records:
+            if "sessionId" in record:
+                record["sessionId"] = session.stem
+        session.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         result = self.read("claude", session.stem)
         self.assertEqual(result["latest_turn"]["status"], "completed")
         self.assertTrue(result["messages"])
