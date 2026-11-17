@@ -309,6 +309,15 @@ class OutcomeTests(unittest.TestCase):
         self.assertEqual(c.consultation_outcome("claude", 0, self.CLAUDE_OK), (SESSION, "answer"))
         self.assertEqual(c.consultation_outcome("codex", 0, self.CODEX_OK), (SESSION, "answer"))
 
+    def test_codex_jsonl_preserves_unicode_line_separators_in_a_reply(self):
+        reply = "first\u2028second"
+        output = "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in (
+            {"type": "thread.started", "thread_id": SESSION},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": reply}},
+            {"type": "turn.completed"},
+        ))
+        self.assertEqual(c.parse_response("codex", output), (SESSION, reply))
+
     def test_failed_runs_raise_the_generic_message(self):
         def events(*records):
             return "\n".join(map(json.dumps, records))

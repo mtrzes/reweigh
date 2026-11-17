@@ -476,7 +476,7 @@ def parse_response(provider, output):
             reply = None
             session_id = None
             completed = False
-            for line in output.splitlines():
+            for line in output.removesuffix("\n").split("\n"):
                 event = json.loads(line)
                 if event.get("type") in {"error", "turn.failed"}:
                     raise BridgeError("Codex did not complete the consultation. Check its login and permission policy.")

@@ -61,7 +61,8 @@ flowchart TB
   comes before it reaps the guard, which would free the group's ID. A descendant that leaves the group, by starting
   its own session or group, is not stopped.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
-  given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file.
+  given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file. Codex
+  events are separated by LF, so Unicode line separators inside a reply are preserved.
 
 ## Background jobs
 
