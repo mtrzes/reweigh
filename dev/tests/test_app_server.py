@@ -418,6 +418,14 @@ class AppServerTests(unittest.TestCase):
         self.assertTrue((orphan / rollout.relative_to(live)).is_file())
         self.assertFalse((orphan / ".credentials.json").exists())
 
+    def test_a_previous_runs_server_databases_are_removed_but_thread_data_is_kept(self):
+        self.home.mkdir(parents=True, exist_ok=True)
+        for name in ("logs_2.sqlite", "logs_2.sqlite-wal", app.STATE_DATABASE, "thread_history_1.sqlite"):
+            (self.home / name).write_text("x")
+        self.assertEqual(app.remove_server_databases(self.home), 2)
+        self.assertEqual(sorted(path.name for path in self.home.glob("*.sqlite*")),
+                         sorted([app.STATE_DATABASE, "thread_history_1.sqlite"]))
+
     def test_parity_lists_missing_readable_threads(self):
         same, _ = codex_thread(self.home, "/repo", codex_turn("t1", "Draft.", "First."), codex_turn("t2", "Final."))
         missing, _ = codex_thread(self.home, "/repo", codex_turn("t4", "Final."))

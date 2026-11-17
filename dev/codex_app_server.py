@@ -349,6 +349,18 @@ def check_isolated(path, live_home):
         raise AppServerError(f"{path} overlaps the live Codex home; the parity sandbox must stay apart from it.")
 
 
+def remove_server_databases(home):
+    """Remove the databases a previous run's server created in the copy, such as its logs, which the copy never held:
+    every run starts from what was cloned, so they are new each time and only thread data can count as a change."""
+    removed = 0
+    for path in home.iterdir():
+        if (path.name.endswith(DURABLE_DATABASE_SUFFIXES) and not path.name.startswith(THREAD_DATABASE_PREFIXES)
+                and not path.is_symlink() and path.is_file()):
+            path.unlink()
+            removed += 1
+    return removed
+
+
 def remove_symlinks(home):
     """Remove every symlink under home, so nothing in the copy reaches a live file. Returns how many were removed."""
     removed = 0
@@ -497,7 +509,9 @@ def compare(file_source, app_source):
         if differences:
             mismatches.append({"id": summary.id, "fields": differences})
     return {"threads_compared": compared, "file_unreadable": unreadable, "missing": missing, "mismatches": mismatches,
-            "file_unsupported": sorted(listing.unsupported)}
+            # A thread the server has but the reader skipped could not be compared; an empty or broken file the server
+            # does not list either is nothing to compare.
+            "file_unsupported": sorted(set(listing.unsupported) & app_threads.keys())}
 
 
 def run_parity(state_directory, fresh_copy=False):
@@ -550,6 +564,7 @@ def run_locked_parity(root, live, fresh_copy):
         client = AppServerClient(executable, copy, sandbox)
         # Taken before anything runs Codex against the copy, so even `codex --version` cannot change it unseen.
         report["symlinks_removed"] = remove_symlinks(copy)
+        remove_server_databases(copy)
         before = fingerprint(copy)
         report["codex_version"] = codex_version(executable, client.environment)
         # A run interrupted after startup must still count against the release.
