@@ -305,6 +305,24 @@ class ReaderTests(unittest.TestCase):
                          {"status": "inProgress", "finished": False, "liveness": "unknown"})
         self.assertEqual(self.read("claude", stopped)["latest_turn"]["status"], "interrupted")
 
+    def test_claude_read_expands_the_tail_to_resolve_a_rewind(self):
+        records = [
+            claude_prompt() | {"uuid": "u1", "parentUuid": None},
+            claude_reply("Kept.") | {"uuid": "a1", "parentUuid": "u1"},
+            {"type": "file-history-snapshot", "snapshot": "x" * 4096},
+            claude_prompt() | {"uuid": "u2", "parentUuid": "a1"},
+            claude_reply("Abandoned.") | {"uuid": "a2", "parentUuid": "u2"},
+            claude_prompt() | {"uuid": "u3", "parentUuid": "a1"},
+            claude_reply("After rewind.") | {"uuid": "a3", "parentUuid": "u3"},
+        ]
+        identifier, _ = claude_session(self.claude_home, self.project, *records)
+        with patch.object(thread_reader, "INITIAL_TAIL_BYTES", 2048):
+            self.assertEqual([m["text"] for m in self.read("claude", identifier, max_messages=1)["messages"]],
+                             ["After rewind."])
+            with patch.object(thread_reader, "MAX_TAIL_BYTES", 2048):
+                with self.assertRaisesRegex(ThreadUnavailable, "active ancestry could not be resolved"):
+                    self.read("claude", identifier, max_messages=1)
+
     def test_a_claude_session_belongs_where_its_latest_records_are(self):
         home = self.claude_home
         moved_in, path = claude_session(home, self.other, claude_prompt(), claude_reply("Started elsewhere."),

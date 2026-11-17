@@ -652,6 +652,22 @@ class ClaudeParsingTests(unittest.TestCase):
                 self.assertEqual((t.claude_last_cwd(records), [m.text for m in self.scan(records).messages]),
                                  (main, expected))
 
+    def test_claude_rewind_uses_only_the_current_leafs_ancestors(self):
+        records = [
+            self.user("q1", "u1") | {"parentUuid": None},
+            self.assistant("a1", "end_turn", uuid="a1", parentUuid="u1"),
+            self.user("q2", "u2") | {"parentUuid": "a1"},
+            self.assistant("a2", "end_turn", uuid="a2", parentUuid="u2"),
+            self.user("q3", "u3") | {"parentUuid": "a1"},
+            self.assistant("a3", "end_turn", uuid="a3", parentUuid="u3"),
+        ]
+        scan = self.scan(records)
+        self.assertEqual((scan.latest, [message.text for message in scan.messages]),
+                         (t.TurnState("u3", "completed"), ["a1", "a3"]))
+        for parent in ("missing", "a3"):
+            with self.subTest(parent=parent), self.assertRaisesRegex(t.ThreadUnavailable, "ancestry"):
+                self.scan([*records[:-2], records[-2] | {"parentUuid": parent}, records[-1]])
+
     def test_only_the_current_stay_in_the_repository_counts(self):
         user, reply = self.user, self.assistant
 

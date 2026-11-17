@@ -98,7 +98,8 @@ resolved at the start of the request. A file that changes while it is read is re
 The Claude reader searches up to 32 MiB of recent history and refuses a session whose main working directory is
 missing there. Only the current stay in the repository contributes replies and a title, including the title shown
 in the listing and used for exact-name selection. A session that has just moved in shows an unfinished turn and
-no messages.
+no messages. Claude replies follow the active branch's parent links after a rewind. If a gap between those links
+cannot be resolved within the recent history window, the read is refused.
 
 A Codex read refuses malformed turn and message fields. Message phases are the recorded `commentary` or
 `final_answer` tokens, or null when the phase is absent.

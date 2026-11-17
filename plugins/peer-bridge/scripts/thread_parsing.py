@@ -40,6 +40,10 @@ class ThreadUnavailable(Exception):
     """A thread cannot be read safely. The message names the reason and never quotes the thread."""
 
 
+class ClaudeAncestryGap(ThreadUnavailable):
+    """An active parent may be further back than the current tail window."""
+
+
 @dataclass(frozen=True)
 class ThreadSummary:
     id: str
@@ -312,7 +316,39 @@ def chosen_title(titles):
     return titles.get("custom-title") or titles.get("ai-title")
 
 
-def scan_claude(records, belongs, *, title_only=False, identifier=None):
+def claude_active_branch(records, identifier, whole):
+    """Return the last main node's ancestry, or None for histories without parent links."""
+    parents = {}
+    unlinked_chat = False
+    for entry in main_claude_records(records, identifier):
+        if "parentUuid" not in entry:
+            unlinked_chat |= entry.get("type") in ("user", "assistant")
+            continue
+        node, parent = entry.get("uuid"), entry["parentUuid"]
+        if not isinstance(node, str) or node in parents or (parent is not None and not isinstance(parent, str)):
+            raise ThreadUnavailable("The Claude session's history has malformed ancestry.")
+        parents[node] = parent, len(parents)
+    if not parents:
+        return None
+    if unlinked_chat:
+        raise ThreadUnavailable("The Claude session's history has missing ancestry links.")
+
+    active, position = set(), len(parents)
+    node = next(reversed(parents))
+    while node in parents:
+        parent, preceding_position = parents[node]
+        if preceding_position >= position:
+            raise ThreadUnavailable("The Claude session's history has malformed ancestry.")
+        active.add(node)
+        node, position = parent, preceding_position
+    # The oldest node of a cut-off window can have a parent just outside it. A gap later in the window needs a
+    # wider scan to find out where the session resumed.
+    if node is not None and (whole or position != 0):
+        raise ClaudeAncestryGap("The Claude session's active ancestry could not be resolved in recent history.")
+    return active
+
+
+def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=True):
     """Find the latest turn, agent messages and title in the session's current stay in the requested repository.
 
     A record that names a working directory sets where the following records are; belongs says whether a directory is
@@ -320,21 +356,27 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None):
     session comes back later, and records before the first one that names a directory are not counted: at a window
     cut from the file's end, nothing says where they were.
     """
+    active = None if title_only else claude_active_branch(records, identifier, whole)
     latest, messages, turn_id, titles = None, [], None, {}
     inside, segment_start = None, False
     for entry in main_claude_records(records, identifier):
+        node = entry.get("uuid")
+        on_branch = active is None or (isinstance(node, str) and node in active)
         cwd = entry.get("cwd")
         if isinstance(cwd, str):
             here = belongs(cwd)
             if not here:
                 latest, messages, turn_id, titles = None, [], None, {}
-            elif inside is False:
-                segment_start = True
-            inside = here
+                inside = False
+            elif on_branch:
+                # An abandoned branch cannot grant ownership, but a recorded move out still ends the stay.
+                if inside is False:
+                    segment_start = True
+                inside = True
         if not inside:
             continue
         keep_title(titles, entry)
-        if title_only or entry.get("isMeta"):
+        if title_only or not on_branch or entry.get("isMeta"):
             continue
         message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
         content = message.get("content")

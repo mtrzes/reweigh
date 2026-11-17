@@ -26,7 +26,8 @@ from typing import Callable, Protocol
 
 from consultation import git_environment
 from thread_parsing import (
-    GIT_LOCATION_ENV, NOT_IN_REPOSITORY, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, claude_head,
+    ClaudeAncestryGap, GIT_LOCATION_ENV, NOT_IN_REPOSITORY, ThreadListing, ThreadSnapshot, ThreadSummary,
+    ThreadUnavailable, claude_head,
     claude_last_cwd, claude_snapshot, codex_main_thread, codex_snapshot, complete_records,
     git_output_path, is_interactive_claude_session, is_supported_history, listing_result, match_thread, newest_first,
     parse_line, parse_session_index, rollout_format, rollout_identifier, scan_claude, scan_codex, scan_is_enough,
@@ -283,9 +284,15 @@ def scan_tail(history, scan, enough):
     window = INITIAL_TAIL_BYTES
     while True:
         records, whole = history.tail(window)
-        result = scan(records)
-        if whole or window >= MAX_TAIL_BYTES or enough(result):
-            return result
+        at_limit = whole or window >= MAX_TAIL_BYTES
+        try:
+            result = scan(records, whole)
+        except ClaudeAncestryGap:
+            if at_limit:
+                raise
+        else:
+            if at_limit or enough(result):
+                return result
         window = grown(window)
 
 
@@ -379,7 +386,8 @@ class CodexFilesSource:
             if forked_from_id:
                 raise ThreadUnavailable("Forked Codex threads are not supported yet.")
             current = replace(summary, cwd=cwd, source_kind=source, forked_from_id=forked_from_id)
-            return codex_snapshot(current, scan_turns(history, max_messages, scan_codex), max_messages)
+            return codex_snapshot(current, scan_turns(history, max_messages,
+                                                      lambda records, _whole: scan_codex(records)), max_messages)
 
         return read_unchanged(self.home, lambda: self.rollout(summary.id), read)
 
@@ -436,7 +444,7 @@ class ClaudeSessionsSource:
                     cwd, entrypoint = self.current_cwd(history, path.stem)
                     if cwd is None or not include(cwd):
                         continue
-                    def scan(records):
+                    def scan(records, _whole):
                         return scan_claude(records, include, title_only=True, identifier=path.stem)
 
                     name = scan_tail(history, scan, lambda result: result.segment_start).title
@@ -453,7 +461,7 @@ class ClaudeSessionsSource:
             if cwd is None or not belongs(cwd):
                 raise ThreadUnavailable(NOT_IN_REPOSITORY)
             scan = scan_turns(history, max_messages,
-                              lambda records: scan_claude(records, belongs, identifier=summary.id))
+                              lambda records, whole: scan_claude(records, belongs, identifier=summary.id, whole=whole))
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
             current = replace(summary, cwd=cwd, name=scan.title, source_kind=entrypoint)
             return claude_snapshot(current, scan, max_messages)
