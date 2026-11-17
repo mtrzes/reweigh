@@ -248,6 +248,27 @@ class JobTests(BridgeTestCase):
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelled")
         self.assertFalse((self.folder(job_id) / "request.json").exists())
 
+    async def test_only_regular_files_request_cancellation(self):
+        target = self.root / "marker-target"
+        target.touch()
+
+        async def consult(request):
+            await asyncio.sleep(0)  # let the watcher check the marker before the reply
+            return {"conversation_id": "conv", "reply": "done"}
+
+        for marker_type in ("symlink", "fifo"):
+            with self.subTest(marker_type=marker_type):
+                job_id = await self.queued()
+                marker = self.folder(job_id) / "cancel.requested"
+                if marker_type == "symlink":
+                    marker.symlink_to(target)
+                else:
+                    os.mkfifo(marker)
+                before = await self.client.job(job_id, CLAUDE)
+                await jobs.run_job(self.client.jobs, job_id, consult)
+                after = await self.client.job(job_id, CLAUDE)
+                self.assertEqual((before["state"], after["state"]), ("queued", "completed"))
+
     async def test_a_lost_verdict_is_stored_and_a_late_runner_honours_it(self):
         job_id = await self.queued(prompt="PRIVATE QUESTION")
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "queued")
@@ -350,6 +371,39 @@ class JobTests(BridgeTestCase):
         self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "completed")
 
     # Files and retention
+
+    async def test_claim_removes_an_unreadable_request_and_records_failure(self):
+        job_id = await self.queued()
+        request = self.folder(job_id) / "request.json"
+        request.write_text("{\"prompt\": \"PRIVATE QUESTION\"")
+        await jobs.run_job(self.client.jobs, job_id, self.never)
+        self.assertFalse(request.exists())
+        view = await self.client.job(job_id, CLAUDE)
+        self.assertEqual((view["state"], view["error"]), ("failed", jobs.UNREADABLE))
+
+    async def test_prune_uses_the_folder_age_when_reading_the_record_fails(self):
+        job_id = await self.queued()
+        folder = self.folder(job_id)
+        record = (folder / "job.json").stat()
+        old = time.time() - LATER
+        os.utime(folder, (old, old))
+        fdopen = os.fdopen
+
+        def fail_read():
+            raise OSError(errno.EIO, "PRIVATE DETAIL")
+
+        @contextmanager
+        def open_with_failed_read(descriptor, *args, **kwargs):
+            with fdopen(descriptor, *args, **kwargs) as handle:
+                info = os.fstat(descriptor)
+                if (info.st_dev, info.st_ino) == (record.st_dev, record.st_ino):
+                    yield SimpleNamespace(read=fail_read)
+                else:
+                    yield handle
+
+        with patch("state_files.os.fdopen", open_with_failed_read):
+            self.client.jobs.prune(time.time())
+        self.assertFalse(folder.exists())
 
     async def test_a_job_appears_whole_or_not_at_all(self):
         def crash(path, data):

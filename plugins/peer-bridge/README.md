@@ -156,7 +156,7 @@ peer and the peer's child processes, and removes a pinned checkout. Each server 
 exposes.
 
 Each job runs in its own process, so it outlives a restart of the MCP server or the calling app, and a later server
-reads its result. The runner deletes the job's prompt and context as soon as it has read them; the reply is kept as
+reads its result. The runner deletes the request holding the prompt and context after trying to read it. The reply is kept as
 [State retention](#state-retention) describes.
 
 ### Command-line consultations

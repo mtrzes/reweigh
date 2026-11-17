@@ -17,6 +17,7 @@ import asyncio
 import fcntl
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -43,6 +44,13 @@ STAGING_PREFIX = ".staging-"
 DELETING_PREFIX = ".deleting-"
 STAGING_RETENTION_SECONDS = 3600
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("bridge.py")
+
+
+def cancel_requested(folder):
+    try:
+        return stat.S_ISREG((folder / "cancel.requested").lstat().st_mode)
+    except FileNotFoundError:
+        return False
 
 
 class JobStore:
@@ -164,7 +172,7 @@ class JobStore:
             if outcome is None:
                 now = time.time() if now is None else now
                 state = job_state(record, None, self.runner_present(folder), now,
-                                  cancel_requested=(folder / "cancel.requested").exists())
+                                  cancel_requested=cancel_requested(folder))
                 if state not in STOPPED_JOB_ERRORS:
                     return job_view(job_id, record, None, state)
                 # Stored, so a runner that starts later finds it and does not run.
@@ -250,11 +258,14 @@ class JobStore:
                 self.finish(folder, job_outcome("failed", now, error=UNREADABLE))
                 return None
             # This runner holds runner.lock, but has yet to claim the job.
-            state = job_state(record, None, False, now, cancel_requested=(folder / "cancel.requested").exists())
+            state = job_state(record, None, False, now, cancel_requested=cancel_requested(folder))
             if state in STOPPED_JOB_ERRORS:
                 self.finish(folder, job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]))
                 return None
-            request = self.read(folder / "request.json")
+            try:
+                request = self.read(folder / "request.json")
+            except BridgeError:
+                request = None
             if not isinstance(request, dict):
                 self.finish(folder, job_outcome("failed", time.time(), error=UNREADABLE))
                 return None
@@ -281,7 +292,7 @@ def spawn_runner(job_id):
 
 async def watch_for_cancel(folder, task):
     """Cancel the consultation task once the job's cancel marker appears."""
-    while not (folder / "cancel.requested").exists():
+    while not cancel_requested(folder):
         await asyncio.sleep(CANCEL_POLL_SECONDS)
     task.cancel()
 
