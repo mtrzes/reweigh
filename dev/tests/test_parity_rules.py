@@ -44,13 +44,17 @@ class AppServerParsingTests(unittest.TestCase):
         app = p.app_server_snapshot(self.SUMMARY, turns, messages, 2)
         self.assertEqual(app.latest_turn, t.TurnState("t2", "completed"))
         self.assertEqual([message.text for message in app.messages], ["Two.", "Final."])
-        self.assertEqual(p.final_message(app), "Final.")
-        same = t.ThreadSnapshot(self.SUMMARY, t.TurnState("t2", "completed", None),
-                                [t.AgentMessage("t1", "One."), t.AgentMessage("t2", " Final.\n")])
+        same = t.ThreadSnapshot(self.SUMMARY, t.TurnState("t2", "completed"), messages["t2"])
         self.assertEqual(p.parity_differences(same, app), [])
+        for sequence in (app.messages[1:], app.messages[::-1],
+                         [t.AgentMessage("t2", "Two.", "commentary"), app.messages[-1]],
+                         [t.AgentMessage("t1", "Two."), app.messages[-1]]):
+            with self.subTest(sequence=sequence):
+                changed = t.ThreadSnapshot(self.SUMMARY, app.latest_turn, sequence)
+                self.assertEqual(p.parity_differences(changed, app), ["messages"])
         other = t.ThreadSnapshot(self.SUMMARY, t.TurnState("t3", "interrupted", "abandoned"),
                                  [t.AgentMessage("t3", "Else.")])
-        self.assertEqual(p.parity_differences(other, app), ["latest_turn", "status", "final_agent_message"])
+        self.assertEqual(p.parity_differences(other, app), ["latest_turn", "status", "messages"])
         for turns_, reason in (([], "No turn"), ([{"id": "t1", "status": "paused"}], "does not know")):
             with self.subTest(turns=turns_), self.assertRaisesRegex(t.ThreadUnavailable, reason):
                 p.app_server_snapshot(self.SUMMARY, turns_, {}, 3)

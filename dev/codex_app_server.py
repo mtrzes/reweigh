@@ -284,15 +284,20 @@ class AppServerSource:
         """include is the file reader's repository check, which the app-server answers for itself."""
         if summary.forked_from_id:
             raise ThreadUnavailable("Forked Codex threads are not supported yet.")
-        turns = self.client.request("thread/turns/list", {
+        recent_turns = self.client.pages("thread/turns/list", {
             "threadId": summary.id, "sortDirection": "desc", "limit": max_messages, "itemsView": "notLoaded",
-        }).get("data") or []
-        messages = {}
-        for turn in turns:
-            if isinstance(turn, dict) and isinstance(turn.get("id"), str):
-                entries = self.client.pages("thread/items/list", {"threadId": summary.id, "turnId": turn["id"],
-                                                                  "limit": PAGE_SIZE})
-                messages[turn["id"]] = app_server_agent_messages(entries)
+        })
+        turns, messages, count = [], {}, 0
+        for turn in recent_turns:
+            if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
+                raise AppServerError("The app-server returned a malformed turn.")
+            turns.append(turn)
+            entries = self.client.pages("thread/items/list", {"threadId": summary.id, "turnId": turn["id"],
+                                                              "limit": PAGE_SIZE})
+            messages[turn["id"]] = app_server_agent_messages(entries)
+            count += len(messages[turn["id"]])
+            if count >= max_messages:
+                break
         return app_server_snapshot(summary, turns, messages, max_messages)
 
 

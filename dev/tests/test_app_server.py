@@ -51,7 +51,10 @@ FAKE_SERVER = textwrap.dedent('''\
                 send({"method": "thread/started", "params": {}})
             result = {"data": [t for t in data["threads"] if t.get("archived", False) == params["archived"]]}
         elif method == "thread/turns/list":
-            result = {"data": data["turns"].get(params["threadId"], [])[:params["limit"]]}
+            turns = data["turns"].get(params["threadId"], [])
+            start = int(params.get("cursor", 0))
+            end = start + params["limit"]
+            result = {"data": turns[start:end], "nextCursor": str(end) if end < len(turns) else None}
         elif method == "thread/items/list":
             result = {"data": data["items"].get(params["turnId"], [])}
         else:
@@ -105,10 +108,15 @@ class AppServerTests(unittest.TestCase):
     def add_thread(self, identifier, turns, cwd="/repo", **fields):
         self.data["threads"].append({"id": identifier, "source": "vscode", "cwd": cwd, "updatedAt": 1, **fields})
         self.data["turns"][identifier] = [{"id": turn, "status": status} for turn, status, _ in reversed(turns)]
-        for turn, _, text in turns:
+        for turn, _, texts in turns:
+            if isinstance(texts, str):
+                texts = (texts,)
             self.data["items"][turn] = [
                 {"turnId": turn, "item": {"type": "userMessage", "content": []}},
-                {"turnId": turn, "item": {"type": "agentMessage", "text": text, "phase": "final_answer"}},
+                {"turnId": turn, "item": {"type": "commandExecution"}},
+                *({"turnId": turn, "item": {"type": "agentMessage", "text": text,
+                                           "phase": "final_answer" if i == len(texts) - 1 else "commentary"}}
+                  for i, text in enumerate(texts)),
             ]
 
     def test_only_allowlisted_messages_are_sent_and_server_requests_are_refused(self):
@@ -410,20 +418,35 @@ class AppServerTests(unittest.TestCase):
         self.assertTrue((orphan / rollout.relative_to(live)).is_file())
         self.assertFalse((orphan / ".credentials.json").exists())
 
-    def test_parity_compares_latest_turn_status_and_final_message(self):
+    def test_parity_lists_missing_readable_threads(self):
         same, _ = codex_thread(self.home, "/repo", codex_turn("t1", "Draft.", "First."), codex_turn("t2", "Final."))
-        changed, _ = codex_thread(self.home, "/repo", codex_turn("t3", "Final."))
         missing, _ = codex_thread(self.home, "/repo", codex_turn("t4", "Final."))
         codex_thread(self.home, "/repo", codex_turn("t5", "Final."), source="exec")
-        self.add_thread(same, [("t1", "completed", "First."), ("t2", "completed", "Final.")])
-        self.add_thread(changed, [("t3", "interrupted", "Something else.")], archived=True)
+        self.add_thread(same, [("t1", "completed", ("Draft.", "First.")), ("t2", "completed", "Final.")], archived=True)
         self.add_thread("app-only", [("t9", "completed", "Final.")])
         with self.client() as client:
             result = app.compare(CodexFilesSource(self.home), app.AppServerSource(client))
-        self.assertEqual(result["threads_compared"], 3)
+        self.assertEqual(result["threads_compared"], 2)
         self.assertEqual(result["missing"], [missing])
-        self.assertEqual(result["mismatches"], [{"id": changed, "fields": ["status", "final_agent_message"]}])
+        self.assertEqual(result["mismatches"], [])
         self.assertEqual(result["file_unreadable"], {})
+
+    def test_shadow_reader_pages_past_turns_with_no_agent_messages(self):
+        self.add_thread("id", [
+            ("t0", "completed", "Earlier."),
+            ("t1", "completed", ("First.", "Second.", "Third.")),
+            ("t2", "interrupted", ()),
+            ("t3", "completed", ()),
+            ("t4", "interrupted", ()),
+        ])
+        with self.client() as client:
+            source = app.AppServerSource(client)
+            summary = app.app_server_summary(self.data["threads"][0], False)
+            snapshot = source.read_thread(summary, 3)
+        self.assertEqual(snapshot.latest_turn.turn_id, "t4")
+        self.assertEqual([message.text for message in snapshot.messages], ["First.", "Second.", "Third."])
+        self.assertEqual([message["params"]["turnId"] for message in self.sent()
+                          if message.get("method") == "thread/items/list"], ["t4", "t3", "t2", "t1"])
 
     def test_only_the_signed_desktop_codex_is_run(self):
         # Any local user can start a process whose path names ChatGPT.app; only the sealed bundle's own executable runs.

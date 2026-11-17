@@ -48,12 +48,6 @@ def app_server_snapshot(summary, turns, messages_by_turn, max_messages):
     return ThreadSnapshot(summary, TurnState(latest.get("id"), latest["status"]), keep_recent(messages, max_messages))
 
 
-def final_message(snapshot):
-    """The latest turn's last agent message, or None."""
-    texts = [message.text for message in snapshot.messages if message.turn_id == snapshot.latest_turn.turn_id]
-    return texts[-1].strip() if texts else None
-
-
 def parity_differences(file_snapshot, app_snapshot):
     """The fields in which the app-server's view of a thread differs from the file reader's."""
     differences = []
@@ -61,8 +55,8 @@ def parity_differences(file_snapshot, app_snapshot):
         differences.append("latest_turn")
     if file_snapshot.latest_turn.status != app_snapshot.latest_turn.status:
         differences.append("status")
-    if final_message(file_snapshot) != final_message(app_snapshot):
-        differences.append("final_agent_message")
+    if file_snapshot.messages != app_snapshot.messages:
+        differences.append("messages")
     return differences
 
 

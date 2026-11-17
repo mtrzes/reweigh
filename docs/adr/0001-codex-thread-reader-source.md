@@ -31,10 +31,11 @@ writes its own log database, and was seen returning incomplete history and misla
   `thread/items/list`, and refuses every server request.
 - It may replace the file reader only when the parity check passes on two consecutive Codex releases over the same
   clone, the later one newer: at least one thread is compared, every Desktop and CLI thread the file reader can read
-  matches on latest turn, status and final agent message, none is missing, the server sends no request, and the clone's
-  rollouts and databases are unchanged. Parity records the release and an incomplete attempt before starting the server,
-  so startup and request failures count toward the verdict. Once it replaces the reader, it reads a fresh clone on each
-  use, never the live home.
+  matches on latest turn, status and the three most recent agent messages in order, none is missing, the server sends
+  no request, and the clone's rollouts and databases are unchanged. The source pages through older turns until it has
+  enough messages or reaches the end of the history. Parity records the release and an incomplete attempt before
+  starting the server, so startup and request failures count toward the verdict. Once it replaces the reader, it reads
+  a fresh clone on each use, never the live home.
 - Whenever the two sources disagree, the file result stands, or the read is refused with a reason.
 
 ## Consequences
