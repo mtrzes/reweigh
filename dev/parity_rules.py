@@ -3,16 +3,10 @@
 A developer tool, not part of the shipped plugin: see codex_app_server.py and ADR 0001.
 """
 
-import re
-
 from thread_parsing import (
     CODEX_MAIN_SOURCES, FINISHED_STATUSES, AgentMessage, ThreadSnapshot, ThreadSummary, ThreadUnavailable, TurnState,
     keep_recent,
 )
-
-# `codex --version` prints this exact form; anything else is not a version the verdict can order.
-CODEX_VERSION = re.compile(r"codex-cli (\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
-
 
 
 def app_server_summary(thread, archived):
@@ -116,12 +110,29 @@ def parity_verdict(reports):
 
 def release_key(version):
     """An ordering key for `codex --version` output, by semantic-versioning precedence; None for any other text."""
-    match = CODEX_VERSION.fullmatch(version.strip()) if isinstance(version, str) else None
-    if match is None:
+    if not isinstance(version, str):
         return None
-    major, minor, patch, prerelease = match.groups()
-    if prerelease is None:
+    name, _, token = version.strip().partition(" ")
+    core, dash, prerelease = token.partition("-")
+    numbers = core.split(".")
+    if name != "codex-cli" or len(numbers) != 3 or not all(map(version_number, numbers)):
+        return None
+    release = tuple(map(int, numbers))
+    if not dash:
         # A release sorts after every prerelease of the same version.
-        return int(major), int(minor), int(patch), (1,)
-    identifiers = tuple((0, int(part), "") if part.isdigit() else (1, 0, part) for part in prerelease.split("."))
-    return int(major), int(minor), int(patch), (0, *identifiers)
+        return (*release, (1,))
+    identifiers = []
+    for part in prerelease.split("."):
+        if not part or not all(char.isascii() and (char.isalnum() or char == "-") for char in part):
+            return None
+        if part.isdecimal():
+            if not version_number(part):
+                return None
+            identifiers.append((0, int(part)))
+        else:
+            identifiers.append((1, part))
+    return (*release, (0, *identifiers))
+
+
+def version_number(token):
+    return token.isascii() and token.isdecimal() and (token == "0" or token[0] != "0")

@@ -39,10 +39,13 @@ FAKE_SERVER = textwrap.dedent('''\
             break
         if "id" not in message or method is None:
             continue
+        if method == data.get("fail_method"):
+            send({"id": message["id"], "error": {"code": -32603, "message": "fixture"}})
+            continue
         if method == "initialize":
             result = {"userAgent": "fake"}
         elif method == "thread/list":
-            if not asked and not ask_last:
+            if not asked and not ask_last and not data.get("no_server_requests"):
                 asked = True
                 send({"id": "server-1", "method": "item/commandExecution/requestApproval", "params": {}})
                 send({"method": "thread/started", "params": {}})
@@ -217,6 +220,44 @@ class AppServerTests(unittest.TestCase):
             client.__exit__(app.AppServerError, None, None)
         self.assertEqual([call.args for call in calls.mock_calls],
                          [(42, app.signal.SIGTERM), (), (42, app.signal.SIGKILL), ()])
+
+    def test_failed_handshakes_and_rpcs_break_the_release_streak(self):
+        root = self.existing_parity_copy()
+        identifier, _ = codex_thread(root / "codex-home", "/repo", codex_turn("t1", "Done."))
+        self.add_thread(identifier, [("t1", "completed", "Done.")])
+        self.data["no_server_requests"] = True
+        methods = (None, "initialize", None, "thread/turns/list", None)
+        for patch_number, method in enumerate(methods):
+            version = f"codex-cli 1.2.{patch_number}"
+            with self.subTest(version=version, method=method):
+                self.data["fail_method"] = method
+                report = self.parity_run(version)
+                self.assertEqual(report["codex_version"], version)
+                self.assertEqual(report["passed"], method is None)
+                self.assertFalse(report["ready_to_replace_file_reader"])
+                if method:
+                    self.assertEqual(report["error"], f"{method} failed with code -32603.")
+        self.assertEqual(len(list((root / "reports").glob("*.json"))), len(methods))
+
+    def test_a_run_interrupted_at_startup_already_has_an_atomic_failure_report(self):
+        root = self.existing_parity_copy()
+        version = "codex-cli 1.2.3"
+        first_report = {}
+        replace = os.replace
+
+        def publish(staging, destination):
+            self.assertEqual(list((root / "reports").glob("*.json")), [])
+            first_report.update(json.loads(staging.read_text()))
+            replace(staging, destination)
+
+        with patch.object(app.os, "replace", publish), \
+                patch.object(app.AppServerClient, "__enter__", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.parity_run(version)
+        (saved,) = (root / "reports").iterdir()
+        self.assertEqual(json.loads(saved.read_text()), first_report)
+        self.assertEqual(first_report["codex_version"], version)
+        self.assertFalse(first_report["passed"])
 
     def test_sandbox_paths_and_symlinks_cannot_reach_the_live_home(self):
         root = self.root.resolve()

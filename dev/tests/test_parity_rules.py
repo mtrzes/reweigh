@@ -99,7 +99,8 @@ class AppServerParsingTests(unittest.TestCase):
         keys = [p.release_key(version) for version in ordered]
         self.assertEqual(keys, sorted(keys))
         self.assertEqual(len(set(keys)), len(keys))
-        for text in ("0.167.0", "codex-cli 0.167", "codex-cli 0.167.0 (beta)", "", None):
+        for text in ("0.167.0", "codex-cli 0.167", "codex-cli 0.167.0 (beta)", "codex-cli 0.167.0-alpha..1",
+                     "codex-cli 0.167.0-alpha.01", "codex-cli 00.167.0", "", None):
             with self.subTest(text=text):
                 self.assertIsNone(p.release_key(text))
 

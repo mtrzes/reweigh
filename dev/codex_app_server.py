@@ -25,6 +25,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import suppress
@@ -327,7 +328,10 @@ def desktop_codex_executable():
 
 def codex_version(executable, environment):
     result = subprocess.run([executable, "--version"], capture_output=True, text=True, env=environment, timeout=30)
-    return result.stdout.strip() or "unknown"
+    version = result.stdout.strip()
+    if result.returncode or not version:
+        raise AppServerError("Cannot identify the Codex release.")
+    return version
 
 
 def check_isolated(path, live_home):
@@ -500,6 +504,18 @@ def run_parity(state_directory, fresh_copy=False):
         return run_locked_parity(root, live, fresh_copy)
 
 
+def save_report(path, report):
+    fd, name = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(report, output, indent=2)
+            output.write("\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def run_locked_parity(root, live, fresh_copy):
     copy, sandbox, reports = root / "codex-home", root / "home", root / "reports"
     copy_record = copy / COPY_RECORD
@@ -514,26 +530,36 @@ def run_locked_parity(root, live, fresh_copy):
     if not copy.is_dir():
         clone_home(live, copy)
     record = json.loads(copy_record.read_text())
-    executable, executable_source = desktop_codex_executable()
     report = {
-        "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "copy_id": record["copy_id"],
-        "copy_created_at": record["created_at"], "executable": executable, "executable_source": executable_source,
+        "ran_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"), "copy_id": record["copy_id"],
+        "copy_created_at": record["created_at"], "codex_version": "unknown", "passed": False,
     }
-    # The app-server makes symlinks to its own executable on each start; none may survive into another run.
-    report["symlinks_removed"] = remove_symlinks(copy)
-    before = fingerprint(copy)
-    with AppServerClient(executable, copy, sandbox) as client:
-        report["codex_version"] = codex_version(executable, client.environment)
-        report.update(compare(CodexFilesSource(copy), AppServerSource(client)))
-    report["server_requests"] = sorted(set(client.server_requests))
-    changes = changed_paths(before, fingerprint(copy))
-    remove_symlinks(copy)
-    report["thread_data_changes"] = [path for path in changes if is_thread_data(path)]
-    report["other_database_changes"] = [path for path in changes if not is_thread_data(path)]
-    report["passed"] = parity_passed(report)
     reports.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open_private(reports / f"{report['ran_at'].replace(':', '')}.json") as output:
-        output.write(json.dumps(report, indent=2) + "\n")
+    path = reports / f"{report['ran_at'].replace(':', '')}-{uuid.uuid4().hex}.json"
+    client = None
+    try:
+        report["executable"], report["executable_source"] = desktop_codex_executable()
+        executable = report["executable"]
+        client = AppServerClient(executable, copy, sandbox)
+        report["codex_version"] = codex_version(executable, client.environment)
+        # A run interrupted after startup must still count against the release.
+        save_report(path, {**report, "error": "The parity run did not complete."})
+        # The app-server makes symlinks to its executable on each start; clean them before and after each attempt.
+        report["symlinks_removed"] = remove_symlinks(copy)
+        before = fingerprint(copy)
+        try:
+            with client:
+                report.update(compare(CodexFilesSource(copy), AppServerSource(client)))
+            changes = changed_paths(before, fingerprint(copy))
+        finally:
+            report["server_requests"] = sorted(set(client.server_requests))
+            remove_symlinks(copy)
+        report["thread_data_changes"] = [path for path in changes if is_thread_data(path)]
+        report["other_database_changes"] = [path for path in changes if not is_thread_data(path)]
+        report["passed"] = parity_passed(report)
+    except (AppServerError, OSError, subprocess.SubprocessError) as exc:
+        report["error"] = str(exc)
+    save_report(path, report)
     saved = [json.loads(path.read_text()) for path in sorted(reports.glob("*.json"))]
     report["ready_to_replace_file_reader"], report["verdict"] = parity_verdict(saved)
     return report
