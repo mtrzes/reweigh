@@ -46,11 +46,11 @@ flowchart TB
     outcome["Reply, or a fixed error<br/>cause named only from exact facts"]
 ```
 
-- **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep, only the user's own settings, and no MCP
-  servers, hooks or slash commands; it reads only inside the consulted directory, Claude Code's temporary folder, and
-  wherever the user's own settings add a directory or allow a read. Codex runs as `codex exec` in its read-only sandbox,
-  without the user's "always allow" rules, with MCP servers, plugins and web search off and only the core environment
-  for its commands; it can read any file the user can. Neither can start another consultation. See
+- **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep, only the user's own settings, no MCP
+  servers or slash commands, and ordinary hooks disabled; it reads only inside the consulted directory, Claude Code's
+  temporary folder, and wherever the user's own settings add a directory or allow a read. Codex runs as `codex exec` in
+  its read-only sandbox, without the user's "always allow" rules, with MCP servers, plugins and web search off and only
+  the core environment for its commands; it can read any file the user can. Neither can start another consultation. See
   [SECURITY.md](../../SECURITY.md) for what this does not cover.
 - **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`;
   `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
@@ -103,7 +103,7 @@ sets when it may take over.
 - **In:** asking the other agent a scoped question with read-only access, continuing that conversation, pinning it to
   a commit, choosing Codex's model and effort, running it in the background, and reading what the other app's agent
   last said in this repository.
-- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, push or call
-  tools, nesting consultations, network access of its own, and Windows.
+- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write, push or use
+  tools beyond reading, nesting consultations, network access of its own, and Windows.
 - **Experimental:** the thread tools, `seed_thread` and `list_codex_models` read the apps' internal files, which can
   change in any release.

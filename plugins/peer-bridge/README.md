@@ -9,10 +9,12 @@ shows its shape and the paths a request takes.
 ## Setup
 
 Requires macOS or Linux and Python 3.11 or later. Install `uv`, Codex CLI and Claude Code on the machine running the MCP
-server. Authenticate each peer CLI using its normal login flow. The script declares its pinned `mcp==1.30.0` and
-`zstandard==0.25.0` dependencies; `uv` installs them into a separate script environment. Live consultations and
-follow-ups were verified with Codex CLI `0.162.0-alpha.17.2` and Claude Code `2.1.286`; failure messages and compressed
-thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
+server, and sign in to each peer CLI with its normal login flow. The script declares its dependencies in its header and
+pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script environment.
+
+Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
+`2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
+On Linux, only the unit tests run, in CI.
 
 On macOS, ChatGPT.app bundles the Codex CLI at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
 without adding it to `PATH`. When `PEER_BRIDGE_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
@@ -77,7 +79,7 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `context` | Optional supporting evidence, such as a diff excerpt, relevant paths or test results; defaults to empty text. |
 | `conversation_id` | Optional bridge UUID returned by an earlier request for this peer and directory. |
 | `ref` | Optional commit, branch or tag to consult instead of the working tree; see [Pinned refs](#pinned-refs). |
-| `seed_thread` | Optional ID or name of the same app's thread whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
+| `seed_thread` | Optional ID or name of a thread in the peer's app (a Codex thread when asking Codex, a Claude Code session when asking Claude Code) whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
 | `model` | Codex only, optional: the model for this call, such as `gpt-6-astra`; overrides `PEER_BRIDGE_CODEX_MODEL`. |
 | `reasoning_effort` | Codex only, optional: the reasoning effort for this call, such as `low`, `medium`, `high` or `xhigh`; overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT`. |
 
@@ -330,10 +332,24 @@ consultation removes the leftover, and git's record of it, once no consultation 
 
 ## Verification
 
-From the repository root, run the bridge's isolated tests:
+From the repository root, install the locked dependencies into a virtual environment, then run the bridge's isolated
+tests and the developer tools' tests. CI runs the same commands on macOS and Linux with Python 3.11 to 3.13
+(`.github/workflows/tests.yml`):
 
 ```sh
-uv run --no-project --with mcp==1.30.0 --with zstandard==0.25.0 python -m unittest discover -s plugins/peer-bridge/tests -v
+uv venv --managed-python --python 3.11 .venv
+```
+
+```sh
+VIRTUAL_ENV="$PWD/.venv" uv sync --active --locked --script plugins/peer-bridge/scripts/bridge.py
+```
+
+```sh
+.venv/bin/python -m unittest discover -s plugins/peer-bridge/tests
+```
+
+```sh
+.venv/bin/python -m unittest discover -s dev/tests -t dev/tests
 ```
 
 The tests use simulated peer executables, synthetic thread histories and temporary state, homes and git

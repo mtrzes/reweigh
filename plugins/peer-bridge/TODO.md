@@ -3,12 +3,13 @@
 ## Before the repository goes public
 
 - [x] Licence: Apache-2.0 (`LICENSE`).
-- [ ] Rewrite the README around the positioning: a hardened, read-only peer review between Claude Code and Codex that
-      can pick up the other app's threads. Lead with pinned-ref reviews, `seed_thread` and the locked-down peer runtime.
-- [ ] GitHub Actions CI: the unit tests on macOS and Linux, Python 3.11 to 3.13. Linux has never been run.
+- [x] Root README: what it does, a pinned review to try, what the peer can read, install.
+- [ ] GitHub Actions CI: `.github/workflows/tests.yml` runs both unit suites on macOS and Linux, Python 3.11 to 3.13.
+      It has not run on GitHub yet, so Linux is still untested.
 - [ ] Compatibility matrix of verified Claude Code and Codex CLI versions.
 - [x] `CHANGELOG.md` and `SECURITY.md`.
-- [ ] A short demo.
+- [ ] A short demo: a real transcript excerpt of a pinned review and one follow-up, about eight lines, in the root
+      README. Text, not a GIF, so it can be searched and copied.
 - [ ] Make the repository public, then turn on GitHub's private vulnerability reporting, which SECURITY.md names;
       GitHub offers it only for public repositories.
 

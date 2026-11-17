@@ -15,8 +15,9 @@ add about a quarter to the code and a second mode to every review. Both CLIs alr
 worktree of their own (`claude --worktree`, `codex --worktree`).
 
 ## Decision
-- Every peer peer-bridge starts only reads: Claude with Read, Glob and Grep, Codex in its read-only sandbox. No tool,
-  flag or command lets a peer edit, run commands or write to a session.
+- Every peer peer-bridge starts only reads: Claude with Read, Glob and Grep, Codex in its read-only sandbox. Codex can
+  run commands, which its sandbox keeps from writing. No tool, flag or command lets a peer edit, write files or write to
+  a session.
 - Split work goes through the apps themselves: the lead puts the handoff in its reply; the operator starts the other
   app in its own worktree; the lead follows it with `read_codex_thread` or `read_claude_thread` and reviews the
   resulting branch with `ask_*` and `ref`.

@@ -163,7 +163,10 @@ class AppServerTests(unittest.TestCase):
         self.assertFalse((live / "state").exists())
         linked = root / "linked-home"
         linked.symlink_to(live, target_is_directory=True)
-        with self.assertRaisesRegex(app.AppServerError, "resolved directory"):
+        # Pretends to be macOS so the check before any copy runs on every system; cp must never start.
+        with patch.object(app.sys, "platform", "darwin"), \
+                patch.object(app.subprocess, "run", side_effect=AssertionError("cp ran")), \
+                self.assertRaisesRegex(app.AppServerError, "resolved directory"):
             app.clone_home(linked, root / "copy")
         self.assertTrue((live / "auth.json").exists())
         self.assertFalse((root / "copy").exists())

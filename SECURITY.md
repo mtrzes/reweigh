@@ -6,11 +6,11 @@ line runs.
 
 ## What the bridge enforces
 
-- **The peer cannot write.** Claude runs with only Read, Glob and Grep, in `dontAsk` mode, with no MCP servers, hooks,
-  slash commands or project settings. Codex runs in its read-only sandbox, without the user's "always allow" rules,
-  plugins, MCP servers, apps or web search. A peer that tries to edit, run a command that writes, or reach the network
-  is refused by its own CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in
-  its tests.
+- **The peer cannot write.** Claude runs with only Read, Glob and Grep, in `dontAsk` mode, with no MCP servers, slash
+  commands or project settings, and ordinary hooks disabled; administrator-managed hooks follow Claude Code's managed
+  policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers, apps or
+  web search. A peer that tries to edit, run a command that writes, or reach the network is refused by its own CLI's
+  restrictions; the bridge chooses those restrictions and checks the exact command line in its tests.
 - **The peer cannot start another consultation.** The bridge refuses to run inside a consultation.
 - **Pinning runs no repository code.** Preparing a pinned checkout runs no git hook, file-system monitor or filter
   driver, and Git LFS downloads nothing.
@@ -38,8 +38,9 @@ line runs.
 
 ## What is kept, and for how long
 
-- A background consultation's reply is kept in the state directory for seven days; its prompt and context are deleted
-  as soon as the runner has read them.
+- A background consultation's reply stays in the state directory until a later background start removes it, at the
+  earliest seven days after the job finished; with no later start it stays until the user removes it. Its prompt and
+  context are deleted as soon as the runner has read them.
 - Conversation records, which bind a conversation to its peer and project, are kept until the user removes them.
 - Each peer CLI keeps its own transcript of every consultation, as long as it keeps any history.
 - The developer tool `dev/codex_app_server.py` keeps a full copy of the Codex history, without credentials, until it is

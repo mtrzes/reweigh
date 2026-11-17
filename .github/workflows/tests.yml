@@ -1,0 +1,56 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unittest:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.8"
+          enable-cache: true
+          cache-dependency-glob: plugins/peer-bridge/scripts/bridge.py.lock
+          cache-suffix: python-${{ matrix.python }}
+
+      # Installs exactly what bridge.py.lock records; --locked fails if the lock is stale.
+      - name: Install the locked test environment
+        id: deps
+        env:
+          TEST_PYTHON: ${{ matrix.python }}
+        run: |
+          uv venv --managed-python --python "$TEST_PYTHON" .venv
+          VIRTUAL_ENV="$PWD/.venv" uv sync --active --locked \
+            --script plugins/peer-bridge/scripts/bridge.py
+
+      - name: Run plugin tests
+        run: .venv/bin/python -m unittest discover -s plugins/peer-bridge/tests
+
+      - name: Run developer tests
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
+        run: .venv/bin/python -m unittest discover -s dev/tests -t dev/tests

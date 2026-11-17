@@ -66,8 +66,9 @@ class JobTests(BridgeTestCase):
 
     async def test_a_started_job_runs_detached_and_returns_the_reply(self):
         started = await self.start()
-        self.assertIn(started["state"], {"queued", "running"})
-        self.assertEqual(set(started), {"job_id", "provider", "state"})
+        if started["state"] != "completed":  # a fast runner may already have finished before the first view
+            self.assertIn(started["state"], {"queued", "running"})
+            self.assertEqual(set(started), {"job_id", "provider", "state"})
         done = await self.finished(started["job_id"])
         self.assertEqual((done["state"], done["reply"]), ("completed", "claude consulted: Explain the query."))
         self.assertFalse((self.folder(started["job_id"]) / "request.json").exists())
@@ -90,8 +91,15 @@ class JobTests(BridgeTestCase):
         self.assertEqual((await self.finished(job_id))["state"], "cancelled")
         await self.assert_processes_stopped()
         self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelled")
+        folder = self.folder(job_id)
+
+        def runner_gone():  # the runner publishes its outcome before it releases its lock
+            with self.client.jobs.state_lock(folder):
+                return not self.client.jobs.runner_present(folder)
+
+        await eventually_async(runner_gone, "The cancelled runner still holds its job.")
         self.client.jobs.prune(time.time() + LATER)
-        self.assertFalse(self.folder(job_id).exists())
+        self.assertFalse(folder.exists())
 
     async def test_a_killed_runner_takes_its_peer_with_it_and_its_job_is_lost(self):
         with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang"}):
@@ -324,20 +332,19 @@ class JobTests(BridgeTestCase):
         await self.queued()
         vanishing = self.state / "jobs" / f"{jobs.STAGING_PREFIX}being-published"
         vanishing.mkdir()
-        real_stat, seen = Path.stat, []
+        published = self.state / "jobs" / "published-meanwhile"
+        real_is_dir = Path.is_dir
 
-        def stat(path, *arguments, **keywords):
-            if path == vanishing:
-                seen.append(path)
-                if len(seen) > 1:
-                    # is_dir() saw the folder; then a concurrent start renamed it into place.
-                    raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
-            return real_stat(path, *arguments, **keywords)
+        def is_dir(path, *arguments, **keywords):
+            found = real_is_dir(path, *arguments, **keywords)
+            if path == vanishing and found:
+                vanishing.rename(published)  # prune saw the folder; then a concurrent start renamed it into place
+            return found
 
-        with patch.object(Path, "stat", stat):
+        with patch.object(Path, "is_dir", is_dir):
             self.client.jobs.prune(time.time())
-        self.assertGreater(len(seen), 1)
-        self.assertTrue(vanishing.exists())
+        self.assertFalse(vanishing.exists())
+        self.assertTrue(published.exists())
 
     async def test_a_runner_started_after_its_job_was_pruned_does_not_run(self):
         job_id = await self.queued()

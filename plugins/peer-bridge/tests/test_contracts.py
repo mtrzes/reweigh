@@ -26,6 +26,17 @@ from support import (
 DIFFERENT_PEER = "This conversation belongs to a different provider or working directory."
 
 
+class ReleaseTests(unittest.TestCase):
+    def test_both_manifests_and_the_newest_changelog_entry_name_one_version(self):
+        root = BRIDGE_PATH.parents[1]
+        versions = {json.loads((root / folder / "plugin.json").read_text(encoding="utf-8"))["version"]
+                    for folder in (".claude-plugin", ".codex-plugin")}
+        headings = [line for line in (root.parents[1] / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
+                    if line.startswith("## ")]
+        self.assertTrue(headings, "CHANGELOG.md has no release heading.")
+        self.assertEqual(versions, {headings[0].split()[1]})
+
+
 class McpTests(BridgeTestCase):
     @asynccontextmanager
     async def session(self, peer):
@@ -49,9 +60,11 @@ class McpTests(BridgeTestCase):
         guide = (BRIDGE_PATH.parents[1] / "HOW-IT-WORKS.md").read_text(encoding="utf-8")
         async with self.session("both") as session:
             listing = await session.list_tools()
-        names = {tool.name for tool in listing.tools}
-        names |= {*consultation.FINISHED_JOB_STATES, *consultation.UNFINISHED_JOB_STATES, "cancelling"}
-        self.assertEqual({name for name in names if f"`{name}`" not in guide and name not in guide}, set())
+        states = {*consultation.FINISHED_JOB_STATES, *consultation.UNFINISHED_JOB_STATES, "cancelling"}
+        # A tool counts only as a whole code span; a state also as a node of the job diagram.
+        named = {name for name in {tool.name for tool in listing.tools} | states
+                 if f"`{name}`" in guide or (name in states and f' {name}["' in guide)}
+        self.assertEqual(({tool.name for tool in listing.tools} | states) - named, set())
 
     async def test_tools_their_annotations_and_envelopes(self):
         def tools(provider):

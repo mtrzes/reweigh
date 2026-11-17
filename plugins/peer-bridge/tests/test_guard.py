@@ -37,9 +37,12 @@ class GuardTests(unittest.TestCase):
         self.peer = self.folder / "peer.py"
         self.peer.write_text(PEER)
 
-    def guard(self, mode, lifeline_fd=None, command=None):
+    def guard(self, mode, lifeline_fd=None, command=None, status_unread=False):
         lifeline_read, lifeline_write = os.pipe()
         status_read, status_write = os.pipe()
+        if status_unread:  # closed before the guard starts, so its status write cannot win a race with the close
+            os.close(status_read)
+            status_read = None
         if lifeline_fd is not None:
             os.dup2(lifeline_read, lifeline_fd)
             os.close(lifeline_read)
@@ -51,7 +54,7 @@ class GuardTests(unittest.TestCase):
         )
         os.close(lifeline_read)
         os.close(status_write)
-        self.addCleanup(self.close_quietly, lifeline_write, status_read)
+        self.addCleanup(self.close_quietly, lifeline_write, *([] if status_read is None else [status_read]))
         return process, lifeline_write, status_read
 
     @staticmethod
@@ -89,8 +92,7 @@ class GuardTests(unittest.TestCase):
         self.assert_stopped(pids)
 
     def test_a_status_nobody_reads_still_ends_in_stopping_the_group(self):
-        process, lifeline, status = self.guard("exit")
-        os.close(status)  # the bridge died; its end of the status pipe is gone
+        process, lifeline, _ = self.guard("exit", status_unread=True)  # the bridge died; its end is gone
         pids = self.pids()
         process.wait(timeout=10)  # the lifeline is still open: only the failed status write can stop the guard
         self.assert_stopped(pids)
@@ -101,8 +103,12 @@ class GuardTests(unittest.TestCase):
         target = 2000
         if hard != resource.RLIM_INFINITY and hard <= target:
             self.skipTest("The descriptor limit is too low for this test.")
-        resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, target + 10), hard))
-        self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
+        if soft != resource.RLIM_INFINITY and soft <= target:
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (target + 1, hard))
+            except (OSError, ValueError):
+                self.skipTest("The descriptor limit cannot be raised for this test.")
+            self.addCleanup(resource.setrlimit, resource.RLIMIT_NOFILE, (soft, hard))
         process, lifeline, status = self.guard("exit", lifeline_fd=target)
         pids = self.pids()
         # The status is written from inside the wait on the lifeline, which select() could not have watched.

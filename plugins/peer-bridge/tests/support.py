@@ -219,12 +219,12 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
         self.peer.chmod(0o700)
         isolate(self, self.root, **{
             "PEER_BRIDGE_CLAUDE_BIN": str(self.peer), "PEER_BRIDGE_CODEX_BIN": str(self.peer),
-            "PEER_BRIDGE_TIMEOUT_SECONDS": "5", "SIMULATED_PEER_MODE": "success",
+            "PEER_BRIDGE_TIMEOUT_SECONDS": str(DEADLINE_SECONDS), "SIMULATED_PEER_MODE": "success",
             "SIMULATED_PEER_LOG": str(self.log), "SIMULATED_PEER_PID_DIR": str(self.root),
             "CLAUDECODE": "test-parent-marker",
         })
         self.store = bridge.SessionStore(self.state)
-        self.client = bridge.Bridge(store=self.store, timeout=5)
+        self.client = bridge.Bridge(store=self.store, timeout=DEADLINE_SECONDS)
 
     def calls(self):
         if not self.log.exists():

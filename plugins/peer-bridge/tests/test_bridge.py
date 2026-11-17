@@ -3,6 +3,7 @@ failure is diagnosed from. The rules those rest on are tested in test_core.py; t
 test_contracts.py."""
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -449,7 +450,9 @@ class ConsultationTests(BridgeTestCase):
                     self.returncode = 0
                 return self.returncode
 
-        for exits_after_polls, signalled in ((2, False), (10 ** 9, True)):
+        # Only the guard that never exits meets the short deadline; the other gets the full one, so a stalled event
+        # loop cannot turn a timely exit into a kill.
+        for exits_after_polls, signalled, margin in ((2, False, DEADLINE_SECONDS), (10 ** 9, True, 0.2)):
             reading, lifeline = os.pipe()
             self.addCleanup(os.close, reading)
             guard = Guard(exits_after_polls)
@@ -462,7 +465,7 @@ class ConsultationTests(BridgeTestCase):
             with (
                 self.subTest(signalled=signalled),
                 patch.object(bridge.os, "killpg", kill_group),
-                patch.object(bridge, "GUARD_MARGIN_SECONDS", 0.2),
+                patch.object(bridge, "GUARD_MARGIN_SECONDS", margin),
                 patch.object(bridge.peer_guard, "GRACE_SECONDS", 0),
             ):
                 await bridge.stop_peer(guard, lifeline)
@@ -507,16 +510,19 @@ class ConsultationTests(BridgeTestCase):
         real_pipe, calls = os.pipe, []
 
         def second_fails():
-            calls.append(1)
-            if len(calls) == 2:
+            if calls:
+                calls.append(None)
                 raise OSError(24, "Too many open files")
-            return real_pipe()
+            calls.append(real_pipe())
+            return calls[0]
 
-        before = len(os.listdir("/dev/fd"))
         with patch.object(bridge.os, "pipe", second_fails), self.assertRaisesRegex(bridge.BridgeError, "Cannot start"):
             await self.consult()
         self.assertEqual(len(calls), 2)
-        self.assertEqual(len(os.listdir("/dev/fd")), before)
+        for descriptor in calls[0]:  # the first pipe's ends are closed, whatever else the process has open
+            with self.subTest(descriptor=descriptor), self.assertRaises(OSError) as raised:
+                os.fstat(descriptor)
+            self.assertEqual(raised.exception.errno, errno.EBADF)
 
     # Pinned checkouts
 
