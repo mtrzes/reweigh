@@ -12,6 +12,7 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from contextlib import ExitStack
@@ -569,6 +570,22 @@ class ReaderTests(unittest.TestCase):
         for path, mode in modes.items():
             path.chmod(mode)
         self.assertEqual(snapshot(), before)
+
+    @unittest.skipIf(os.geteuid() == 0, "root lists any directory")
+    def test_a_history_directory_that_cannot_be_listed_leaves_history_presence_unknown(self):
+        sources = {"codex": CodexFilesSource(), "claude": ClaudeSessionsSource()}
+        for provider, make_history in (
+            ("codex", lambda: codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."))),
+            ("claude", lambda: claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."))),
+        ):
+            with self.subTest(provider=provider):
+                session, path = make_history()
+                path.parent.chmod(0)
+                self.addCleanup(path.parent.chmod, 0o700)
+                self.assertEqual(self.threads(provider)["unreadable_history_directories_machine_wide"], 1)
+                scope = bridge.Conversation(None, None, time.monotonic, None)
+                probe = bridge.FailureProbe(provider, self.project, scope, scope.budget(60), sources[provider])
+                self.assertIsNone(asyncio.run(probe.observe("history_present", session)))
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from support import (
     consultation, eventually_async, git, git_repository, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
+from thread_parsing import HistoryLookup  # noqa: E402
 
 
 class ConsultationTests(BridgeTestCase):
@@ -413,7 +414,7 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_the_history_lookup_never_starts_once_the_peers_budget_is_spent(self):
         looked_up = []
-        source = SimpleNamespace(rollouts=lambda: looked_up.append(True) or {"session": []})
+        source = SimpleNamespace(rollouts=lambda: looked_up.append(True) or HistoryLookup({"session": []}))
         # The clock as the budget, the wait and the worker read it; the second time the worker starts too late.
         for readings, expected in (((100.0, 100.0, 100.0), True), ((100.0, 100.0, 106.0), None)):
             with self.subTest(readings=readings):

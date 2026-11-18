@@ -25,7 +25,7 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    GIT_LOCATION_ENV, NOT_IN_REPOSITORY, TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary,
+    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary,
     ThreadUnavailable, UUID_PATTERN, claude_cwd_search, claude_head, claude_snapshot, claude_title_search,
     claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
     is_supported_history, listing_result, match_thread, newest_first, parse_session_index, rollout_identifier,
@@ -40,6 +40,43 @@ __all__ = [
 # Each search starts at 256 KiB of a history's tail and doubles its window up to the most a capture keeps.
 TAIL_WINDOWS = TailWindows(256 * 1024, MAX_TAIL_BYTES)
 MAX_HEAD_LINES = 50
+
+
+def listed(directory, keep):
+    """The entries of directory that keep passes, and 1 if directory could not be listed, else 0. A missing directory
+    lists as empty; one that cannot be listed is counted, never taken as empty, as Path.glob and Path.rglob would."""
+    try:
+        with os.scandir(directory) as entries:
+            return [entry for entry in entries if keep(entry)], 0
+    except (FileNotFoundError, NotADirectoryError):
+        return [], 0
+    except OSError:
+        return [], 1
+
+
+def regular_files_below(directory, matches):
+    """Regular files at any depth below directory whose name passes matches, without following symlinks, and how many
+    directories could not be listed."""
+    found, unreadable, pending = [], 0, [directory]
+    while pending:
+        entries, missed = listed(pending.pop(), lambda entry: entry.is_dir(follow_symlinks=False)
+                                 or matches(entry.name) and entry.is_file(follow_symlinks=False))
+        unreadable += missed
+        for entry in entries:
+            (pending if entry.is_dir(follow_symlinks=False) else found).append(Path(entry.path))
+    return found, unreadable
+
+
+def entries_one_level_down(directory, matches):
+    """Entries of any type in each subdirectory of directory whose name passes matches, like Path.glob("*/name"), and
+    how many directories could not be listed."""
+    folders, unreadable = listed(directory, lambda entry: entry.is_dir())
+    found = []
+    for folder in folders:
+        entries, missed = listed(folder.path, lambda entry: matches(entry.name))
+        unreadable += missed
+        found.extend(Path(entry.path) for entry in entries)
+    return found, unreadable
 
 
 class ThreadSource(Protocol):
@@ -69,20 +106,17 @@ class CodexFilesSource:
         return self.fixed_home or Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
 
     def rollouts(self):
-        found = {}
+        """Every rollout file, archived or not, by thread ID, as (path, archived) pairs: the one lookup for listing,
+        reading and failure diagnosis."""
+        found, unreadable = {}, 0
         for archived, folder in ((False, "sessions"), (True, "archived_sessions")):
-            directory = self.home / folder
-            if not directory.is_dir():
-                continue
-            for path in directory.rglob("rollout-*"):
+            paths, missed = regular_files_below(self.home / folder, lambda name: name.startswith("rollout-"))
+            unreadable += missed
+            for path in paths:
                 identifier = rollout_identifier(path.name)
                 if identifier:
-                    try:
-                        if stat.S_ISREG(path.lstat().st_mode):
-                            found.setdefault(identifier, []).append((path, archived))
-                    except FileNotFoundError:
-                        continue
-        return found
+                    found.setdefault(identifier, []).append((path, archived))
+        return HistoryLookup(found, unreadable)
 
     def writer_lock_present(self, session_id):
         return (self.home / "thread-writer-locks" / f"{session_id}.lock").exists()
@@ -98,7 +132,8 @@ class CodexFilesSource:
     def list_threads(self, include):
         names = self.names()
         threads, unsupported = [], []
-        for identifier, files in self.rollouts().items():
+        rollouts = self.rollouts()
+        for identifier, files in rollouts.found.items():
             if not is_supported_history(files):
                 # A duplicated history or an unknown format is a migration trigger, not something to guess around.
                 unsupported.append(identifier)
@@ -119,10 +154,10 @@ class CodexFilesSource:
                 archived=archived, source_kind=source, forked_from_id=forked_from_id,
                 writer_lock_present=self.writer_lock_present(identifier),
             ))
-        return ThreadListing(threads, tuple(unsupported))
+        return ThreadListing(threads, tuple(unsupported), rollouts.unreadable_directories)
 
     def rollout(self, identifier):
-        files = self.rollouts().get(identifier, [])
+        files = self.rollouts().found.get(identifier, [])
         if not is_supported_history(files):
             raise ThreadUnavailable("The thread's history file is duplicated or in an unsupported format.")
         return files[0][0]
@@ -151,12 +186,16 @@ class ClaudeSessionsSource:
     def home(self):
         return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
 
+    def history_files(self, matches):
+        """Every history entry whose name passes matches, consultations included: the one lookup for listing, reading
+        and failure diagnosis."""
+        return HistoryLookup(*entries_one_level_down(self.home / "projects", matches))
+
     def session_files(self, session_id):
-        """Every history file for the session, consultations included: read here, and by failure diagnosis."""
-        return list((self.home / "projects").glob(f"*/{session_id}.jsonl"))
+        return self.history_files(lambda name: name == f"{session_id}.jsonl")
 
     def session_file(self, session_id):
-        paths = self.session_files(session_id)
+        paths = self.session_files(session_id).found
         if len(paths) != 1:
             raise ThreadUnavailable("The session's history file was not found.")
         return paths[0]
@@ -173,7 +212,8 @@ class ClaudeSessionsSource:
     def list_threads(self, include):
         threads, unreadable = [], []
         # Subagent transcripts sit one level deeper and are not sessions of their own.
-        for path in (self.home / "projects").glob("*/*.jsonl"):
+        files = self.history_files(lambda name: name.endswith(".jsonl"))
+        for path in files.found:
             if not UUID_PATTERN.fullmatch(path.stem):
                 continue
             try:
@@ -183,7 +223,7 @@ class ClaudeSessionsSource:
                 continue
             if summary is not None:
                 threads.append(summary)
-        return ThreadListing(threads, tuple(unreadable))
+        return ThreadListing(threads, tuple(unreadable), files.unreadable_directories)
 
     def listed(self, history, identifier, include):
         """The listing's summary of a session whose current working directory passes include, else None."""

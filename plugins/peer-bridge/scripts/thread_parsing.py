@@ -7,7 +7,7 @@ records, lines and file facts it gathered to these functions.
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 MAX_MESSAGE_CHARACTERS = 24_000
@@ -87,6 +87,15 @@ class ThreadListing:
     unsupported: tuple[str, ...] = ()
     """IDs of threads skipped because their history is duplicated or in a format this reader does not parse, from any
     repository: the working directory of such a history cannot be read."""
+    unreadable_directories: int = 0
+    """How many directories below the history, from any repository, could not be listed: a thread may be in one."""
+
+
+@dataclass(frozen=True)
+class HistoryLookup:
+    """The history files a lookup found, and how many directories it could not list: more files may be in them."""
+    found: object
+    unreadable_directories: int = 0
 
 
 @dataclass(frozen=True)
@@ -556,8 +565,7 @@ def iso_time(timestamp):
 
 
 def newest_first(listing):
-    return ThreadListing(sorted(listing.threads, key=lambda summary: summary.recency_at, reverse=True),
-                         listing.unsupported)
+    return replace(listing, threads=sorted(listing.threads, key=lambda summary: summary.recency_at, reverse=True))
 
 
 def listing_result(provider, listing, limit):
@@ -569,6 +577,8 @@ def listing_result(provider, listing, limit):
     if listing.unsupported:
         # Not limited to this repository, so it reveals nothing about which threads belong to it.
         result["unsupported_threads_machine_wide"] = len(listing.unsupported)
+    if listing.unreadable_directories:
+        result["unreadable_history_directories_machine_wide"] = listing.unreadable_directories
     return result
 
 

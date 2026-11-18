@@ -114,7 +114,7 @@ cause only when an exact field or a check establishes it, and never by reading t
 |---------------|----------------|
 | A thread held open elsewhere | On a Codex follow-up, a writer-lock file for the thread under `CODEX_HOME/thread-writer-locks` |
 | A signed-out CLI | `claude auth status --json` reporting `loggedIn: false`, `codex login status` exiting 1, or Claude's result carrying `api_error_status` 401 |
-| A conversation whose history is gone | On a follow-up, no session file for it under the peer's history directory |
+| A conversation whose history is gone | On a follow-up, no session file for it under the peer's history directory, every folder of which could be listed |
 | A model Claude Code does not know | A stderr line starting with Claude Code's `[claude-code:unrecognized_model]` tag |
 | Codex outside a git repository | No `.git` entry in `working_directory` or any parent, the check Codex itself makes |
 
@@ -237,7 +237,8 @@ uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scri
 A history the reader does not know how to parse is refused with a reason. A Codex rollout it cannot place in a
 repository, or a thread with more than one rollout file, is left out of the listing and reads like a missing thread;
 the listing's `unsupported_threads_machine_wide` counts such rollouts across all of `CODEX_HOME`, not only this
-repository's.
+repository's. A history folder the reader cannot list may hold threads of this repository; the listing's
+`unreadable_history_directories_machine_wide` counts such folders across the whole history.
 
 ## Runtime boundaries
 

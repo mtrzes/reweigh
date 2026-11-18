@@ -31,7 +31,7 @@ from consultation import (
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
-    failure_probes, git_entry_found,
+    failure_probes, git_entry_found, history_presence,
 )
 from cleanup import run_to_completion
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
@@ -286,14 +286,17 @@ class FailureProbe:
         return signed_in_from(self.provider, return_code, output.decode("utf-8", errors="replace"))
 
     async def history_present(self, session):
-        """Waited for only while the peer's budget lasts, because listing a large history can take a while; a lookup
-        still running then is not interrupted, only ignored."""
+        """Whether the peer still keeps any history file for the session, consultations included; None when a history
+        folder could not be listed. Waited for only while the peer's budget lasts, because listing a large history can
+        take a while; a lookup still running then is not interrupted, only ignored."""
         def lookup():
             if self.peer.left() <= 0:
                 return None  # the worker started late
             if self.provider == "codex":
-                return session in self.source.rollouts()
-            return bool(self.source.session_files(session))
+                files = self.source.rollouts()
+                return history_presence(session in files.found, files.unreadable_directories)
+            files = self.source.session_files(session)
+            return history_presence(bool(files.found), files.unreadable_directories)
 
         try:
             return await asyncio.wait_for(asyncio.to_thread(lookup), self.peer.left())
