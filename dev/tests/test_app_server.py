@@ -439,9 +439,15 @@ class AppServerTests(unittest.TestCase):
         self.assertEqual(result["mismatches"], [])
         self.assertEqual(result["file_unreadable"], {})
         self.assertEqual(result["file_unsupported"], [])
-        # A reader fault is not a refusal: it stops the run instead of leaving the thread out of the comparison.
-        with self.client() as client, patch.object(CodexFilesSource, "read_thread", side_effect=AttributeError):
-            with self.assertRaisesRegex(app.AppServerError, "file reader failed"):
+        # A reader fault is not a refusal: it stops the run, with a reason in the report, instead of leaving the
+        # thread out of the comparison.
+        for fault in (AttributeError, OSError, RuntimeError):
+            with (self.subTest(fault=fault), self.client() as client,
+                  patch.object(CodexFilesSource, "read_thread", side_effect=fault)):
+                with self.assertRaisesRegex(app.AppServerError, "file reader failed"):
+                    app.compare(CodexFilesSource(self.home), app.AppServerSource(client))
+        with self.client() as client, patch.object(CodexFilesSource, "list_threads", side_effect=ImportError):
+            with self.assertRaisesRegex(app.AppServerError, "file reader failed to list"):
                 app.compare(CodexFilesSource(self.home), app.AppServerSource(client))
 
     def test_shadow_reader_pages_past_turns_with_no_agent_messages(self):

@@ -4,6 +4,7 @@ Most tests give ThreadReader a stand-in for git's common-directory lookup; one r
 """
 
 import asyncio
+import errno
 import json
 import os
 import sqlite3
@@ -24,8 +25,9 @@ from support import (
     PRIVATE_MARKERS, bridge, claude_prompt, claude_reply, claude_session, claude_tool_result, codex_event,
     codex_thread, codex_turn, git, git_repository, isolate,
 )
-import thread_reader  # found through the script directory support.py adds
-from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadSummary, ThreadUnavailable
+import history_capture  # found through the script directory support.py adds
+import thread_reader
+from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 
 class ReaderTests(unittest.TestCase):
@@ -161,16 +163,15 @@ class ReaderTests(unittest.TestCase):
         other, _ = codex_thread(self.codex_home, self.project, codex_turn("t2", "Also done."), mtime=2_000)
         archive = self.codex_home / "archived_sessions"
         archive.mkdir()
-        parse = thread_reader.parse_line
 
-        def archive_after_header(line):
-            record = parse(line)
-            if record.get("payload", {}).get("id") == moving:
-                path.rename(archive / path.name)
-            return record
+        class ArchiveAfterHeader(history_capture.ReadPoints):
+            def header_read(self, read_path):
+                if read_path == path:
+                    path.rename(archive / path.name)
 
-        with patch.object(thread_reader, "parse_line", archive_after_header):
+        with patch.object(history_capture, "READ_POINTS", ArchiveAfterHeader()):
             rows = self.threads("codex")["threads"]
+        self.assertEqual((path.exists(), (archive / path.name).exists()), (False, True))
         self.assertEqual([row["id"] for row in rows], [other, moving])
         self.assertEqual(rows[1]["updated_at"], "1970-01-01T00:16:40+00:00")
 
@@ -180,18 +181,34 @@ class ReaderTests(unittest.TestCase):
         index = self.codex_home / "session_index.jsonl"
         first, second = index.read_bytes().splitlines(keepends=True)
         index.write_bytes(first + b"x" * 1024 + b"\n" + second)
-        with patch.object(thread_reader, "MAX_METADATA_BYTES", len(second) + 10, create=True):
+        with patch.object(history_capture, "MAX_METADATA_BYTES", len(second) + 10):
             names = {row["id"]: row["name"] for row in self.threads("codex")["threads"]}
         self.assertEqual(names, {older: None, newer: "Newer"})
 
-    def test_history_with_unexpected_value_types_is_refused_with_a_reason(self):
+    def test_a_session_refused_after_its_repository_matched_is_not_counted(self):
+        # The unsupported count is machine-wide: it must not depend on which repository the listing asks about.
+        broken, _ = claude_session(self.claude_home, self.project, claude_prompt() | {"parentUuid": 5},
+                                   claude_reply("Done."), title="Broken ancestry")
+        for directory, rows in ((self.project, [(broken, None)]), (self.other, [])):
+            with self.subTest(directory=directory):
+                listing = self.threads("claude", directory)
+                self.assertEqual([(row["id"], row["name"]) for row in listing["threads"]], rows)
+                self.assertNotIn("unsupported_threads_machine_wide", listing)
+
+    def test_a_malformed_prompt_leaves_the_session_listed(self):
         claude_session(self.claude_home, self.project, claude_prompt(5), claude_reply("Done."), title="Claude types")
         claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."), entrypoint=5)
-        # The bridge turns a value of the wrong type, which the parser meets as a TypeError, into a named refusal.
-        client = bridge.Bridge(readers={"claude": self.reader("claude")})
-        with self.assertRaisesRegex(bridge.BridgeError, "malformed line"):
-            asyncio.run(client.thread("claude", str(self.project), "Claude types"))
+        # The listing reads only titles; the read refuses the prompt (test_core).
         self.assertEqual([thread["name"] for thread in self.threads("claude")["threads"]], ["Claude types"])
+
+    def test_a_reader_fault_is_not_reported_as_a_damaged_file(self):
+        class Faulty:
+            def read(self, *arguments):
+                raise AttributeError("a fault in the reader")
+
+        client = bridge.Bridge(readers={"claude": Faulty()})
+        with self.assertRaisesRegex(bridge.BridgeError, "^The thread reader failed unexpectedly.$"):
+            asyncio.run(client.thread("claude", str(self.project), "Claude types"))
 
     def test_compressed_rollouts_are_listed_and_read_like_plain_ones(self):
         turns = (codex_turn("t1", "First answer."), codex_turn("t2", "Second answer."))
@@ -213,8 +230,8 @@ class ReaderTests(unittest.TestCase):
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t0", "Old answer."), noise,
                                codex_turn("t1", "Answer."), suffix=".jsonl.zst")
         def decompressed(limit=None):
-            with thread_reader.open_history(path) as source:
-                return thread_reader.decompress_history(source, limit)
+            with history_capture.open_history(path) as source:
+                return history_capture.decompress_history(source, limit)
 
         head, whole, from_start = decompressed()
         self.assertTrue(from_start)
@@ -222,6 +239,18 @@ class ReaderTests(unittest.TestCase):
         head_again, tail, from_start = decompressed(limit=4096)
         self.assertEqual((head_again, len(tail), from_start), (head, 4096, False))
         self.assertTrue(whole.endswith(tail))
+
+    def test_a_compressed_rollout_is_refused_past_its_decoded_budget(self):
+        identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
+                                        suffix=".jsonl.zst", frames=3)
+        with history_capture.open_history(path) as source:
+            decoded = len(history_capture.decompress_history(source)[1])
+        # Each frame fits the budget; together they do not.
+        with patch.object(history_capture, "MAX_DECOMPRESSED_BYTES", decoded - 1):
+            with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
+                self.read("codex", identifier)
+        with patch.object(history_capture, "MAX_DECOMPRESSED_BYTES", decoded):
+            self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
 
     def test_cut_off_or_damaged_compressed_rollouts_are_refused_with_a_reason(self):
         # Several zstd blocks of hard-to-compress text, so a file cut in half still decodes its first lines.
@@ -252,11 +281,11 @@ class ReaderTests(unittest.TestCase):
         content = path.read_bytes()
         skippable = struct.pack("<II", 0x184D2A50, 4096) + bytes(4096)
         path.write_bytes(skippable + content)
-        with patch.object(thread_reader, "MAX_METADATA_BYTES", 1024, create=True):
+        with patch.object(history_capture, "MAX_METADATA_BYTES", 1024):
             self.assertEqual(self.threads("codex")["threads"], [])
         path.write_bytes(content + skippable)
         self.assertEqual([row["id"] for row in self.threads("codex")["threads"]], [identifier])
-        with patch.object(thread_reader, "MAX_COMPRESSED_BYTES", 1024, create=True):
+        with patch.object(history_capture, "MAX_COMPRESSED_BYTES", 1024):
             with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
                 self.read("codex", identifier)
 
@@ -264,22 +293,23 @@ class ReaderTests(unittest.TestCase):
         identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
                                         suffix=".jsonl.zst")
         content = path.read_bytes()
-        decompress = thread_reader.decompress_history
-        attempts = []
+        captures = []
 
-        def change_during_decompression(source, limit=None):
-            attempts.append(1)
-            if len(attempts) == 1:
-                path.write_bytes(b"\x00" * len(content))
-                try:
-                    return decompress(source, limit)
-                finally:
+        class DamageFirstAttempt(history_capture.ReadPoints):
+            def opened(self, read_path, attempt):
+                if attempt == 0:
+                    path.write_bytes(b"\x00" * len(content))
+
+            def attempted(self, read_path, attempt, history):
+                captures.append(history)
+                if attempt == 0:
                     path.write_bytes(content)
-            return decompress(source, limit)
 
-        with patch.object(thread_reader, "decompress_history", change_during_decompression):
+        with patch.object(history_capture, "READ_POINTS", DamageFirstAttempt()):
             self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
-        self.assertEqual(len(attempts), 2)
+        # The first attempt was refused as damaged before it built a capture; the change sent it round once more.
+        self.assertEqual(len(captures), 2)
+        self.assertIsNone(captures[0])
 
     def test_each_compressed_read_attempt_uses_its_open_extent(self):
         import zstandard
@@ -288,18 +318,18 @@ class ReaderTests(unittest.TestCase):
                                         suffix=".jsonl.zst")
         records = "".join(json.dumps(record) + "\n" for record in codex_turn("t2", "Second.")).encode()
         frame = zstandard.ZstdCompressor().compress(records)
-        decompress = thread_reader.decompress_history
         decoded = []
 
-        def append_during_decompression(source, limit=None):
-            if not decoded:
-                with path.open("ab") as output:
-                    output.write(frame)
-            result = decompress(source, limit)
-            decoded.append(result[1])
-            return result
+        class AppendAfterFirstOpen(history_capture.ReadPoints):
+            def opened(self, read_path, attempt):
+                if attempt == 0:
+                    with path.open("ab") as output:
+                        output.write(frame)
 
-        with patch.object(thread_reader, "decompress_history", append_during_decompression):
+            def attempted(self, read_path, attempt, history):
+                decoded.append(history.tail(history_capture.MAX_TAIL_BYTES).data)
+
+        with patch.object(history_capture, "READ_POINTS", AppendAfterFirstOpen()):
             self.assertEqual(self.read("codex", identifier)["messages"][-1]["text"], "Second.")
         self.assertEqual(len(decoded), 2)
         self.assertFalse(decoded[0].endswith(records))
@@ -307,29 +337,62 @@ class ReaderTests(unittest.TestCase):
 
     def test_a_history_that_changes_while_it_is_read_is_read_once_more_then_refused(self):
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Moving")
-        real_scan = thread_reader.scan_codex
 
-        def scan_while_appending(times):
-            def scan(records):
-                if times:
-                    times.pop()
-                    with path.open("a", encoding="utf-8") as history:
-                        history.write(json.dumps(codex_event("token_count", "t1")) + "\n")
-                return real_scan(records)
-            return scan
+        def appending_on(attempts):
+            class Append(history_capture.ReadPoints):
+                def opened(self, read_path, attempt):
+                    if attempt in attempts:
+                        with path.open("a", encoding="utf-8") as history:
+                            history.write(json.dumps(codex_event("token_count", "t1")) + "\n")
+            return patch.object(history_capture, "READ_POINTS", Append())
 
-        with patch.object(thread_reader, "scan_codex", scan_while_appending([1])):
+        with appending_on({0}):
             self.assertEqual([message["text"] for message in self.read("codex", "Moving")["messages"]], ["Done."])
         with (
-            patch.object(thread_reader, "scan_codex", scan_while_appending([1, 1])),
+            appending_on({0, 1}),
             self.assertRaisesRegex(ThreadUnavailable, "^The thread's history file changed while it was read.$"),
         ):
             self.read("codex", "Moving")
 
+    def test_a_path_that_names_another_file_after_it_was_opened_is_read_again(self):
+        thread, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Opened."))
+        _, replacement = codex_thread(self.root / "elsewhere-codex", self.project, codex_turn("t1", "Replaced."),
+                                      meta={"id": thread})
+        moved = self.root / "moved-day"
+
+        class ReplaceDirectoryAfterOpen(history_capture.ReadPoints):
+            def opened(self, read_path, attempt):
+                if attempt == 0:
+                    # Moving the enclosing directory leaves the open file's own metadata untouched: only the path
+                    # check sees that the path now names another file.
+                    path.parent.rename(moved)
+                    path.parent.mkdir()
+                    os.replace(replacement, path)
+
+        with patch.object(history_capture, "READ_POINTS", ReplaceDirectoryAfterOpen()):
+            self.assertEqual(self.read("codex", thread)["messages"][0]["text"], "Replaced.")
+
+    def test_a_history_below_a_symlinked_directory_is_not_opened(self):
+        _, path = claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."))
+        moved = self.root / "moved-project"
+        path.parent.rename(moved)
+        path.parent.symlink_to(moved)
+        self.assertTrue(path.is_file())
+        with self.assertRaises(OSError):
+            history_capture.open_history(path, self.claude_home)
+
+    def test_an_io_error_in_the_identity_check_is_not_reported_as_a_change(self):
+        _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."))
+        # Only the identity check uses lstat: the history is opened through directory descriptors.
+        with patch.object(Path, "lstat", side_effect=OSError(errno.EIO, "Input/output error")):
+            with self.assertRaises(OSError) as raised:
+                history_capture.read_stable(self.codex_home, lambda: path, lambda history: history.first_line())
+        self.assertEqual(raised.exception.errno, errno.EIO)
+
     def test_only_a_missing_zstandard_package_is_reported_as_missing(self):
         with patch.dict(sys.modules, {"zstandard": None}):
             with self.assertRaisesRegex(ThreadUnavailable, "needs the zstandard package"):
-                thread_reader.zstandard_module()
+                history_capture.zstandard_module()
         real_import = __import__
 
         def broken(name, *arguments, **keywords):
@@ -340,15 +403,22 @@ class ReaderTests(unittest.TestCase):
         with patch.dict(sys.modules), patch("builtins.__import__", broken):
             sys.modules.pop("zstandard", None)
             with self.assertRaisesRegex(ImportError, "incompatible architecture"):
-                thread_reader.zstandard_module()
+                history_capture.zstandard_module()
 
-    def test_codex_tail_window_grows_until_it_reaches_a_turn(self):
-        noise = [codex_event("token_count", "t1", info="x" * 200) for _ in range(200)]
-        codex_thread(self.codex_home, self.project, codex_turn("t1", "Early answer."), noise, name="Long")
-        with patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024):
-            result = self.read("codex", "Long")
-        self.assertEqual(result["messages"], [{"text": "Early answer.", "phase": "final_answer"}])
-        self.assertTrue(result["latest_turn"]["finished"])
+    def test_a_claude_read_takes_its_title_from_the_bytes_it_reads(self):
+        # The last replies fit the first tail window; the title lies further back, where only the title search looks.
+        replies = [entry for _ in range(60) for entry in (claude_prompt(), claude_reply("x" * 5000))]
+        _, path = claude_session(self.claude_home, self.project, claude_prompt(),
+                                 {"type": "custom-title", "customTitle": "Early title"}, *replies)
+        real_match = thread_reader.match_thread
+
+        def retitle_after_selection(threads, thread):
+            summary = real_match(threads, thread)
+            path.write_text(path.read_text(encoding="utf-8").replace("Early title", "Later title"), encoding="utf-8")
+            return summary
+
+        with patch.object(thread_reader, "match_thread", retitle_after_selection):
+            self.assertEqual(self.read("claude", "Early title")["name"], "Later title")
 
     def test_claude_sessions_are_listed_and_read_by_the_same_rules(self):
         home = self.claude_home
@@ -375,24 +445,6 @@ class ReaderTests(unittest.TestCase):
                          {"status": "inProgress", "finished": False, "liveness": "unknown"})
         self.assertEqual(self.read("claude", stopped)["latest_turn"]["status"], "interrupted")
 
-    def test_claude_read_expands_the_tail_to_resolve_a_rewind(self):
-        records = [
-            claude_prompt() | {"uuid": "u1", "parentUuid": None},
-            claude_reply("Kept.") | {"uuid": "a1", "parentUuid": "u1"},
-            {"type": "file-history-snapshot", "snapshot": "x" * 4096},
-            claude_prompt() | {"uuid": "u2", "parentUuid": "a1"},
-            claude_reply("Abandoned.") | {"uuid": "a2", "parentUuid": "u2"},
-            claude_prompt() | {"uuid": "u3", "parentUuid": "a1"},
-            claude_reply("After rewind.") | {"uuid": "a3", "parentUuid": "u3"},
-        ]
-        identifier, _ = claude_session(self.claude_home, self.project, *records)
-        with patch.object(thread_reader, "INITIAL_TAIL_BYTES", 2048):
-            self.assertEqual([m["text"] for m in self.read("claude", identifier, max_messages=1)["messages"]],
-                             ["After rewind."])
-            with patch.object(thread_reader, "MAX_TAIL_BYTES", 2048):
-                with self.assertRaisesRegex(ThreadUnavailable, "active ancestry could not be resolved"):
-                    self.read("claude", identifier, max_messages=1)
-
     def test_a_claude_session_belongs_where_its_latest_records_are(self):
         home = self.claude_home
         moved_in, path = claude_session(home, self.other, claude_prompt(), claude_reply("Started elsewhere."),
@@ -412,12 +464,10 @@ class ReaderTests(unittest.TestCase):
         self.assertNotIn(moved_out, json.dumps(listing))
         # The read decides again from the bytes it returns: each row runs in homes of its own.
         elsewhere = {"cwd": str(self.other)}
-        large_record = json.dumps({"type": "file-history-snapshot", "snapshot": "x" * 4096}) + "\n"
 
         def append(path, *records):
             with path.open("a", encoding="utf-8") as history:
-                history.write("".join(record if isinstance(record, str) else json.dumps(record) + "\n"
-                                      for record in records))
+                history.write("".join(json.dumps(record) + "\n" for record in records))
 
         def at_selection(action):
             """Run action after the listing has picked the thread and before the source reads it."""
@@ -455,22 +505,6 @@ class ReaderTests(unittest.TestCase):
             stack.enter_context(at_selection(lambda: os.replace(foreign, path)))
             return lambda: self.read("codex", thread), "^No readable thread with that ID"
 
-        def move_hidden_beyond_the_first_window(stack, codex, claude):
-            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
-            append(path, {**claude_prompt(), **elsewhere}, {**claude_reply("Elsewhere."), **elsewhere}, large_record)
-            stack.enter_context(patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024))
-            return lambda: self.read("claude", thread), "^No readable thread with that ID"
-
-        def directory_beyond_the_cap(stack, codex, claude):
-            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
-            append(path, large_record)
-            stack.enter_context(patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024))
-            stack.enter_context(patch.object(thread_reader, "MAX_TAIL_BYTES", 2048))
-            include = self.reader("claude").same_repository(self.project)
-            summary = ThreadSummary(thread, None, str(self.project), 0.0)
-            return (lambda: ClaudeSessionsSource().read_thread(summary, 3, include),
-                    "^The session's recent history does not name its working directory.$")
-
         def moved_in_after_a_foreign_answer(stack, codex, claude):
             thread, path = claude_session(claude, self.other, claude_prompt(), claude_reply("Started elsewhere."),
                                           {"type": "custom-title", "customTitle": "Elsewhere title"}, project="other")
@@ -483,7 +517,7 @@ class ReaderTests(unittest.TestCase):
                     ([], {"status": "inProgress", "finished": False, "liveness": "unknown"}, None))
 
         rows = (claude_append_after_selection, cwd_symlink_retargeted_after_selection, codex_replaced_after_selection,
-                move_hidden_beyond_the_first_window, directory_beyond_the_cap, moved_in_after_a_foreign_answer)
+                moved_in_after_a_foreign_answer)
         for row in rows:
             homes = self.root / row.__name__
             codex, claude = homes / "codex-home", homes / "claude-home"

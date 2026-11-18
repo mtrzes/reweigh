@@ -16,6 +16,7 @@ CODEX_MAIN_SOURCES = {"vscode", "cli"}
 CODEX_TURN_EVENTS = ("task_started", "task_complete", "turn_aborted", "item_completed")
 CODEX_MESSAGE_PHASES = (None, "commentary", "final_answer")
 MALFORMED_CODEX_EVENT = "The thread's history file has a malformed line for a Codex event."
+MALFORMED_CLAUDE_MESSAGE = "The thread's history file has a malformed line for a Claude message."
 # Codex compresses older rollouts with zstd; the records inside are the same JSONL.
 ROLLOUT_FORMATS = ((".jsonl", "jsonl"), (".jsonl.zst", "zstd"))
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -35,14 +36,13 @@ CLAUDE_TITLE_RECORDS = (("custom-title", "customTitle"), ("ai-title", "aiTitle")
 GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
 # The same answer for a thread of another repository, an unsupported history and no thread at all.
 NOT_IN_REPOSITORY = "No readable thread with that ID or name belongs to this repository."
+NO_TURN = "No turn was found in the thread's recent history."
+NO_CLAUDE_CWD = "The session's recent history does not name its working directory."
+ANCESTRY_UNRESOLVED = "The Claude session's active ancestry could not be resolved in recent history."
 
 
 class ThreadUnavailable(Exception):
     """A thread cannot be read safely. The message names the reason and never quotes the thread."""
-
-
-class ClaudeAncestryGap(ThreadUnavailable):
-    """An active parent may be further back than the current tail window."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,9 @@ class Scan:
     segment_start: bool = False
     """Claude only: the records include where the session entered the requested repository, so older records cannot
     count and a larger window cannot add any."""
+    ancestry_gap: bool = False
+    """Claude only: the active branch reaches a parent before these records, so they decide nothing; only earlier
+    records can."""
 
 
 def parse_line(line):
@@ -111,6 +114,17 @@ def parse_line(line):
     if not isinstance(record, dict):
         raise ThreadUnavailable("The thread's history file has a malformed line.")
     return record
+
+
+@dataclass(frozen=True)
+class TailRecords:
+    """The complete records in a window of a history's last bytes, decoded afresh on each iteration."""
+    data: bytes
+    from_start: bool
+    """The window starts at byte zero, so no earlier record exists."""
+
+    def __iter__(self):
+        return complete_records(self.data, self.from_start)
 
 
 def complete_records(data, from_start):
@@ -140,6 +154,62 @@ def complete_records(data, from_start):
 
 def scan_is_enough(scan, max_messages):
     return scan.latest is not None and (len(scan.messages) >= max_messages or scan.segment_start)
+
+
+# Tail windows
+
+
+EARLIER = object()
+"""A tail search's answer when only earlier records can decide."""
+
+
+@dataclass(frozen=True)
+class TailWindows:
+    """The tail windows a search is offered: initial bytes first, doubling up to cap."""
+    initial: int
+    cap: int
+
+
+def search_tail(tail, search, windows):
+    """Offer search ever larger windows of a history's tail until it decides, and return what it decides.
+
+    tail(size) returns the TailRecords of the last size bytes. search(records, final) returns its result, or EARLIER
+    when only earlier records can decide. final is True for the last window, which reaches byte zero or the cap, and
+    there the search must decide; records.from_start tells the two apart.
+    """
+    window = windows.initial
+    while True:
+        records = tail(window)
+        final = records.from_start or window >= windows.cap
+        result = search(records, final)
+        if result is not EARLIER:
+            return result
+        if final:
+            raise RuntimeError("A tail search asked for records before its last window.")
+        window = min(window * 2, windows.cap)
+
+
+def turns_search(scan, max_messages):
+    """Search for the latest turn and up to max_messages messages with scan(records), which returns a Scan.
+
+    Once no earlier records remain, fewer messages stand, no turn is a refusal and an unresolved ancestry gap is a
+    refusal of its own.
+    """
+    def search(records, final):
+        result = scan(records)
+        if result.ancestry_gap:
+            if final:
+                raise ThreadUnavailable(ANCESTRY_UNRESOLVED)
+            return EARLIER
+        if scan_is_enough(result, max_messages):
+            return result
+        if not final:
+            return EARLIER
+        if result.latest is None:
+            raise ThreadUnavailable(NO_TURN)
+        return result
+
+    return search
 
 
 def text_of(blocks, block_type):
@@ -314,6 +384,41 @@ def claude_last_cwd(records, identifier=None):
     return cwd
 
 
+def claude_cwd_search(identifier):
+    """Search for the working directory the session's latest records name. A large record without one can follow the
+    latest move, so only a named directory decides; if none is named once no earlier records remain, which repository
+    the session is in is unknown, and the session is refused."""
+    def search(records, final):
+        cwd = claude_last_cwd(records, identifier)
+        if cwd is not None:
+            return cwd
+        if final:
+            raise ThreadUnavailable(NO_CLAUDE_CWD)
+        return EARLIER
+
+    return search
+
+
+def claude_turns_search(belongs, identifier, max_messages):
+    """turns_search over a Claude session. Only a window that starts at byte zero holds the whole ancestry: in one cut
+    from the file's end, a gap may be closed by earlier records."""
+    return turns_search(
+        lambda records: scan_claude(records, belongs, identifier=identifier, whole=records.from_start), max_messages)
+
+
+def claude_title_search(belongs, identifier):
+    """Search for the title of the session's current stay in the repository: the stay's start decides, else the
+    last window's records. Only the active branch can enter the repository, as for replies; if its ancestry is still
+    unresolved in the last window, the session has no title here."""
+    def search(records, final):
+        scan = scan_claude(records, belongs, title_only=True, identifier=identifier, whole=records.from_start)
+        if scan.ancestry_gap:
+            return None if final else EARLIER
+        return scan.title if scan.segment_start or final else EARLIER
+
+    return search
+
+
 def is_interactive_claude_session(entrypoint):
     """Print-mode sessions, bridge consultations among them, have no person at the keyboard; a session that records
     no entrypoint cannot be told apart, so it is left out."""
@@ -331,7 +436,8 @@ def chosen_title(titles):
 
 
 def claude_active_branch(records, identifier, whole):
-    """Return the last main node's ancestry, or None for histories without parent links."""
+    """Return the last main node's ancestry, None for histories without parent links, or EARLIER when the ancestry
+    reaches a parent before records cut from the file's end."""
     parents = {}
     unlinked_chat = False
     for entry in main_claude_records(records, identifier):
@@ -356,9 +462,11 @@ def claude_active_branch(records, identifier, whole):
         active.add(node)
         node, position = parent, preceding_position
     # The oldest node of a cut-off window can have a parent just outside it. A gap later in the window needs a
-    # wider scan to find out where the session resumed.
-    if node is not None and (whole or position != 0):
-        raise ClaudeAncestryGap("The Claude session's active ancestry could not be resolved in recent history.")
+    # wider scan to find out where the session resumed; in the whole file, no record can close it.
+    if node is not None and position != 0 and not whole:
+        return EARLIER
+    if node is not None and whole:
+        raise ThreadUnavailable(ANCESTRY_UNRESOLVED)
     return active
 
 
@@ -368,9 +476,12 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
     A record that names a working directory sets where the following records are; belongs says whether a directory is
     in the requested repository, worktrees included. A move outside it drops everything found so far, also when the
     session comes back later, and records before the first one that names a directory are not counted: at a window
-    cut from the file's end, nothing says where they were.
+    cut from the file's end, nothing says where they were. title_only reads no message fields, only where the
+    session is and its title records.
     """
-    active = None if title_only else claude_active_branch(records, identifier, whole)
+    active = claude_active_branch(records, identifier, whole)
+    if active is EARLIER:
+        return Scan(None, [], ancestry_gap=True)
     latest, messages, turn_id, titles = None, [], None, {}
     inside, segment_start = None, False
     for entry in main_claude_records(records, identifier):
@@ -398,7 +509,12 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
             blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
             if any(not isinstance(block, dict) or block.get("type") == "tool_result" for block in blocks):
                 continue
-            text = "".join(block.get("text") or "" for block in blocks if block.get("type") == "text")
+            texts = [block.get("text") for block in blocks if block.get("type") == "text"]
+            # A text block, or a prompt that is not a list of blocks, must carry its text: an empty or absent one
+            # would pass for a new question.
+            if any(not isinstance(text, str) for text in texts):
+                raise ThreadUnavailable(MALFORMED_CLAUDE_MESSAGE)
+            text = "".join(texts)
             if text in CLAUDE_INTERRUPTION_MARKERS:
                 latest = TurnState(turn_id, "interrupted")
             else:
@@ -408,10 +524,13 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
             if entry.get("isApiErrorMessage"):
                 latest = TurnState(turn_id, "failed")
                 continue
+            stop_reason = message.get("stop_reason")
+            if stop_reason is not None and not isinstance(stop_reason, str):
+                raise ThreadUnavailable(MALFORMED_CLAUDE_MESSAGE)
             text = text_of(content, "text")
             if text.strip():
                 messages.append(AgentMessage(turn_id, text))
-            latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(message.get("stop_reason")))
+            latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(stop_reason))
     return Scan(latest, messages, title=chosen_title(titles), segment_start=segment_start)
 
 
