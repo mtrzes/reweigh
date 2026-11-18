@@ -755,12 +755,13 @@ class Bridge:
             timeout = min(GIT_REPOSITORY_PROBE_SECONDS, deadline - time.monotonic())
             if timeout > 0:
                 try:
-                    facts["in_git_repository"] = bool(await git(
-                        directory, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                        failure="Cannot find the git repository.", lock=lock, timeout=timeout,
-                    ))
+                    if await git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                                 failure="Cannot find the git repository.", lock=lock, timeout=timeout):
+                        facts["in_git_repository"] = True
                 except BridgeError:
-                    facts["in_git_repository"] = False
+                    # git exits 128 for every fatal error, a missing or unreadable directory as well as one outside a
+                    # repository, and tells them apart only in its text, so a failure leaves the question open.
+                    pass
             facts["model_setting"] = chose_model
         return FailureFacts(**facts)
 
