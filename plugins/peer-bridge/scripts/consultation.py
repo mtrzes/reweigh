@@ -7,6 +7,7 @@ them in, and acts on what comes back.
 import json
 import os
 import re
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,7 @@ class FailureFacts:
     writer_lock_present: bool | None = None
     """Codex only: whether a writer-lock file exists for the resumed thread, so another app may hold it."""
     in_git_repository: bool | None = None
+    """Codex only: whether working_directory or a parent holds a .git entry, the check Codex makes before it runs."""
     model_setting: bool = False
     """Codex only: a model or reasoning effort was chosen, by the request or the environment."""
     api_error_status: int | None = None
@@ -532,6 +534,28 @@ def output_signals(provider, output, errors):
         "api_error_status": status if isinstance(status, int) and not isinstance(status, bool) else None,
         "unrecognized_model": any(line.startswith(CLAUDE_UNRECOGNIZED_MODEL_TAG) for line in errors.splitlines()),
     }
+
+
+def git_entry_found(directory, lstat):
+    """Whether a resolved, absolute directory or one of its parents holds a .git entry; None when a level is unreadable.
+
+    This is the check Codex makes before it runs outside a trusted directory: any .git entry counts, even an empty
+    file, and git is never asked whether the repository is valid.
+    """
+    for level in (directory, *directory.parents):
+        try:
+            if not stat.S_ISDIR(lstat(level).st_mode):
+                return None  # replaced since it was resolved
+        except OSError:
+            return None  # gone or unreadable
+        try:
+            lstat(level / ".git")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return True
+    return False
 
 
 def failure_message(provider, facts, generic):

@@ -31,6 +31,7 @@ from consultation import (
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
+    git_entry_found,
 )
 from jobs import LOCK_BUSY, UNKNOWN_JOB, JobStore, run_job, spawn_runner
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
@@ -47,7 +48,6 @@ MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
 BUNDLED_CODEX_PATH = Path("ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex")
 GIT_TIMEOUT_SECONDS = 120
-GIT_REPOSITORY_PROBE_SECONDS = 10
 SIGN_IN_PROBE_SECONDS = 30
 SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
@@ -770,16 +770,8 @@ class Bridge:
         if provider == "codex":
             if session:
                 facts["writer_lock_present"] = check(source.writer_lock_present, session)
-            timeout = min(GIT_REPOSITORY_PROBE_SECONDS, deadline - time.monotonic())
-            if timeout > 0:
-                try:
-                    if await git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                 failure="Cannot find the git repository.", lock=lock, timeout=timeout):
-                        facts["in_git_repository"] = True
-                except BridgeError:
-                    # git exits 128 for every fatal error, a missing or unreadable directory as well as one outside a
-                    # repository, and tells them apart only in its text, so a failure leaves the question open.
-                    pass
+            facts["in_git_repository"] = await asyncio.to_thread(
+                git_entry_found, Path(os.path.realpath(directory)), os.lstat)
             facts["model_setting"] = chose_model
         return FailureFacts(**facts)
 

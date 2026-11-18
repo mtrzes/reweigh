@@ -2,10 +2,12 @@
 
 import json
 import os
+import stat
 import sys
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -366,6 +368,31 @@ class OutcomeTests(unittest.TestCase):
         for provider, output, errors, expected in cases:
             with self.subTest(provider=provider, output=output, errors=errors):
                 self.assertEqual(c.output_signals(provider, output, errors), expected)
+
+    def test_codex_finds_a_repository_by_a_git_entry_in_the_directory_or_a_parent(self):
+        # Codex checks only for a .git entry, of any kind, so an empty .git file counts and a bare repository does not.
+        directory, folder, regular = Path("/home/me/project/sub"), stat.S_IFDIR, stat.S_IFREG
+        cases = (
+            ({}, False),
+            ({"/home/me/project/sub/.git": folder}, True),
+            ({"/home/me/project/.git": regular}, True),
+            ({"/.git": stat.S_IFLNK}, True),
+            ({"/home/me/project/.git": regular, "/home": PermissionError()}, True),
+            ({"/home/me/.git": PermissionError()}, None),
+            ({"/home": PermissionError()}, None),
+            ({"/home/me/project/sub": regular}, None),
+            ({"/home/me/project/sub": stat.S_IFLNK}, None),
+            ({"/home/me/project/sub": FileNotFoundError()}, None),
+        )
+        for entries, expected in cases:
+            def lstat(path, entries=entries):
+                entry = entries.get(str(path), folder if path.name != ".git" else FileNotFoundError())
+                if isinstance(entry, BaseException):
+                    raise entry
+                return SimpleNamespace(st_mode=entry)
+
+            with self.subTest(entries=entries):
+                self.assertIs(c.git_entry_found(directory, lstat), expected)
 
     def test_failure_message_names_a_cause_only_when_the_facts_establish_it(self):
         generic = "GENERIC"

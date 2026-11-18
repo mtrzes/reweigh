@@ -116,12 +116,12 @@ cause only when an exact field or a check establishes it, and never by reading t
 | A signed-out CLI | `claude auth status --json` reporting `loggedIn: false`, `codex login status` exiting 1, or Claude's result carrying `api_error_status` 401 |
 | A conversation whose history is gone | On a follow-up, no session file for it under the peer's history directory |
 | A model Claude Code does not know | A stderr line starting with Claude Code's `[claude-code:unrecognized_model]` tag |
+| Codex outside a git repository | No `.git` entry in `working_directory` or any parent, the check Codex itself makes |
 
-A failed `git rev-parse` in `working_directory` names no cause: git exits 128 for every fatal error and says which
-only in its text. The bridge runs the sign-in and git checks only while time remains from the consultation timeout. If
-the checks and result fields establish no cause, the bridge returns a generic error. When a Codex model or reasoning
-effort was chosen, per call or by environment, a failed Codex consultation adds that the choice may be the cause,
-because Codex reports a rejected choice only in prose.
+The bridge runs the sign-in check only while time remains from the consultation timeout. If the checks and result
+fields establish no cause, the bridge returns a generic error. When a Codex model or reasoning effort was chosen, per
+call or by environment, a failed Codex consultation adds that the choice may be the cause, because Codex reports a
+rejected choice only in prose.
 
 ### Pinned refs
 
