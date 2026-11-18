@@ -30,6 +30,30 @@ CLAUDE = {"claude"}
 LATER = consultation.JOB_RETENTION_SECONDS + 60
 
 
+class RequestFormatTests(unittest.TestCase):
+    """The persisted request, written by start and read by the runner: pure, no files."""
+
+    def test_job_request_round_trips_and_reads_requests_written_before_model_choices(self):
+        written = jobs.job_request("codex", "Why?", Path("/project"), "", "", None, "Review", "gpt-6-astra", "xhigh")
+        self.assertEqual(written, {"provider": "codex", "prompt": "Why?", "working_directory": "/project",
+                                   "context": "", "conversation_id": None, "ref": None, "seed_thread": "Review",
+                                   "model": "gpt-6-astra", "reasoning_effort": "xhigh"})
+        earlier = {key: value for key, value in written.items() if key not in {"model", "reasoning_effort"}}
+        for name, saved, expected in (
+            ("written", written, written),
+            ("before model choices", earlier, earlier | {"model": None, "reasoning_effort": None}),
+            ("extra field", written | {"later": 1}, written),
+            ("not an object", ["Why?"], None),
+            ("unknown provider", written | {"provider": "other"}, None),
+            ("missing prompt", {key: value for key, value in written.items() if key != "prompt"}, None),
+            ("missing ref", {key: value for key, value in written.items() if key != "ref"}, None),
+            ("number as text", written | {"context": 1}, None),
+            ("number as choice", written | {"model": 1}, None),
+        ):
+            with self.subTest(request=name):
+                self.assertEqual(jobs.read_job_request(saved), expected)
+
+
 class JobTests(BridgeTestCase):
     def setUp(self):
         super().setUp()
@@ -540,13 +564,16 @@ time.sleep({4 * DEADLINE_SECONDS})
     # Files and retention
 
     async def test_claim_removes_an_unreadable_request_and_records_failure(self):
-        job_id = await self.queued()
-        request = self.folder(job_id) / "request.json"
-        request.write_text("{\"prompt\": \"PRIVATE QUESTION\"")
-        await jobs.run_job(self.client.jobs, job_id, self.never)
-        self.assertFalse(request.exists())
-        view = await self.client.job(job_id, CLAUDE)
-        self.assertEqual((view["state"], view["error"]), ("failed", jobs.UNREADABLE))
+        for name, content in (("malformed", "{\"prompt\": \"PRIVATE QUESTION\""),
+                              ("another shape", json.dumps({"prompt": "PRIVATE QUESTION"}))):
+            with self.subTest(request=name):
+                job_id = await self.queued()
+                request = self.folder(job_id) / "request.json"
+                request.write_text(content)
+                await jobs.run_job(self.client.jobs, job_id, self.never)
+                self.assertFalse(request.exists())
+                view = await self.client.job(job_id, CLAUDE)
+                self.assertEqual((view["state"], view["error"]), ("failed", jobs.UNREADABLE))
 
     async def test_prune_uses_the_folder_age_when_reading_the_record_fails(self):
         job_id = await self.queued()

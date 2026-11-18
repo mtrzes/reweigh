@@ -80,9 +80,10 @@ A job lives in its own folder under the state directory. Its runner holds a lock
 runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
 dies, or has yet to claim it after two minutes, is stored as `lost` when it is read, cancelled or claimed. Before that
 deadline, cancellation of a queued job with no runner takes effect immediately. While a cancel waits for the runner,
-`cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The runner deletes
-the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
-`failed` with a fixed error. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
+`cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The job module writes
+the request file and reads it back; the runner deletes it after reading it. If it cannot read the request for a valid
+job, or the request lacks a field the bridge writes, it deletes the file and records `failed` with a fixed error. A
+request written before `model` and `reasoning_effort` existed asks for neither. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
 published during creation. A start that cannot read its job once the runner is launched cancels the job, since
 the caller never learns its ID; if that cancellation fails too, the error names the job's ID. A start that finds the
 runner already claiming the job reports it `queued`. The job module, `jobs.py`, owns a start from publishing the job

@@ -32,7 +32,7 @@ from pathlib import Path
 
 from cleanup import run_to_completion
 from consultation import (
-    JOB_RETENTION_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state, job_view, new_job_record,
+    JOB_RETENTION_SECONDS, LOST_JOB, PROVIDERS, BridgeError, job_expired, job_outcome, job_state, job_view, new_job_record,
     valid_job_outcome, valid_job_record, validate_session_id,
 )
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
@@ -58,6 +58,33 @@ STAGING_PREFIX = ".staging-"
 DELETING_PREFIX = ".deleting-"
 STAGING_RETENTION_SECONDS = 3600
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("bridge.py")
+
+
+# The request a job's runner consults with, as start writes it to request.json. model and reasoning_effort came later:
+# a request written without them asks for neither.
+REQUEST_TEXT_FIELDS = ("prompt", "working_directory", "context")
+REQUEST_OPTIONAL_FIELDS = ("conversation_id", "ref", "seed_thread", "model", "reasoning_effort")
+REQUEST_ADDED_FIELDS = ("model", "reasoning_effort")
+
+
+def job_request(provider, prompt, working_directory, context="", conversation_id=None, ref=None, seed_thread=None,
+                model=None, reasoning_effort=None):
+    """The request to persist for a checked consultation; empty optional values are stored as null."""
+    request = {"provider": provider, "prompt": prompt, "working_directory": str(working_directory), "context": context}
+    values = (conversation_id, ref, seed_thread, model, reasoning_effort)
+    return request | {key: value or None for key, value in zip(REQUEST_OPTIONAL_FIELDS, values)}
+
+
+def read_job_request(saved):
+    """The consultation's keyword arguments from a persisted request, or None when it is not one this bridge writes."""
+    if not isinstance(saved, dict) or saved.get("provider") not in PROVIDERS:
+        return None
+    saved = {key: None for key in REQUEST_ADDED_FIELDS} | saved
+    if (any(not isinstance(saved.get(key), str) for key in REQUEST_TEXT_FIELDS)
+            or any(key not in saved or not isinstance(saved[key], (str, type(None)))
+                   for key in REQUEST_OPTIONAL_FIELDS)):
+        return None
+    return {key: saved[key] for key in ("provider", *REQUEST_TEXT_FIELDS, *REQUEST_OPTIONAL_FIELDS)}
 
 
 class JobBusy(BridgeError):
@@ -315,7 +342,8 @@ class JobStore:
     # Runner side
 
     async def claim(self, folder):
-        """Take the job's request for this runner, or None when the job must not run. Hold the runner lock."""
+        """Take the job's request for this runner, as the consultation's keyword arguments, or None when the job must
+        not run. Hold the runner lock."""
         async with self.runner_file_lock(folder / "state.lock"):
             record = self.read(folder / "job.json")
             if record is None:
@@ -333,10 +361,10 @@ class JobStore:
                 self.finish(folder, job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]))
                 return None
             try:
-                request = self.read(folder / "request.json")
+                request = read_job_request(self.read(folder / "request.json"))
             except BridgeError:
                 request = None
-            if not isinstance(request, dict):
+            if request is None:
                 self.finish(folder, job_outcome("failed", time.time(), error=UNREADABLE))
                 return None
             (folder / "request.json").unlink(missing_ok=True)
@@ -351,13 +379,14 @@ class JobStore:
                 self.finish(folder, outcome)
 
 
-async def start_job(store, provider, working_directory, request, spawn):
-    """Publish a job, launch its runner with spawn(job_id), and return the job's first view, the only way its caller
+async def start_job(store, request, spawn):
+    """Publish a job for a job_request(), launch its runner with spawn(job_id), and return the job's first view, the only way its caller
     learns the ID. A job published for a start that then fails or is cancelled is cancelled, so none is left to run
     with nobody to read or cancel it; if that cancellation fails too, the error names the job's ID.
 
     Job files are read and written in a worker thread, so a lock wait never holds up the event loop.
     """
+    provider, working_directory = request["provider"], request["working_directory"]
     with job_store_errors():
         await asyncio.to_thread(store.prune, time.time())
         # A cancelled await does not stop its worker thread, so creation is let finish and its job cancelled.

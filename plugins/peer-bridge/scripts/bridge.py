@@ -33,7 +33,7 @@ from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
 )
 from cleanup import run_to_completion
-from jobs import JobStore, job_store_errors, run_job, spawn_runner, start_job
+from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
@@ -563,10 +563,9 @@ class Bridge:
                                                                   model, reasoning_effort)
         if seed_thread:
             self.check_threads_enabled()  # refused now, not once the runner reads the thread
-        request = {"provider": provider, "prompt": prompt, "working_directory": str(directory), "context": context,
-                   "conversation_id": conversation_id or None, "ref": ref or None, "seed_thread": seed_thread or None,
-                   "model": model, "reasoning_effort": reasoning_effort}
-        return await start_job(self.jobs, provider, directory, request, self.spawn)
+        request = job_request(provider, prompt, directory, context, conversation_id, ref, seed_thread, model,
+                              reasoning_effort)
+        return await start_job(self.jobs, request, self.spawn)
 
     async def job(self, job_id, providers, wait_seconds=0):
         """Return a job's state and, once finished, its result; wait up to wait_seconds for it to finish."""
@@ -872,11 +871,7 @@ def run_command_line(arguments):
             store = JobStore(state_directory())
 
             async def consult(request):
-                return await Bridge().consult(
-                    request["provider"], request["prompt"], request["working_directory"], request["context"],
-                    request["conversation_id"], request["ref"], request["seed_thread"], request.get("model"),
-                    request.get("reasoning_effort"),
-                )
+                return await Bridge().consult(**request)
 
             with job_store_errors():
                 asyncio.run(until_terminated(lambda: run_job(store, arguments.job_id, consult)))
