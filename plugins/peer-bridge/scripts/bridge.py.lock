@@ -10,6 +10,7 @@ resolution-markers = [
 
 [manifest]
 requirements = [
+    { name = "anyio", specifier = "==4.16.0" },
     { name = "mcp", specifier = "==1.30.0" },
     { name = "zstandard", specifier = "==0.25.0" },
 ]

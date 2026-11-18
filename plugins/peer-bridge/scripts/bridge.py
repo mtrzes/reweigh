@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp==1.30.0", "zstandard==0.25.0"]
+# dependencies = ["anyio==4.16.0", "mcp==1.30.0", "zstandard==0.25.0"]
 # ///
 """Consult Claude Code or Codex through dedicated, resumable CLI sessions."""
 

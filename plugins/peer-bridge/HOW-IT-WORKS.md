@@ -86,9 +86,15 @@ flowchart LR
     queued["queued<br/>job ID returned"] --> running["running<br/>runner holds lock"]
     running --> completed["completed<br/>reply kept, pruned after 7 days"]
     running --> failed["failed<br/>fixed error message"]
-    running --> cancelled["cancelled<br/>marker, no signals"]
-    queued -. runner never starts .-> lost["lost<br/>stored, honoured"]
+    running -- runner gets SIGTERM or SIGHUP --> cancelled["cancelled<br/>fixed error message"]
+    queued -- cancel within 2 minutes, no runner --> cancelled
+    running -- cancel_consultation sets a marker, no signals --> cancelling["cancelling<br/>waits for the runner"]
+    cancelling --> cancelled
+    cancelling -. outcome reached first .-> completed
+    cancelling -. outcome reached first .-> failed
+    queued -. unclaimed after 2 minutes .-> lost["lost<br/>stored, honoured"]
     running -. runner dies .-> lost
+    cancelling -. runner dies .-> lost
 ```
 
 A job lives in its own folder under the state directory. Its runner holds a lock for as long as it lives, so whether a
