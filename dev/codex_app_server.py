@@ -485,7 +485,10 @@ def compare(file_source, app_source):
     everything = lambda cwd: True  # noqa: E731  (the copy is compared machine-wide, not per repository)
     app_threads = {summary.id: summary for summary in app_source.list_threads(everything).threads}
     compared, unreadable, missing, mismatches = 0, {}, [], []
-    listing = file_source.list_threads(everything)
+    try:
+        listing = file_source.list_threads(everything)
+    except Exception as exc:
+        raise AppServerError("The file reader failed to list threads.") from exc
     for summary in listing.threads:
         # Only the reader's own refusal leaves a thread out by design; any other error is a reader fault or an
         # unreadable file, and stops the run rather than shrinking what was compared.

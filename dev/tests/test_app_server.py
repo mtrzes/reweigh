@@ -446,6 +446,9 @@ class AppServerTests(unittest.TestCase):
                   patch.object(CodexFilesSource, "read_thread", side_effect=fault)):
                 with self.assertRaisesRegex(app.AppServerError, "file reader failed"):
                     app.compare(CodexFilesSource(self.home), app.AppServerSource(client))
+        with self.client() as client, patch.object(CodexFilesSource, "list_threads", side_effect=ImportError):
+            with self.assertRaisesRegex(app.AppServerError, "file reader failed to list"):
+                app.compare(CodexFilesSource(self.home), app.AppServerSource(client))
 
     def test_shadow_reader_pages_past_turns_with_no_agent_messages(self):
         self.add_thread("id", [
