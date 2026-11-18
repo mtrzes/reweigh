@@ -1,0 +1,404 @@
+{
+  "ask_claude": {
+    "properties": {
+      "context": {
+        "default": "",
+        "title": "Context",
+        "type": "string"
+      },
+      "conversation_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Id"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "ref": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Ref"
+      },
+      "seed_thread": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Seed Thread"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "prompt",
+      "working_directory"
+    ],
+    "title": "ask_claudeArguments",
+    "type": "object"
+  },
+  "ask_codex": {
+    "properties": {
+      "context": {
+        "default": "",
+        "title": "Context",
+        "type": "string"
+      },
+      "conversation_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Id"
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Model"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "reasoning_effort": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reasoning Effort"
+      },
+      "ref": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Ref"
+      },
+      "seed_thread": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Seed Thread"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "prompt",
+      "working_directory"
+    ],
+    "title": "ask_codexArguments",
+    "type": "object"
+  },
+  "cancel_consultation": {
+    "properties": {
+      "job_id": {
+        "title": "Job Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "cancel_consultationArguments",
+    "type": "object"
+  },
+  "get_consultation": {
+    "properties": {
+      "job_id": {
+        "title": "Job Id",
+        "type": "string"
+      },
+      "wait_seconds": {
+        "default": 0,
+        "title": "Wait Seconds",
+        "type": "number"
+      }
+    },
+    "required": [
+      "job_id"
+    ],
+    "title": "get_consultationArguments",
+    "type": "object"
+  },
+  "list_claude_threads": {
+    "properties": {
+      "limit": {
+        "default": 20,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "working_directory"
+    ],
+    "title": "list_claude_threadsArguments",
+    "type": "object"
+  },
+  "list_codex_models": {
+    "properties": {},
+    "title": "list_codex_modelsArguments",
+    "type": "object"
+  },
+  "list_codex_threads": {
+    "properties": {
+      "limit": {
+        "default": 20,
+        "title": "Limit",
+        "type": "integer"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "working_directory"
+    ],
+    "title": "list_codex_threadsArguments",
+    "type": "object"
+  },
+  "read_claude_thread": {
+    "properties": {
+      "max_messages": {
+        "default": 3,
+        "title": "Max Messages",
+        "type": "integer"
+      },
+      "thread": {
+        "title": "Thread",
+        "type": "string"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "working_directory",
+      "thread"
+    ],
+    "title": "read_claude_threadArguments",
+    "type": "object"
+  },
+  "read_codex_thread": {
+    "properties": {
+      "max_messages": {
+        "default": 3,
+        "title": "Max Messages",
+        "type": "integer"
+      },
+      "thread": {
+        "title": "Thread",
+        "type": "string"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "working_directory",
+      "thread"
+    ],
+    "title": "read_codex_threadArguments",
+    "type": "object"
+  },
+  "start_claude_consultation": {
+    "properties": {
+      "context": {
+        "default": "",
+        "title": "Context",
+        "type": "string"
+      },
+      "conversation_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Id"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "ref": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Ref"
+      },
+      "seed_thread": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Seed Thread"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "prompt",
+      "working_directory"
+    ],
+    "title": "start_claude_consultationArguments",
+    "type": "object"
+  },
+  "start_codex_consultation": {
+    "properties": {
+      "context": {
+        "default": "",
+        "title": "Context",
+        "type": "string"
+      },
+      "conversation_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Conversation Id"
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Model"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "reasoning_effort": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reasoning Effort"
+      },
+      "ref": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Ref"
+      },
+      "seed_thread": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Seed Thread"
+      },
+      "working_directory": {
+        "title": "Working Directory",
+        "type": "string"
+      }
+    },
+    "required": [
+      "prompt",
+      "working_directory"
+    ],
+    "title": "start_codex_consultationArguments",
+    "type": "object"
+  }
+}

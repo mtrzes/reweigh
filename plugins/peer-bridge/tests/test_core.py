@@ -526,7 +526,9 @@ class JobRuleTests(unittest.TestCase):
     def test_job_expiry_and_wait(self):
         keep = c.JOB_RETENTION_SECONDS
         done = c.job_outcome("completed", 2000.0)
-        cases = ((done, 2000.0 + keep + 1, True), (done, 2000.0 + keep - 1, False), (None, 1000.0 + keep + 1, True))
+        # Only longer ago than the retention period: a job exactly that old is kept.
+        cases = ((done, 2000.0 + keep + 1, True), (done, 2000.0 + keep, False), (done, 2000.0 + keep - 1, False),
+                 (None, 1000.0 + keep + 1, True))
         for outcome, now, expected in cases:
             with self.subTest(outcome=outcome, now=now):
                 self.assertEqual(c.job_expired(self.RECORD, outcome, now), expected)

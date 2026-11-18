@@ -9,7 +9,7 @@ async def run_to_completion(cleanup):
     A signal cancels the CLI task once per delivery, and anyio, which serves MCP requests, cancels a cancelled request
     again at every await; neither may cut short stopping the peer, removing its checkout or cancelling a job.
     """
-    import anyio  # installed with mcp
+    import anyio
 
     task = asyncio.ensure_future(cleanup)
     cancellation = None
