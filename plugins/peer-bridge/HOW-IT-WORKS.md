@@ -84,10 +84,13 @@ deadline, cancellation of a queued job with no runner takes effect immediately. 
 the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
 `failed` with a fixed error. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
 published during creation. A start that cannot read its job once the runner is launched cancels the job, since
-the caller never learns its ID; if that cancellation fails too, the error names the job's ID.
+the caller never learns its ID; if that cancellation fails too, the error names the job's ID. A start that finds the
+runner already claiming the job reports it `queued`. The job module, `jobs.py`, owns a start from publishing the job
+to returning its ID; the bridge checks the request first.
 
 Each status read or cancellation waits at most one second for the lock on the job's state, then reports that the job
-is busy. The runner can respond to `SIGTERM` or `SIGHUP` while waiting for the lock.
+is busy. Cancelling the job of a failed or cancelled start waits as long as the lock's holder needs. The runner can
+respond to `SIGTERM` or `SIGHUP` while waiting for the lock, and job cleanup skips a job whose lock is held.
 
 Job cleanup removes only folders named with a canonical job UUID, optionally preceded by `.staging-` or `.deleting-`.
 

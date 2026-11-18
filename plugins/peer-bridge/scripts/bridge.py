@@ -32,16 +32,13 @@ from consultation import (
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
 )
-from jobs import LOCK_BUSY, UNKNOWN_JOB, JobStore, run_job, spawn_runner
+from cleanup import run_to_completion
+from jobs import JobStore, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
-START_UNCONFIRMED = (
-    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
-    "with that job ID."
-)
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
@@ -81,17 +78,6 @@ def is_conversation_id(name):
 
 def state_directory():
     return consultation.state_directory(os.environ, Path.home())
-
-
-@contextmanager
-def job_store_errors():
-    """Report filesystem failures in the job store as fixed messages; a job that vanished meanwhile is unknown."""
-    try:
-        yield
-    except FileNotFoundError as exc:
-        raise BridgeError(UNKNOWN_JOB) from exc
-    except OSError as exc:
-        raise BridgeError("Cannot read or write the consultation job files.") from exc
 
 
 class SessionStore:
@@ -258,29 +244,6 @@ async def read_output(stream, chunks):
         if size > MAX_OUTPUT_BYTES:
             raise BridgeError("Consultation output exceeded the size limit. Ask a narrower question.")
         chunks.append(chunk)
-
-
-async def run_to_completion(cleanup):
-    """Await a cleanup step to its end even if the caller is cancelled meanwhile, then pass the cancellation on.
-
-    A signal cancels the CLI task once per delivery, and anyio, which serves MCP requests, cancels a cancelled request
-    again at every await; neither may cut short stopping the peer or removing its checkout.
-    """
-    import anyio  # installed with mcp
-
-    task = asyncio.ensure_future(cleanup)
-    cancellation = None
-    with anyio.CancelScope(shield=True):
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                # Keep the first: anyio recognises its own cancellation by the message.
-                if cancellation is None:
-                    cancellation = exc
-    if cancellation is not None:
-        raise cancellation
-    return task.result()
 
 
 async def peer_exit_status(status):
@@ -603,50 +566,7 @@ class Bridge:
         request = {"provider": provider, "prompt": prompt, "working_directory": str(directory), "context": context,
                    "conversation_id": conversation_id or None, "ref": ref or None, "seed_thread": seed_thread or None,
                    "model": model, "reasoning_effort": reasoning_effort}
-        # Job files are read and written in a worker thread: a lock wait never holds up the MCP event loop.
-        with job_store_errors():
-            await asyncio.to_thread(self.jobs.prune, time.time())
-            # A cancelled await does not stop its worker thread, so creation is let finish and its job cancelled:
-            # a job published after the caller gave up would hold the prompt with nobody to read or cancel it.
-            creating = asyncio.ensure_future(asyncio.to_thread(self.jobs.create, provider, directory, request))
-            try:
-                job_id = await asyncio.shield(creating)
-            except asyncio.CancelledError:
-                await run_to_completion(self.discard_created(creating, provider))
-                raise
-            try:
-                self.spawn(job_id)
-            except OSError as exc:
-                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
-                raise BridgeError("Cannot start the consultation runner.") from exc
-            try:
-                try:
-                    return await asyncio.to_thread(self.jobs.view, job_id, {provider})
-                except BridgeError as exc:
-                    if str(exc) != LOCK_BUSY:
-                        raise
-                    # The runner is busy with the job already: the caller still needs its ID.
-                    return {"job_id": job_id, "provider": provider, "state": "queued"}
-            except asyncio.CancelledError:
-                # The caller will never learn this job's ID, so it is cancelled rather than left to run.
-                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
-                raise
-            except (BridgeError, OSError) as exc:
-                # Nor when the job cannot be read. Cancelling reads the job first, so it can fail the same way; then
-                # the ID is the only way left to reach the job.
-                try:
-                    await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
-                except (BridgeError, OSError):
-                    raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from exc
-                raise
-
-    async def discard_created(self, creating, provider):
-        """Cancel the job a creation published after its caller was cancelled, if it published one."""
-        try:
-            job_id = await creating
-        except Exception:
-            return
-        await asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True)
+        return await start_job(self.jobs, provider, directory, request, self.spawn)
 
     async def job(self, job_id, providers, wait_seconds=0):
         """Return a job's state and, once finished, its result; wait up to wait_seconds for it to finish."""

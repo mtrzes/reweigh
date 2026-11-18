@@ -184,10 +184,11 @@ from pathlib import Path
 sys.argv = sys.argv[1:]
 sys.path.insert(0, str(Path(sys.argv[0]).parent))
 import bridge
+import jobs
 
 discarding = threading.Event()
-create = bridge.JobStore.create
-discard = bridge.Bridge.discard_created
+create = jobs.JobStore.create
+discard = jobs.abandon_created
 
 def create_and_signal(store, *arguments):
     job_id = create(store, *arguments)
@@ -196,12 +197,12 @@ def create_and_signal(store, *arguments):
     assert discarding.wait({DEADLINE_SECONDS})
     return job_id
 
-async def discard_created(client, *arguments):
+async def abandon_created(*arguments):
     discarding.set()
-    await discard(client, *arguments)
+    await discard(*arguments)
 
-bridge.JobStore.create = create_and_signal
-bridge.Bridge.discard_created = discard_created
+jobs.JobStore.create = create_and_signal
+jobs.abandon_created = abandon_created
 bridge.main()
 """
         completed = subprocess.run(
