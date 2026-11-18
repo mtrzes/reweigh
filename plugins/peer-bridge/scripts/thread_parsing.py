@@ -401,9 +401,12 @@ def claude_cwd_search(identifier):
 
 def claude_title_search(belongs, identifier):
     """Search for the title of the session's current stay in the repository: the stay's start decides, else the
-    last window's records."""
+    last window's records. Only the active branch can enter the repository, as for replies; if its ancestry is still
+    unresolved in the last window, the session has no title here."""
     def search(records, final):
-        scan = scan_claude(records, belongs, title_only=True, identifier=identifier)
+        scan = scan_claude(records, belongs, title_only=True, identifier=identifier, whole=records.from_start)
+        if scan.ancestry_gap:
+            return None if final else EARLIER
         return scan.title if scan.segment_start or final else EARLIER
 
     return search
@@ -466,9 +469,10 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
     A record that names a working directory sets where the following records are; belongs says whether a directory is
     in the requested repository, worktrees included. A move outside it drops everything found so far, also when the
     session comes back later, and records before the first one that names a directory are not counted: at a window
-    cut from the file's end, nothing says where they were.
+    cut from the file's end, nothing says where they were. title_only reads no message fields, only where the
+    session is and its title records.
     """
-    active = None if title_only else claude_active_branch(records, identifier, whole)
+    active = claude_active_branch(records, identifier, whole)
     if active is EARLIER:
         return Scan(None, [], ancestry_gap=True)
     latest, messages, turn_id, titles = None, [], None, {}

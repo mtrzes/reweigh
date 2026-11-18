@@ -346,12 +346,20 @@ class ReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ImportError, "incompatible architecture"):
                 history_capture.zstandard_module()
 
-    def test_a_claude_read_returns_the_title_it_was_selected_by(self):
+    def test_a_claude_read_takes_its_title_from_the_bytes_it_reads(self):
         # The last replies fit the first tail window; the title lies further back, where only the title search looks.
         replies = [entry for _ in range(60) for entry in (claude_prompt(), claude_reply("x" * 5000))]
-        claude_session(self.claude_home, self.project, claude_prompt(),
-                       {"type": "custom-title", "customTitle": "Early title"}, *replies)
-        self.assertEqual(self.read("claude", "Early title")["name"], "Early title")
+        _, path = claude_session(self.claude_home, self.project, claude_prompt(),
+                                 {"type": "custom-title", "customTitle": "Early title"}, *replies)
+        real_match = thread_reader.match_thread
+
+        def retitle_after_selection(threads, thread):
+            summary = real_match(threads, thread)
+            path.write_text(path.read_text(encoding="utf-8").replace("Early title", "Later title"), encoding="utf-8")
+            return summary
+
+        with patch.object(thread_reader, "match_thread", retitle_after_selection):
+            self.assertEqual(self.read("claude", "Early title")["name"], "Later title")
 
     def test_claude_sessions_are_listed_and_read_by_the_same_rules(self):
         home = self.claude_home

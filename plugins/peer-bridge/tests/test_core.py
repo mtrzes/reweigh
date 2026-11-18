@@ -654,6 +654,22 @@ class ClaudeParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not know"):
             t.claude_snapshot(self.SUMMARY, self.scan([self.user("q"), self.assistant("a", "new_reason")]), 3)
 
+    def test_an_abandoned_branch_cannot_bring_a_title_into_the_repository(self):
+        # Rooted elsewhere; an abandoned child names the repository; after a rewind to the foreign parent a title is
+        # recorded; only then does the active branch enter the repository.
+        records = [
+            self.user("q1", "u1", "/other") | {"parentUuid": None},
+            self.assistant("a1", "end_turn", "/other", uuid="a1", parentUuid="u1"),
+            self.user("q2", "u2") | {"parentUuid": "a1"},
+            self.assistant("a2", "end_turn", uuid="a2", parentUuid="u2"),
+            {"type": "custom-title", "customTitle": "Foreign"},
+            self.user("q3", "u3") | {"parentUuid": "a1"},
+            self.assistant("a3", "end_turn", uuid="a3", parentUuid="u3"),
+        ]
+        for title_only in (False, True):
+            with self.subTest(title_only=title_only):
+                self.assertIsNone(t.scan_claude(records, self.belongs, title_only=title_only).title)
+
     def test_malformed_claude_prompt_and_reply_fields_are_refused(self):
         cases = (
             self.user(5, "u2"), self.user({"text": "q2"}, "u2"), self.user([{"type": "text", "text": ["q2"]}], "u2"),
