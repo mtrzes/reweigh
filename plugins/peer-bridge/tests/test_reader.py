@@ -171,6 +171,7 @@ class ReaderTests(unittest.TestCase):
 
         with patch.object(history_capture, "READ_POINTS", ArchiveAfterHeader()):
             rows = self.threads("codex")["threads"]
+        self.assertEqual((path.exists(), (archive / path.name).exists()), (False, True))
         self.assertEqual([row["id"] for row in rows], [other, moving])
         self.assertEqual(rows[1]["updated_at"], "1970-01-01T00:16:40+00:00")
 
@@ -228,6 +229,18 @@ class ReaderTests(unittest.TestCase):
         head_again, tail, from_start = decompressed(limit=4096)
         self.assertEqual((head_again, len(tail), from_start), (head, 4096, False))
         self.assertTrue(whole.endswith(tail))
+
+    def test_a_compressed_rollout_is_refused_past_its_decoded_budget(self):
+        identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
+                                        suffix=".jsonl.zst", frames=3)
+        with history_capture.open_history(path) as source:
+            decoded = len(history_capture.decompress_history(source)[1])
+        # Each frame fits the budget; together they do not.
+        with patch.object(history_capture, "MAX_DECOMPRESSED_BYTES", decoded - 1):
+            with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
+                self.read("codex", identifier)
+        with patch.object(history_capture, "MAX_DECOMPRESSED_BYTES", decoded):
+            self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
 
     def test_cut_off_or_damaged_compressed_rollouts_are_refused_with_a_reason(self):
         # Several zstd blocks of hard-to-compress text, so a file cut in half still decodes its first lines.
@@ -330,6 +343,33 @@ class ReaderTests(unittest.TestCase):
             self.assertRaisesRegex(ThreadUnavailable, "^The thread's history file changed while it was read.$"),
         ):
             self.read("codex", "Moving")
+
+    def test_a_path_that_names_another_file_after_it_was_opened_is_read_again(self):
+        thread, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Opened."))
+        _, replacement = codex_thread(self.root / "elsewhere-codex", self.project, codex_turn("t1", "Replaced."),
+                                      meta={"id": thread})
+        moved = self.root / "moved-day"
+
+        class ReplaceDirectoryAfterOpen(history_capture.ReadPoints):
+            def opened(self, read_path, attempt):
+                if attempt == 0:
+                    # Moving the enclosing directory leaves the open file's own metadata untouched: only the path
+                    # check sees that the path now names another file.
+                    path.parent.rename(moved)
+                    path.parent.mkdir()
+                    os.replace(replacement, path)
+
+        with patch.object(history_capture, "READ_POINTS", ReplaceDirectoryAfterOpen()):
+            self.assertEqual(self.read("codex", thread)["messages"][0]["text"], "Replaced.")
+
+    def test_a_history_below_a_symlinked_directory_is_not_opened(self):
+        _, path = claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."))
+        moved = self.root / "moved-project"
+        path.parent.rename(moved)
+        path.parent.symlink_to(moved)
+        self.assertTrue(path.is_file())
+        with self.assertRaises(OSError):
+            history_capture.open_history(path, self.claude_home)
 
     def test_an_io_error_in_the_identity_check_is_not_reported_as_a_change(self):
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."))
