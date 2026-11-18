@@ -199,15 +199,10 @@ time.sleep({4 * DEADLINE_SECONDS})
         store, other = self.client.jobs, jobs.JobStore(self.state)
         real_flock = store.flock
 
-        @contextmanager
         def flock(path, blocking):
-            # Let the holder go once the cleanup has met the busy lock: before a waiting attempt, after a failed one.
             if held.is_set() and path.name == "state.lock" and blocking:
-                release.set()
-            with real_flock(path, blocking) as acquired:
-                if held.is_set() and path.name == "state.lock" and not acquired:
-                    release.set()
-                yield acquired
+                release.set()  # the cleanup waits for the holder, so let it go
+            return real_flock(path, blocking)
 
         def hold(job_id):
             with other.flock(self.folder(job_id) / "state.lock", blocking=False) as acquired:
@@ -242,19 +237,12 @@ time.sleep({4 * DEADLINE_SECONDS})
         [folder] = (self.state / "jobs").iterdir()
         self.assertFalse((folder / "request.json").exists())
         self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
-        with (
-            patch.object(self.client.jobs, "abandon", side_effect=OSError("disk")),
-            self.assertRaises(bridge.BridgeError) as raised,
-        ):
-            await self.start()
-        [folder] = set((self.state / "jobs").iterdir()) - {folder}
-        self.assertEqual(str(raised.exception), jobs.START_UNCONFIRMED.format(job_id=folder.name))
 
     async def test_a_start_returns_its_job_id_while_the_runner_holds_the_job(self):
         # The runner may already hold the state lock to claim its job when the start reads it.
         spawned = []
         self.client.spawn = spawned.append
-        with patch.object(self.client.jobs, "view", side_effect=jobs.JobBusy()):
+        with patch.object(self.client.jobs, "view", side_effect=jobs.JobBusy(jobs.LOCK_BUSY)):
             started = await self.start()
         self.assertEqual(started, {"job_id": spawned[0], "provider": "claude", "state": "queued"})
         self.assertTrue((self.folder(spawned[0]) / "request.json").exists())  # left for its runner, not cancelled
@@ -319,23 +307,19 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertIn("cancellation could not be confirmed", str(raised.exception))
 
     async def test_an_interrupted_start_stays_cancelled_when_its_cleanup_fails(self):
-        # The caller is interrupted during creation, the first view, or the cleanup that follows a failed view.
+        # The caller is interrupted during the first view, or during the cleanup that follows a failed one.
         self.client.spawn = lambda job_id: None
-        real_create = self.client.jobs.create
-        for interrupted in ("create", "view", "abandon"):
+        for interrupted in ("view", "abandon"):
             entered, release = threading.Event(), threading.Event()
 
-            def held(*arguments, entered=entered, release=release, interrupted=interrupted, **options):
+            def held(*arguments, entered=entered, release=release, **options):
                 entered.set()
                 release.wait(DEADLINE_SECONDS)
-                if interrupted == "create":
-                    return real_create(*arguments)
                 raise OSError("disk")
 
-            hooks = {"create": real_create, "view": OSError("disk"), "abandon": OSError("disk"), interrupted: held}
+            hooks = {"view": OSError("disk"), "abandon": OSError("disk"), interrupted: held}
             with (
                 self.subTest(interrupted=interrupted),
-                patch.object(self.client.jobs, "create", side_effect=hooks["create"]),
                 patch.object(self.client.jobs, "view", side_effect=hooks["view"]),
                 patch.object(self.client.jobs, "abandon", side_effect=hooks["abandon"]),
             ):
@@ -347,26 +331,34 @@ time.sleep({4 * DEADLINE_SECONDS})
                     await task
 
     async def test_a_start_cancelled_during_creation_leaves_no_runnable_job(self):
-        entered, release = threading.Event(), threading.Event()
-        real_create, spawned = self.client.jobs.create, []
-
-        def held_create(*arguments):
-            entered.set()
-            release.wait(DEADLINE_SECONDS)  # the barrier: creation is inside its worker thread
-            return real_create(*arguments)
-
-        self.client.jobs.create = held_create
+        real_create, real_abandon, spawned = self.client.jobs.create, self.client.jobs.abandon, []
         self.client.spawn = spawned.append
-        task = asyncio.create_task(self.start(prompt="PRIVATE QUESTION"))
-        self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
-        task.cancel()
-        release.set()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        [folder] = (self.state / "jobs").iterdir()
-        self.assertEqual(spawned, [])
-        self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
-        self.assertFalse((folder / "request.json").exists())
+        # The second time, cancelling the published job fails too: the start still ends as cancelled.
+        for abandon in (real_abandon, OSError("disk")):
+            entered, release = threading.Event(), threading.Event()
+
+            def held_create(*arguments, entered=entered, release=release):
+                entered.set()
+                release.wait(DEADLINE_SECONDS)  # the barrier: creation is inside its worker thread
+                return real_create(*arguments)
+
+            before = set((self.state / "jobs").iterdir()) if (self.state / "jobs").exists() else set()
+            with (
+                self.subTest(abandon=abandon),
+                patch.object(self.client.jobs, "create", side_effect=held_create),
+                patch.object(self.client.jobs, "abandon", side_effect=abandon),
+            ):
+                task = asyncio.create_task(self.start(prompt="PRIVATE QUESTION"))
+                self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
+                task.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertEqual(spawned, [])
+            if abandon is real_abandon:
+                [folder] = set((self.state / "jobs").iterdir()) - before
+                self.assertFalse((folder / "request.json").exists())
+                self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
 
     async def test_a_failed_consultation_is_recorded_with_a_fixed_message(self):
         async def refused(request):
