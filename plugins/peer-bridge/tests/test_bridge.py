@@ -11,9 +11,12 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import anyio
@@ -21,8 +24,8 @@ import anyio
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
-    BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, bridge, codex_thread, codex_turn, consultation,
-    eventually_async, git, git_repository, read_pid, running,
+    BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, RecordingProbe, bridge, codex_thread, codex_turn,
+    consultation, eventually_async, git, git_repository, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
 
@@ -373,11 +376,9 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
         git_repository(self.project)
-        cases = (  # one row per fact: sign-in probes, the result's status field, the stderr tag, settings, git
-            ("claude", {"SIMULATED_SIGNED_IN": "0"}, {}, "Claude Code is not signed in"),
+        # One row per path a fact travels to the message; test_core holds the rules that read them.
+        cases = (  # the sign-in probe, the peer's stderr, the model settings, a real .git lookup
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
-            ("claude", {"SIMULATED_PEER_MODE": "api_error", "SIMULATED_API_STATUS": "401"}, {},
-             "Claude Code is not signed in"),
             ("claude", {"SIMULATED_FAILURE_TEXT": '[claude-code:unrecognized_model] {"model":"x"}'}, {},
              "Claude Code rejected the requested model."),
             ("codex", {"PEER_BRIDGE_CODEX_MODEL": "gpt-x"}, {}, "codex consultation failed (exit 1). Check CLI "
@@ -389,46 +390,80 @@ class ConsultationTests(BridgeTestCase):
             with self.subTest(provider=provider, environment=environment, arguments=arguments):
                 message = await self.failure_message(provider, environment, **arguments)
                 self.assertTrue(message.startswith(expected), message)
-        with patch.object(bridge, "run_command", wraps=bridge.run_command) as guarded:
-            message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
+        message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
         self.assertEqual(message, consultation.OUTSIDE_GIT)
-        self.assertEqual(guarded.await_args.args[0], [
-            "git", "-C", str(self.other_project), "rev-parse", "--path-format=absolute", "--git-common-dir",
-        ])
         self.assertEqual(list(self.state.glob("*.json")), [])
 
+    async def test_diagnosis_asks_the_probes_its_provider_and_resume_state_need(self):
+        git_repository(self.project)
+        for provider in ("claude", "codex"):
+            conversation = (await self.consult(provider))["conversation_id"]
+            session = json.loads((self.state / f"{conversation}.json").read_text())["backend_session_id"]
+            for resumed, arguments, answers, expected in (
+                (None, {}, {"signed_in": False}, "is not signed in"),
+                (session, {"conversation_id": conversation}, {"signed_in": True, "history_present": False},
+                 "no longer has this conversation's history"),
+            ):
+                with self.subTest(provider=provider, resumed=bool(resumed)):
+                    self.client.probe = RecordingProbe(answers)
+                    message = await self.failure_message(provider, {}, **arguments)
+                    self.assertIn(expected, message)
+                    self.assertEqual(self.client.probe.asked,
+                                     [(name, resumed) for name in consultation.failure_probes(provider, bool(resumed))])
+
+    async def test_the_history_lookup_never_starts_once_the_peers_budget_is_spent(self):
+        looked_up = []
+        source = SimpleNamespace(rollouts=lambda: looked_up.append(True) or {"session": []})
+        # The clock as the budget, the wait and the worker read it; the second time the worker starts too late.
+        for readings, expected in (((100.0, 100.0, 100.0), True), ((100.0, 100.0, 106.0), None)):
+            with self.subTest(readings=readings):
+                looked_up.clear()
+                clock = iter(readings)
+                scope = bridge.Conversation(None, None, lambda: next(clock), None)
+                probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(5), source)
+                self.assertIs(await probe.observe("history_present", "session"), expected)
+                self.assertEqual(looked_up, [True] if expected else [])
+
+    async def test_the_git_entry_lookup_gives_up_on_a_volume_that_stops_answering(self):
+        release = threading.Event()
+        scope = bridge.Conversation(None, None, time.monotonic, None)
+        probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(30), None)
+        try:
+            with (
+                patch.object(bridge, "git_entry_found", lambda directory, lstat: release.wait(DEADLINE_SECONDS)),
+                patch.object(bridge, "GIT_ENTRY_PROBE_SECONDS", 0),
+            ):
+                self.assertIsNone(await probe.observe("in_git_repository", None))
+        finally:
+            release.set()
+
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
+        git_repository(self.project)
         self.client.timeout = 5
         sign_in = str(self.peer), 2
         for peer_seconds, sign_in_seconds, expected in (
-            (3, 1, [sign_in, ("git", 1)]),
             (3, 2, [sign_in]),
             (5, 0, []),
         ):
-            with (
-                self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds),
-                patch.object(bridge, "time") as clock,
-                patch.object(bridge, "run_command") as guarded,
-            ):
-                clock.monotonic.return_value = 100
+            with self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds):
+                clock, guarded = SimpleNamespace(now=100.0), []
 
-                def command_result(command, prompt, directory, timeout, **options):
+                async def recording(command, prompt, directory, timeout, environment=None, lock=None):
+                    guarded.append((command[0], timeout, lock))
                     if prompt is not None:
-                        clock.monotonic.return_value += peer_seconds
+                        clock.now += peer_seconds
                         return 7, b"", b""
                     if command[1:] == ["login", "status"]:
-                        clock.monotonic.return_value += sign_in_seconds
+                        clock.now += sign_in_seconds
                     return 0, b"/project/.git\n", b""
 
-                guarded.side_effect = command_result
+                self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
                 message = await self.failure_message("codex", {})
                 self.assertEqual(message, "codex consultation failed (exit 7). Check CLI login, version, and "
                                  "permissions.")
-                peer, *probes = guarded.await_args_list
-                lock = peer.kwargs["lock"]
+                (_, _, lock), *probes = guarded
                 self.assertIsInstance(lock, int)
-                self.assertEqual([(call.args[0][0], call.args[3], call.kwargs.get("lock")) for call in probes],
-                                 [(executable, timeout, lock) for executable, timeout in expected])
+                self.assertEqual(probes, [(executable, timeout, lock) for executable, timeout in expected])
 
     async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
         # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any
@@ -837,6 +872,82 @@ class ConsultationTests(BridgeTestCase):
         await self.consult(ref="HEAD")
         names = [Path(line.split(" ", 1)[1]).name for line in self.registered_worktrees()]
         self.assertEqual(names, [self.project.name, "unmounted"])
+
+    async def test_checkout_preparation_shares_one_budget_and_removal_has_its_own(self):
+        git_repository(self.project)
+        clock, calls, step = SimpleNamespace(now=1000.0), [], 0
+        prepare, remove = bridge.CHECKOUT_PREPARATION_SECONDS, bridge.CHECKOUT_REMOVAL_SECONDS
+
+        async def recording(command, prompt, directory, timeout, **options):
+            name = "peer" if prompt is not None else command[3].removeprefix(f"--work-tree={command[2]}")
+            calls.append((name or command[4], timeout))
+            clock.now += step
+            return await bridge.run_command(command, prompt, directory, timeout, **options)
+
+        third = prepare / 3
+        for step, leftover, expected in (
+            (10, False, [("rev-parse", prepare), ("rev-parse", prepare - 10), ("worktree", prepare - 20),
+                         ("worktree", prepare - 30), ("config", prepare - 40), ("read-tree", prepare - 50),
+                         ("peer", self.client.timeout), ("worktree", remove)]),
+            # Out of time before the checkout is added: nothing more starts, and the removal still runs.
+            (third, False, [("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
+                            ("worktree", remove)]),
+            # Out of time while removing a checkout left in place, after the sweep's own call: the final removal, with
+            # its own allowance, removes it.
+            (third, True, [("rev-parse", remove), ("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
+                           ("worktree", remove), ("worktree", remove - third)]),
+        ):
+            arguments = {"ref": "HEAD"}
+            if leftover:
+                self.client.store = self.store
+                arguments = {"conversation_id": (await self.consult(ref="HEAD"))["conversation_id"]}
+                folder = self.state / "worktrees" / arguments["conversation_id"]
+                folder.mkdir()
+                (folder / ".git").write_text("gitdir: /unmounted\n")  # so the sweep leaves the folder alone
+            calls.clear()
+            self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
+            with self.subTest(step=step, leftover=leftover):
+                if step == 10:
+                    await self.consult(**arguments)
+                else:
+                    with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
+                        await self.consult(**arguments)
+                self.assertEqual(calls, expected)
+                self.assertEqual(list((self.state / "worktrees").iterdir()), [])
+                self.assertEqual(len(self.registered_worktrees()), 1)  # only the project's own
+
+    async def test_a_checkout_that_cannot_be_removed_keeps_the_reply_and_is_swept_later(self):
+        git_repository(self.project)
+        consulted = []
+
+        async def failing_removal(command, prompt, directory, timeout, **options):
+            if prompt is not None:
+                consulted.append(True)
+            elif consulted and command[3] == "worktree":
+                return 128, b"", b""  # git cannot remove or list the worktree after the peer has answered
+            return await bridge.run_command(command, prompt, directory, timeout, **options)
+
+        self.client.store = bridge.SessionStore(self.state, runner=failing_removal)
+        reply = await self.consult(ref="HEAD")
+        self.assertEqual(reply["reply"], "claude consulted: Explain the query.")
+        self.assertEqual(len(self.registered_worktrees()), 2)
+        self.client.store = self.store
+        await self.consult()
+        self.assertEqual(len(self.registered_worktrees()), 1)
+
+    async def test_a_conversation_lock_outlives_its_context_while_a_shared_descriptor_holds_it(self):
+        # A guard inherits the locked descriptor, sharing its open file description, as a duplicate does here.
+        identifier = str(uuid.uuid4())
+        self.state.mkdir(mode=0o700)
+        with self.store.holding(identifier) as held:
+            inherited = os.dup(held.descriptor)
+        try:
+            with self.store.holding(identifier) as other:
+                self.assertIsNone(other)
+        finally:
+            os.close(inherited)
+        with self.store.holding(identifier) as other:
+            self.assertIsNotNone(other)
 
     async def test_thread_reading_and_seed_thread_are_off_unless_turned_on(self):
         git_repository(self.project)

@@ -1,11 +1,14 @@
 """Table-driven tests for the pure consultation and thread rules. No process, file or environment access."""
 
+import dataclasses
 import json
 import os
+import stat
 import sys
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -367,6 +370,42 @@ class OutcomeTests(unittest.TestCase):
             with self.subTest(provider=provider, output=output, errors=errors):
                 self.assertEqual(c.output_signals(provider, output, errors), expected)
 
+    def test_codex_finds_a_repository_by_a_git_entry_in_the_directory_or_a_parent(self):
+        # Codex checks only for a .git entry, of any kind, so an empty .git file counts and a bare repository does not.
+        directory, folder, regular = Path("/home/me/project/sub"), stat.S_IFDIR, stat.S_IFREG
+        cases = (
+            ({}, False),
+            ({"/home/me/project/sub/.git": folder}, True),
+            ({"/home/me/project/.git": regular}, True),
+            ({"/.git": stat.S_IFLNK}, True),
+            ({"/home/me/project/.git": regular, "/home": PermissionError()}, True),
+            ({"/home/me/.git": PermissionError()}, None),
+            ({"/home": PermissionError()}, None),
+            ({"/home/me/project/sub": regular}, None),
+            ({"/home/me/project/sub": stat.S_IFLNK}, None),
+            ({"/home/me/project/sub": FileNotFoundError()}, None),
+        )
+        for entries, expected in cases:
+            def lstat(path, entries=entries):
+                entry = entries.get(str(path), folder if path.name != ".git" else FileNotFoundError())
+                if isinstance(entry, BaseException):
+                    raise entry
+                return SimpleNamespace(st_mode=entry)
+
+            with self.subTest(entries=entries):
+                self.assertIs(c.git_entry_found(directory, lstat), expected)
+
+    def test_failure_probes(self):
+        for provider, resuming, expected in (
+            ("claude", False, ("signed_in",)),
+            ("claude", True, ("signed_in", "history_present")),
+            ("codex", False, ("signed_in", "in_git_repository")),
+            ("codex", True, ("signed_in", "history_present", "writer_lock_present", "in_git_repository")),
+        ):
+            with self.subTest(provider=provider, resuming=resuming):
+                self.assertEqual(c.failure_probes(provider, resuming), expected)
+                self.assertLessEqual(set(expected), {field.name for field in dataclasses.fields(c.FailureFacts)})
+
     def test_failure_message_names_a_cause_only_when_the_facts_establish_it(self):
         generic = "GENERIC"
         F = c.FailureFacts
@@ -418,6 +457,14 @@ class JobRuleTests(unittest.TestCase):
         for record, outcome, alive, now, cancel, expected in cases:
             with self.subTest(record=record, outcome=outcome, alive=alive, now=now, cancel=cancel):
                 self.assertEqual(c.job_state(record, outcome, alive, now, cancel), expected)
+
+    def test_stopped_outcome(self):
+        for state, error in (("lost", c.LOST_JOB), ("cancelled", c.CANCELLED_JOB)):
+            with self.subTest(state=state):
+                self.assertEqual(c.stopped_outcome(state, 7.0), {"state": state, "finished_at": 7.0, "error": error})
+        for state in ("queued", "running", "cancelling", "completed", "failed"):
+            with self.subTest(state=state):
+                self.assertIsNone(c.stopped_outcome(state, 7.0))
 
     def test_job_view(self):
         done = c.job_outcome("completed", 1.0, result={"conversation_id": "conv", "reply": "hi", "provider": "codex"})
@@ -491,7 +538,7 @@ class RecordParsingTests(unittest.TestCase):
                     list(t.complete_records(data, from_start=True))
 
     def test_tail_decodes_only_during_iteration_and_stops_at_its_record_budget(self):
-        with patch.object(t, "MAX_TAIL_RECORDS", 2, create=True):
+        with patch.object(t, "MAX_TAIL_RECORDS", 2):
             records = iter(t.complete_records(b'{"a": 1}\n{}\n{bad}\n', True))
             self.assertEqual(next(records), {"a": 1})
             self.assertEqual(next(records), {})

@@ -30,6 +30,30 @@ CLAUDE = {"claude"}
 LATER = consultation.JOB_RETENTION_SECONDS + 60
 
 
+class RequestFormatTests(unittest.TestCase):
+    """The persisted request, written by start and read by the runner: pure, no files."""
+
+    def test_job_request_round_trips_and_reads_requests_written_before_model_choices(self):
+        written = jobs.job_request("codex", "Why?", Path("/project"), "", "", None, "Review", "gpt-6-astra", "xhigh")
+        self.assertEqual(written, {"provider": "codex", "prompt": "Why?", "working_directory": "/project",
+                                   "context": "", "conversation_id": None, "ref": None, "seed_thread": "Review",
+                                   "model": "gpt-6-astra", "reasoning_effort": "xhigh"})
+        earlier = {key: value for key, value in written.items() if key not in {"model", "reasoning_effort"}}
+        for name, saved, expected in (
+            ("written", written, written),
+            ("before model choices", earlier, earlier | {"model": None, "reasoning_effort": None}),
+            ("extra field", written | {"later": 1}, written),
+            ("not an object", ["Why?"], None),
+            ("unknown provider", written | {"provider": "other"}, None),
+            ("missing prompt", {key: value for key, value in written.items() if key != "prompt"}, None),
+            ("missing ref", {key: value for key, value in written.items() if key != "ref"}, None),
+            ("number as text", written | {"context": 1}, None),
+            ("number as choice", written | {"model": 1}, None),
+        ):
+            with self.subTest(request=name):
+                self.assertEqual(jobs.read_job_request(saved), expected)
+
+
 class JobTests(BridgeTestCase):
     def setUp(self):
         super().setUp()
@@ -169,31 +193,60 @@ time.sleep({4 * DEADLINE_SECONDS})
                 await bridge.sweep_worktrees(self.client.store)
                 self.assertFalse(checkout.exists())
 
-    async def test_start_cleanup_waits_out_a_busy_state_lock(self):
-        # The bounded lock wait is for callers; a start that must cancel its own job, or report it, cannot give up.
+    async def test_a_runner_that_cannot_start_leaves_its_job_cancelled_even_behind_a_busy_state_lock(self):
+        # A status read gives up on a busy lock; cancelling a job whose start failed, which nobody will learn of, waits.
         held, release = threading.Event(), threading.Event()
+        store, other = self.client.jobs, jobs.JobStore(self.state)
+        real_flock = store.flock
 
-        def busy_then_fail(job_id):
-            def hold():
-                with self.client.jobs.state_lock(self.folder(job_id)):
+        def flock(path, blocking):
+            if held.is_set() and path.name == "state.lock" and blocking:
+                release.set()  # the cleanup waits for the holder, so let it go
+            return real_flock(path, blocking)
+
+        def hold(job_id):
+            with other.flock(self.folder(job_id) / "state.lock", blocking=False) as acquired:
+                if acquired:
                     held.set()
                     release.wait(DEADLINE_SECONDS)
-            threading.Thread(target=hold, daemon=True).start()
-            held.wait(DEADLINE_SECONDS)
-            threading.Timer(jobs.STATE_LOCK_TIMEOUT_SECONDS + 0.5, release.set).start()
-            raise OSError("no runner")
 
-        self.client.spawn = busy_then_fail
-        with self.assertRaisesRegex(bridge.BridgeError, "Cannot start the consultation runner"):
-            await self.start()
+        def fail(job_id):
+            holder = threading.Thread(target=hold, args=(job_id,), daemon=True)
+            holder.start()
+            self.assertTrue(held.wait(DEADLINE_SECONDS))
+            self.addCleanup(holder.join, DEADLINE_SECONDS)
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        self.client.spawn = fail
+        with patch.object(store, "flock", flock), patch.object(jobs, "STATE_LOCK_TIMEOUT_SECONDS", 0):
+            with self.assertRaisesRegex(bridge.BridgeError, "Cannot start the consultation runner"):
+                await self.start(prompt="PRIVATE QUESTION")
+        self.assertTrue(release.is_set())
         [folder] = (self.state / "jobs").iterdir()
         self.assertFalse((folder / "request.json").exists())
         self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
-        self.client.spawn = lambda job_id: None
-        with patch.object(self.client.jobs, "view", side_effect=bridge.BridgeError(jobs.LOCK_BUSY)):
+
+    async def test_a_runner_launch_that_fails_any_way_cancels_its_job_or_names_it(self):
+        # spawn can fail after the runner started, such as when only its reaper thread cannot start.
+        def started_then_failed(job_id):
+            raise RuntimeError("can't start new thread")
+
+        self.client.spawn = started_then_failed
+        with self.assertRaisesRegex(bridge.BridgeError, "Cannot start the consultation runner"):
+            await self.start(prompt="PRIVATE QUESTION")
+        [folder] = (self.state / "jobs").iterdir()
+        self.assertFalse((folder / "request.json").exists())
+        self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
+
+    async def test_a_start_returns_its_job_id_while_the_runner_holds_the_job(self):
+        # The runner may already hold the state lock to claim its job when the start reads it.
+        spawned = []
+        self.client.spawn = spawned.append
+        with patch.object(self.client.jobs, "view", side_effect=jobs.JobBusy(jobs.LOCK_BUSY)):
             started = await self.start()
-        self.assertEqual(started["state"], "queued")
-        self.assertTrue(self.folder(started["job_id"]).is_dir())
+        self.assertEqual(started, {"job_id": spawned[0], "provider": "claude", "state": "queued"})
+        self.assertTrue((self.folder(spawned[0]) / "request.json").exists())  # left for its runner, not cancelled
+        self.assertEqual((await self.client.job(spawned[0], CLAUDE))["state"], "queued")
 
     async def test_a_killed_runner_takes_its_peer_with_it_and_its_job_is_lost(self):
         with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang"}):
@@ -222,38 +275,90 @@ time.sleep({4 * DEADLINE_SECONDS})
             with self.subTest(directory=directory):
                 self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
 
-    async def test_a_runner_that_cannot_start_leaves_its_job_cancelled(self):
-        def fail(job_id):
-            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+    async def test_a_start_whose_first_view_fails_cancels_its_job_or_names_it(self):
+        # The caller learns a job's ID only from that view, so a job it cannot read is cancelled rather than left to
+        # run; if cancelling fails too, the failure carries the ID.
+        self.client.spawn = lambda job_id: None
+        jobs_folder = self.state / "jobs"
+        for failure, expected in (
+            (bridge.BridgeError("A fixed message."), "A fixed message."),
+            (OSError("disk"), "Cannot read or write the consultation job files."),
+        ):
+            with self.subTest(failure=failure):
+                before = set(jobs_folder.iterdir()) if jobs_folder.exists() else set()
+                with (
+                    patch.object(self.client.jobs, "view", side_effect=failure),
+                    self.assertRaises(bridge.BridgeError) as raised,
+                ):
+                    await self.start(prompt="PRIVATE QUESTION")
+                self.assertEqual(str(raised.exception), expected)
+                [folder] = set(jobs_folder.iterdir()) - before
+                self.assertFalse((folder / "request.json").exists())  # read first: a status read deletes it too
+                self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
+        before = set(jobs_folder.iterdir())
+        with (
+            patch.object(self.client.jobs, "view", side_effect=OSError("disk")),
+            patch.object(self.client.jobs, "abandon", side_effect=OSError("disk")),
+            self.assertRaises(bridge.BridgeError) as raised,
+        ):
+            await self.start()
+        [folder] = set(jobs_folder.iterdir()) - before
+        self.assertIn(folder.name, str(raised.exception))
+        self.assertIn("cancellation could not be confirmed", str(raised.exception))
 
-        self.client.spawn = fail
-        with self.assertRaisesRegex(bridge.BridgeError, "Cannot start the consultation runner"):
-            await self.start(prompt="PRIVATE QUESTION")
-        [folder] = (self.state / "jobs").iterdir()
-        self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
-        self.assertFalse((folder / "request.json").exists())
+    async def test_an_interrupted_start_stays_cancelled_when_its_cleanup_fails(self):
+        # The caller is interrupted during the first view, or during the cleanup that follows a failed one.
+        self.client.spawn = lambda job_id: None
+        for interrupted in ("view", "abandon"):
+            entered, release = threading.Event(), threading.Event()
+
+            def held(*arguments, entered=entered, release=release, **options):
+                entered.set()
+                release.wait(DEADLINE_SECONDS)
+                raise OSError("disk")
+
+            hooks = {"view": OSError("disk"), "abandon": OSError("disk"), interrupted: held}
+            with (
+                self.subTest(interrupted=interrupted),
+                patch.object(self.client.jobs, "view", side_effect=hooks["view"]),
+                patch.object(self.client.jobs, "abandon", side_effect=hooks["abandon"]),
+            ):
+                task = asyncio.create_task(self.start())
+                self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
+                task.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
 
     async def test_a_start_cancelled_during_creation_leaves_no_runnable_job(self):
-        entered, release = threading.Event(), threading.Event()
-        real_create, spawned = self.client.jobs.create, []
-
-        def held_create(*arguments):
-            entered.set()
-            release.wait(DEADLINE_SECONDS)  # the barrier: creation is inside its worker thread
-            return real_create(*arguments)
-
-        self.client.jobs.create = held_create
+        real_create, real_abandon, spawned = self.client.jobs.create, self.client.jobs.abandon, []
         self.client.spawn = spawned.append
-        task = asyncio.create_task(self.start(prompt="PRIVATE QUESTION"))
-        self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
-        task.cancel()
-        release.set()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        [folder] = (self.state / "jobs").iterdir()
-        self.assertEqual(spawned, [])
-        self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
-        self.assertFalse((folder / "request.json").exists())
+        # The second time, cancelling the published job fails too: the start still ends as cancelled.
+        for abandon in (real_abandon, OSError("disk")):
+            entered, release = threading.Event(), threading.Event()
+
+            def held_create(*arguments, entered=entered, release=release):
+                entered.set()
+                release.wait(DEADLINE_SECONDS)  # the barrier: creation is inside its worker thread
+                return real_create(*arguments)
+
+            before = set((self.state / "jobs").iterdir()) if (self.state / "jobs").exists() else set()
+            with (
+                self.subTest(abandon=abandon),
+                patch.object(self.client.jobs, "create", side_effect=held_create),
+                patch.object(self.client.jobs, "abandon", side_effect=abandon),
+            ):
+                task = asyncio.create_task(self.start(prompt="PRIVATE QUESTION"))
+                self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
+                task.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertEqual(spawned, [])
+            if abandon is real_abandon:
+                [folder] = set((self.state / "jobs").iterdir()) - before
+                self.assertFalse((folder / "request.json").exists())
+                self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
 
     async def test_a_failed_consultation_is_recorded_with_a_fixed_message(self):
         async def refused(request):
@@ -296,7 +401,7 @@ time.sleep({4 * DEADLINE_SECONDS})
         with self.assertRaises(asyncio.CancelledError):
             await runner
         view = await self.client.job(job_id, CLAUDE)
-        self.assertEqual((view["state"], view["error"]), ("cancelled", jobs.CANCELLED))
+        self.assertEqual((view["state"], view["error"]), ("cancelled", consultation.CANCELLED_JOB))
 
     async def test_the_runner_can_be_cancelled_while_its_state_lock_is_held(self):
         for phase in ("claim", "reply", "cancel"):
@@ -431,7 +536,8 @@ time.sleep({4 * DEADLINE_SECONDS})
             with self.subTest(call=call.__name__), patch.object(jobs, "time", clock):
                 with self.client.jobs.flock(state_lock, blocking=False) as acquired:
                     self.assertTrue(acquired)
-                    with self.assertRaises(bridge.BridgeError) as error:
+                    # JobBusy in particular: a start tells the busy runner apart from a failure by it.
+                    with self.assertRaises(jobs.JobBusy) as error:
                         await asyncio.wait_for(call(job_id, CLAUDE), timeout=1)
                 self.assertEqual(str(error.exception), "The consultation job is busy. Try again.")
                 self.assertEqual(clock.now, 1001.0)
@@ -499,13 +605,16 @@ time.sleep({4 * DEADLINE_SECONDS})
     # Files and retention
 
     async def test_claim_removes_an_unreadable_request_and_records_failure(self):
-        job_id = await self.queued()
-        request = self.folder(job_id) / "request.json"
-        request.write_text("{\"prompt\": \"PRIVATE QUESTION\"")
-        await jobs.run_job(self.client.jobs, job_id, self.never)
-        self.assertFalse(request.exists())
-        view = await self.client.job(job_id, CLAUDE)
-        self.assertEqual((view["state"], view["error"]), ("failed", jobs.UNREADABLE))
+        for name, content in (("malformed", "{\"prompt\": \"PRIVATE QUESTION\""),
+                              ("another shape", json.dumps({"prompt": "PRIVATE QUESTION"}))):
+            with self.subTest(request=name):
+                job_id = await self.queued()
+                request = self.folder(job_id) / "request.json"
+                request.write_text(content)
+                await jobs.run_job(self.client.jobs, job_id, self.never)
+                self.assertFalse(request.exists())
+                view = await self.client.job(job_id, CLAUDE)
+                self.assertEqual((view["state"], view["error"]), ("failed", jobs.UNREADABLE))
 
     async def test_prune_uses_the_folder_age_when_reading_the_record_fails(self):
         job_id = await self.queued()

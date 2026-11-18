@@ -11,6 +11,9 @@ Cancelling never signals a process: it leaves a marker that the runner checks be
 while it does. A peer never outlives its runner, because each peer runs under peer_guard.py. A job's outcome, once
 written, is final; a lost runner's verdict is written too, so a runner that starts late honours it. The request,
 which holds the prompt and context, is deleted when the runner claims it, and before any other final outcome.
+
+Each operation's lock wait is set here, not by its caller: only the cleanup of a start nobody else will learn of
+waits as long as the holder needs.
 """
 
 import asyncio
@@ -26,18 +29,23 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
+from cleanup import run_to_completion
 from consultation import (
-    JOB_RETENTION_SECONDS, LOST_JOB, BridgeError, job_expired, job_outcome, job_state, job_view, new_job_record,
-    valid_job_outcome, valid_job_record, validate_session_id,
+    CANCELLED_JOB, JOB_RETENTION_SECONDS, PROVIDERS, BridgeError, job_expired, job_outcome, job_state, job_view,
+    new_job_record, stopped_outcome, valid_job_outcome, valid_job_record, validate_session_id,
 )
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 
 UNKNOWN_JOB = "No consultation job with that ID."
 UNREADABLE = "The consultation job's files are unreadable."
 LOCK_BUSY = "The consultation job is busy. Try again."
-CANCELLED = "The consultation was cancelled."
 UNEXPECTED = "The consultation stopped on an unexpected error."
-STOPPED_JOB_ERRORS = {"lost": LOST_JOB, "cancelled": CANCELLED}
+STORE_FAILED = "Cannot read or write the consultation job files."
+RUNNER_FAILED = "Cannot start the consultation runner."
+START_UNCONFIRMED = (
+    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
+    "with that job ID."
+)
 CANCEL_POLL_SECONDS = 0.2
 LOCK_POLL_SECONDS = 0.05
 STATE_LOCK_TIMEOUT_SECONDS = 1.0
@@ -47,6 +55,48 @@ STAGING_PREFIX = ".staging-"
 DELETING_PREFIX = ".deleting-"
 STAGING_RETENTION_SECONDS = 3600
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("bridge.py")
+
+
+# The request a job's runner consults with, as start writes it to request.json. model and reasoning_effort came later:
+# a request written without them asks for neither.
+REQUEST_TEXT_FIELDS = ("prompt", "working_directory", "context")
+REQUEST_OPTIONAL_FIELDS = ("conversation_id", "ref", "seed_thread", "model", "reasoning_effort")
+REQUEST_ADDED_FIELDS = ("model", "reasoning_effort")
+
+
+def job_request(provider, prompt, working_directory, context="", conversation_id=None, ref=None, seed_thread=None,
+                model=None, reasoning_effort=None):
+    """The request to persist for a checked consultation; empty optional values are stored as null."""
+    request = {"provider": provider, "prompt": prompt, "working_directory": str(working_directory), "context": context}
+    values = (conversation_id, ref, seed_thread, model, reasoning_effort)
+    return request | {key: value or None for key, value in zip(REQUEST_OPTIONAL_FIELDS, values)}
+
+
+def read_job_request(saved):
+    """The consultation's keyword arguments from a persisted request, or None when it is not one this bridge writes."""
+    if not isinstance(saved, dict) or saved.get("provider") not in PROVIDERS:
+        return None
+    saved = {key: None for key in REQUEST_ADDED_FIELDS} | saved
+    if (any(not isinstance(saved.get(key), str) for key in REQUEST_TEXT_FIELDS)
+            or any(key not in saved or not isinstance(saved[key], (str, type(None)))
+                   for key in REQUEST_OPTIONAL_FIELDS)):
+        return None
+    return {key: saved[key] for key in ("provider", *REQUEST_TEXT_FIELDS, *REQUEST_OPTIONAL_FIELDS)}
+
+
+class JobBusy(BridgeError):
+    """Another process held the job's state lock for longer than a caller waits."""
+
+
+@contextmanager
+def job_store_errors():
+    """Report filesystem failures in the job store as fixed messages; a job that vanished meanwhile is unknown."""
+    try:
+        yield
+    except FileNotFoundError as exc:
+        raise BridgeError(UNKNOWN_JOB) from exc
+    except OSError as exc:
+        raise BridgeError(STORE_FAILED) from exc
 
 
 def cancel_requested(folder):
@@ -125,8 +175,8 @@ class JobStore:
 
     @contextmanager
     def state_lock(self, folder, wait=False):
-        """Hold the job's short state lock. A caller gives up after a bounded wait; cleanup that must finish, such as
-        cancelling a job nobody else will learn of, passes wait=True and waits as long as the holder needs."""
+        """Hold the job's short state lock. A caller gives up after a bounded wait and raises JobBusy; cleanup that
+        must finish, such as abandon(), passes wait=True and waits as long as the holder needs."""
         if wait:
             with self.flock(folder / "state.lock", blocking=True):
                 yield
@@ -143,7 +193,7 @@ class JobStore:
             time.sleep(min(LOCK_POLL_SECONDS, remaining))
             if time.monotonic() >= deadline:
                 break
-        raise BridgeError(LOCK_BUSY)
+        raise JobBusy(LOCK_BUSY)
 
     @asynccontextmanager
     async def runner_file_lock(self, path, *, retry=True):
@@ -169,6 +219,27 @@ class JobStore:
         if outcome is not None and not valid_job_outcome(outcome):
             raise BridgeError(UNREADABLE)
         return record, outcome
+
+    def settle(self, folder, record, outcome, now=None, *, cancelling=False, runner_present=None):
+        """Finish a job that has stopped and return its view. Hold the state lock.
+
+        A lost or cancelled verdict is stored, so a runner that starts later finds it and does not run.
+        """
+        if outcome is not None:
+            # A crash may have left the request behind a final outcome; it is not kept.
+            (folder / "request.json").unlink(missing_ok=True)
+            return job_view(folder.name, record, outcome, outcome["state"])
+        now = time.time() if now is None else now
+        if runner_present is None:
+            runner_present = self.runner_present(folder)
+        state = job_state(record, None, runner_present, now, cancel_requested=cancelling or cancel_requested(folder))
+        if cancelling and state != "lost":
+            # The runner checks this marker before it consults and watches for it while it does.
+            self.mark(folder / "cancel.requested")
+        outcome = stopped_outcome(state, now)
+        if outcome is not None:
+            self.finish(folder, outcome)
+        return job_view(folder.name, record, outcome, state)
 
     def finish(self, folder, outcome):
         """Write a final outcome, after deleting the request, unless one is already there. Hold the state lock."""
@@ -197,39 +268,20 @@ class JobStore:
     def view(self, job_id, providers, now=None):
         folder = self.folder(job_id)
         with self.state_lock(folder):
-            record, outcome = self.load(folder, providers)
-            if outcome is None:
-                now = time.time() if now is None else now
-                state = job_state(record, None, self.runner_present(folder), now,
-                                  cancel_requested=cancel_requested(folder))
-                if state not in STOPPED_JOB_ERRORS:
-                    return job_view(job_id, record, None, state)
-                # Stored, so a runner that starts later finds it and does not run.
-                outcome = job_outcome(state, now, error=STOPPED_JOB_ERRORS[state])
-                self.finish(folder, outcome)
-            else:
-                # A crash may have left the request behind a final outcome; it is not kept.
-                (folder / "request.json").unlink(missing_ok=True)
-            return job_view(job_id, record, outcome, outcome["state"])
+            return self.settle(folder, *self.load(folder, providers), now)
 
-    def cancel(self, job_id, providers, now=None, wait=False):
+    def cancel(self, job_id, providers, now=None):
         """Stop a running job, or mark one cancelled that no runner holds."""
+        return self.stop(job_id, providers, now, wait=False)
+
+    def abandon(self, job_id, provider):
+        """Cancel a job whose start was given up, which nobody else will learn of: waits out a busy state lock."""
+        return self.stop(job_id, {provider}, None, wait=True)
+
+    def stop(self, job_id, providers, now, wait):
         folder = self.folder(job_id)
         with self.state_lock(folder, wait=wait):
-            record, outcome = self.load(folder, providers)
-            if outcome is not None:
-                (folder / "request.json").unlink(missing_ok=True)
-                return job_view(job_id, record, outcome, outcome["state"])
-            now = time.time() if now is None else now
-            state = job_state(record, None, self.runner_present(folder), now, cancel_requested=True)
-            if state != "lost":
-                # The runner checks this marker before it consults and watches for it while it does.
-                self.mark(folder / "cancel.requested")
-            if state == "cancelling":
-                return job_view(job_id, record, None, state)
-            outcome = job_outcome(state, now, error=STOPPED_JOB_ERRORS[state])
-            self.finish(folder, outcome)
-            return job_view(job_id, record, outcome, outcome["state"])
+            return self.settle(folder, *self.load(folder, providers), now, cancelling=True)
 
     def prune(self, now):
         """Remove jobs no runner holds that finished, or were created, longer ago than the retention period, and
@@ -279,28 +331,27 @@ class JobStore:
     # Runner side
 
     async def claim(self, folder):
-        """Take the job's request for this runner, or None when the job must not run. Hold the runner lock."""
+        """Take the job's request for this runner, as the consultation's keyword arguments, or None when the job must
+        not run. Hold the runner lock."""
         async with self.runner_file_lock(folder / "state.lock"):
             record = self.read(folder / "job.json")
             if record is None:
                 return None  # removed while this runner waited
             if self.read(folder / "outcome.json") is not None:
+                # Its record may be one this bridge cannot read, so no view is built from it.
                 (folder / "request.json").unlink(missing_ok=True)
                 return None  # cancelled, or judged lost, before the runner started
-            now = time.time()
             if not valid_job_record(record):
-                self.finish(folder, job_outcome("failed", now, error=UNREADABLE))
+                self.finish(folder, job_outcome("failed", time.time(), error=UNREADABLE))
                 return None
-            # This runner holds runner.lock, but has yet to claim the job.
-            state = job_state(record, None, False, now, cancel_requested=cancel_requested(folder))
-            if state in STOPPED_JOB_ERRORS:
-                self.finish(folder, job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]))
+            # This runner holds runner.lock, but has yet to claim the job: it does not count as the job's runner.
+            if self.settle(folder, record, None, runner_present=False)["state"] != "queued":
                 return None
             try:
-                request = self.read(folder / "request.json")
+                request = read_job_request(self.read(folder / "request.json"))
             except BridgeError:
                 request = None
-            if not isinstance(request, dict):
+            if request is None:
                 self.finish(folder, job_outcome("failed", time.time(), error=UNREADABLE))
                 return None
             (folder / "request.json").unlink(missing_ok=True)
@@ -313,6 +364,65 @@ class JobStore:
         async with self.runner_file_lock(folder / "state.lock", retry=retry) as acquired:
             if acquired:
                 self.finish(folder, outcome)
+
+
+async def start_job(store, request, spawn):
+    """Publish a job for a job_request(), launch its runner with spawn(job_id), and return its first view, the only way
+    its caller learns the ID. The job of a start that fails or is cancelled is cancelled, or named in the error."""
+    provider, working_directory = request["provider"], request["working_directory"]
+    with job_store_errors():
+        await asyncio.to_thread(store.prune, time.time())
+        # A cancelled await does not stop its worker thread, so creation is let finish and its job cancelled.
+        creating = asyncio.ensure_future(asyncio.to_thread(store.create, provider, working_directory, request))
+        try:
+            job_id = await asyncio.shield(creating)
+        except asyncio.CancelledError:
+            await quietly(abandon_created(store, creating, provider))
+            raise
+        try:
+            spawn(job_id)
+        except Exception as exc:
+            # The runner may have started anyway, such as when only its reaper thread failed.
+            await abandon_or_name(store, job_id, provider, exc)
+            raise BridgeError(RUNNER_FAILED) from exc
+        try:
+            return await asyncio.to_thread(store.view, job_id, {provider})
+        except JobBusy:
+            # The runner holds the state lock to claim the job: the caller still needs its ID.
+            return job_view(job_id, {"provider": provider}, None, "queued")
+        except asyncio.CancelledError:
+            await quietly(asyncio.to_thread(store.abandon, job_id, provider))
+            raise
+        except (BridgeError, OSError) as exc:
+            await abandon_or_name(store, job_id, provider, exc)
+            raise
+
+
+async def quietly(cleanup):
+    """Run a cleanup to its end. One that fails does not turn an interruption into an ordinary failure: nobody is
+    left to read either."""
+    try:
+        await run_to_completion(cleanup)
+    except (BridgeError, OSError):
+        pass
+
+
+async def abandon_or_name(store, job_id, provider, cause):
+    """Cancel the job of a failed start; cancelling reads the job first, so it can fail the same way, and then the
+    error names the ID, the only way left to the job."""
+    try:
+        await run_to_completion(asyncio.to_thread(store.abandon, job_id, provider))
+    except (BridgeError, OSError):
+        raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from cause
+
+
+async def abandon_created(store, creating, provider):
+    """Cancel the job a creation published after its caller was cancelled, if it published one."""
+    try:
+        job_id = await creating
+    except Exception:
+        return
+    await asyncio.to_thread(store.abandon, job_id, provider)
 
 
 def spawn_runner(job_id):
@@ -362,7 +472,7 @@ async def consult_and_record(store, folder, request, consult):
         marked = (not asyncio.current_task().cancelling()
                   and watcher.done() and not watcher.cancelled() and watcher.exception() is None)
         # A signalled runner must exit even if another process holds the state lock.
-        await store.record_outcome(folder, job_outcome("cancelled", time.time(), error=CANCELLED), retry=marked)
+        await store.record_outcome(folder, job_outcome("cancelled", time.time(), error=CANCELLED_JOB), retry=marked)
         if marked:
             return  # cancelled through the marker: the job ends normally
         raise

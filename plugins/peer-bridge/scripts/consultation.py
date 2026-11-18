@@ -7,6 +7,7 @@ them in, and acts on what comes back.
 import json
 import os
 import re
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,6 +94,7 @@ class FailureFacts:
     writer_lock_present: bool | None = None
     """Codex only: whether a writer-lock file exists for the resumed thread, so another app may hold it."""
     in_git_repository: bool | None = None
+    """Codex only: whether working_directory or a parent holds a .git entry, the check Codex makes before it runs."""
     model_setting: bool = False
     """Codex only: a model or reasoning effort was chosen, by the request or the environment."""
     api_error_status: int | None = None
@@ -534,6 +536,40 @@ def output_signals(provider, output, errors):
     }
 
 
+def git_entry_found(directory, lstat):
+    """Whether a resolved, absolute directory or one of its parents holds a .git entry; None when a level is unreadable.
+
+    This is the check Codex makes before it runs outside a trusted directory: any .git entry counts, even an empty
+    file, and git is never asked whether the repository is valid.
+    """
+    for level in (directory, *directory.parents):
+        try:
+            if not stat.S_ISDIR(lstat(level).st_mode):
+                return None  # replaced since it was resolved
+        except OSError:
+            return None  # gone or unreadable
+        try:
+            lstat(level / ".git")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return True
+    return False
+
+
+def failure_probes(provider, resuming):
+    """The FailureFacts fields a failed consultation needs a probe for, in the order they are gathered."""
+    probes = ["signed_in"]
+    if resuming:
+        probes.append("history_present")
+    if provider == "codex":
+        if resuming:
+            probes.append("writer_lock_present")
+        probes.append("in_git_repository")
+    return tuple(probes)
+
+
 def failure_message(provider, facts, generic):
     """The message for a failed consultation: a named cause when the facts establish one, else the generic message."""
     names = {"name": PROVIDER_NAMES[provider], "model_setting": MODEL_SETTINGS[provider]}
@@ -561,7 +597,10 @@ UNFINISHED_JOB_STATES = ("queued", "running")
 JOB_START_GRACE_SECONDS = 120
 JOB_RETENTION_SECONDS = 7 * 24 * 3600
 MAX_WAIT_SECONDS = 60
+# The errors a job stopped without a result is stored with.
 LOST_JOB = "The consultation's runner stopped without a result. Start the consultation again."
+CANCELLED_JOB = "The consultation was cancelled."
+STOPPED_JOB_ERRORS = {"lost": LOST_JOB, "cancelled": CANCELLED_JOB}
 # The only fields a completed job's result adds to its view; the job's own state, ID and provider always win.
 RESULT_FIELDS = ("conversation_id", "reply", "commit", "model", "reasoning_effort")
 
@@ -625,6 +664,11 @@ def job_state(record, outcome, runner_present, now, cancel_requested=False):
     if queued:
         return "cancelled" if cancel_requested else "queued"
     return "lost"
+
+
+def stopped_outcome(state, now):
+    """The outcome to store for a job judged lost or cancelled before it finished, or None for any other state."""
+    return job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]) if state in STOPPED_JOB_ERRORS else None
 
 
 def job_view(job_id, record, outcome, state):

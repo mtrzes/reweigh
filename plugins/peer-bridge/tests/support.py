@@ -211,6 +211,21 @@ PEER_SOURCE = textwrap.dedent('''\
 ''')
 
 
+class RecordingProbe:
+    """The second adapter behind failure diagnosis: answers each observation from answers, None when it has none, and
+    records what was asked. Pass it to Bridge as probe=RecordingProbe(answers)."""
+
+    def __init__(self, answers):
+        self.answers, self.asked = answers, []
+
+    def __call__(self, provider, directory, scope, peer, source):
+        return self
+
+    async def observe(self, name, session):
+        self.asked.append((name, session))
+        return self.answers.get(name)
+
+
 class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
     """A bridge whose peers are the stand-in CLI, with every home, state and git setting inside a temporary root."""
 

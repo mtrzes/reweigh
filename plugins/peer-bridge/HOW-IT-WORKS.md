@@ -33,7 +33,8 @@ Each app reaches the bridge through its own plugin; the shell uses the same scri
 
 All rules (request checks, the peer's command line, environment cleanup, the handoff text, failure diagnosis, job
 states) live in two pure modules, `consultation.py` and `thread_parsing.py`; the rest only starts processes and
-touches files.
+touches files. Failure diagnosis, for example, decides there which facts a failed run needs for its provider and
+whether it resumed; a probe in `bridge.py` observes each one as true, false or unknown.
 
 ## One consultation
 
@@ -56,10 +57,24 @@ flowchart TB
   `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the peer's process group and
   stops all of it when the consultation ends, times out or is cancelled, and when the bridge's own process dies, even
-  by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, these probes use the time left
-  from the peer's timeout. Each guard holds the conversation's lock, so the conversation and its checkout stay busy
-  until the process group has stopped. The bridge's last signal to a group always comes before it reaps the guard,
-  which would free the group's ID. A descendant that leaves the group, by starting its own session or group, is not stopped.
+  by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, the sign-in probe and the
+  lookup of the peer's history use the time left from the peer's timeout, and neither starts once it is spent. Each
+  guard holds the conversation's lock, so the conversation and its checkout stay busy until the process group has
+  stopped. Opening a conversation gives one scope that holds its lock, its record and its checkout's fixed location;
+  the peer, the sign-in probe and the pinned checkout's git commands start through that scope, and it saves the record
+  only once the peer's result has been checked against it. Reading a `seed_thread` comes before the conversation is
+  opened, and the git command its repository check runs is not guarded. The sweep of leftover checkouts takes another
+  conversation's lock the same way, without opening its record. The bridge's last signal to a group always comes
+  before it reaps the guard, which would free the group's ID. A descendant that leaves the group, by starting its own
+  session or group, is not stopped.
+- **A pinned checkout is prepared within one budget.** Every git command that prepares it, from finding the
+  repository to writing the files, including removing a checkout an earlier run left in its place, shares a checkout
+  preparation budget of 300 seconds; a command is not started once the budget is spent. Removing the checkout
+  afterwards, whether the consultation succeeded, failed or was cancelled, has 120 seconds of its own and runs to its
+  end; a checkout it cannot remove is left for a later consultation's sweep, and the consultation's own outcome
+  stands. The peer's
+  timeout starts once the checkout is ready. Reading a `seed_thread`, and sweeping up checkouts that runs which died
+  left behind (each with its own 120 seconds), come before both.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
   given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file. Codex
   events are separated by LF, so Unicode line separators inside a reply are preserved.
@@ -80,13 +95,19 @@ A job lives in its own folder under the state directory. Its runner holds a lock
 runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
 dies, or has yet to claim it after two minutes, is stored as `lost` when it is read, cancelled or claimed. Before that
 deadline, cancellation of a queued job with no runner takes effect immediately. While a cancel waits for the runner,
-`cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The runner deletes
-the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
-`failed` with a fixed error. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
-published during creation.
+`cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The job module writes
+the request file and reads it back; the runner deletes it after reading it. If it cannot read the request for a valid
+job, or the request lacks a field the bridge writes, it deletes the file and records `failed` with a fixed error. A
+request written before `model` and `reasoning_effort` existed asks for neither. SIGTERM or SIGHUP during a CLI `start`
+cancels the pending start and cleans up any job it published during creation. A start that cannot read its job once
+the runner is launched, for a reason other than the job being busy, cancels the job, since the caller never learns
+its ID; if that cancellation fails too, the error names the job's ID. An interrupted start ends as cancelled even when
+that cleanup fails. A start that finds the runner already claiming the job reports it `queued`. The job module,
+`jobs.py`, owns a start from publishing the job to returning its ID; the bridge checks the request first.
 
 Each status read or cancellation waits at most one second for the lock on the job's state, then reports that the job
-is busy. The runner can respond to `SIGTERM` or `SIGHUP` while waiting for the lock.
+is busy. Cancelling the job of a failed or cancelled start waits as long as the lock's holder needs. The runner can
+respond to `SIGTERM` or `SIGHUP` while waiting for the lock, and job cleanup skips a job whose lock is held.
 
 Job cleanup removes only folders named with a canonical job UUID, optionally preceded by `.staging-` or `.deleting-`.
 
