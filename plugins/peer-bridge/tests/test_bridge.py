@@ -403,19 +403,22 @@ class ConsultationTests(BridgeTestCase):
             ((128, b"", b""), None),
             ((0, b"/project/.git\n", b""), True),
         ):
-            with self.subTest(outcome=outcome), patch.object(bridge, "run_command") as guarded:
-                def command_result(command, *arguments, outcome=outcome, **options):
+            with self.subTest(outcome=outcome):
+                commands = []
+
+                async def recording(command, *arguments, outcome=outcome, **options):
+                    commands.append(command)
                     if command[0] != "git":
                         return 0, b"", b""
                     if isinstance(outcome, BaseException):
                         raise outcome
                     return outcome
 
-                guarded.side_effect = command_result
-                facts = await self.client.failure_facts("codex", self.other_project, {}, "", "",
-                                                        deadline=bridge.time.monotonic() + 30, lock=None)
+                scope = bridge.ConversationLock(None, None, time.monotonic, recording)
+                facts = await self.client.failure_facts("codex", self.other_project, {}, "", "", scope=scope,
+                                                        peer=scope.budget(30))
                 self.assertIs(facts.in_git_repository, expected)
-                self.assertEqual(guarded.await_args.args[0], [
+                self.assertEqual(commands[-1], [
                     "git", "-C", str(self.other_project), "rev-parse", "--path-format=absolute", "--git-common-dir",
                 ])
 
@@ -427,30 +430,25 @@ class ConsultationTests(BridgeTestCase):
             (3, 2, [sign_in]),
             (5, 0, []),
         ):
-            with (
-                self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds),
-                patch.object(bridge, "time") as clock,
-                patch.object(bridge, "run_command") as guarded,
-            ):
-                clock.monotonic.return_value = 100
+            with self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds):
+                clock, guarded = SimpleNamespace(now=100.0), []
 
-                def command_result(command, prompt, directory, timeout, **options):
+                async def recording(command, prompt, directory, timeout, environment=None, lock=None):
+                    guarded.append((command[0], timeout, lock))
                     if prompt is not None:
-                        clock.monotonic.return_value += peer_seconds
+                        clock.now += peer_seconds
                         return 7, b"", b""
                     if command[1:] == ["login", "status"]:
-                        clock.monotonic.return_value += sign_in_seconds
+                        clock.now += sign_in_seconds
                     return 0, b"/project/.git\n", b""
 
-                guarded.side_effect = command_result
+                self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
                 message = await self.failure_message("codex", {})
                 self.assertEqual(message, "codex consultation failed (exit 7). Check CLI login, version, and "
                                  "permissions.")
-                peer, *probes = guarded.await_args_list
-                lock = peer.kwargs["lock"]
+                (_, _, lock), *probes = guarded
                 self.assertIsInstance(lock, int)
-                self.assertEqual([(call.args[0][0], call.args[3], call.kwargs.get("lock")) for call in probes],
-                                 [(executable, timeout, lock) for executable, timeout in expected])
+                self.assertEqual(probes, [(executable, timeout, lock) for executable, timeout in expected])
 
     async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
         # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any
@@ -862,7 +860,7 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_checkout_preparation_shares_one_budget_and_removal_has_its_own(self):
         git_repository(self.project)
-        real_run_command, clock = bridge.run_command, SimpleNamespace(now=1000.0)
+        clock = SimpleNamespace(now=1000.0)
         preparation, removal = bridge.CHECKOUT_PREPARATION_SECONDS, bridge.CHECKOUT_REMOVAL_SECONDS
         for step, late, expected in (
             (10, False, [("rev-parse", preparation), ("rev-parse", preparation - 10), ("worktree", preparation - 20),
@@ -878,13 +876,10 @@ class ConsultationTests(BridgeTestCase):
                 name = "peer" if prompt is not None else command[3].removeprefix(f"--work-tree={command[2]}")
                 calls.append((name or command[4], timeout))
                 clock.now += step
-                return await real_run_command(command, prompt, directory, timeout, **options)
+                return await bridge.run_command(command, prompt, directory, timeout, **options)
 
-            with (
-                self.subTest(step=step),
-                patch.object(bridge, "run_command", recording),
-                patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: clock.now, time=time.time)),
-            ):
+            self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
+            with self.subTest(step=step):
                 if late:
                     with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
                         await self.consult(ref="HEAD")

@@ -32,8 +32,8 @@ from pathlib import Path
 
 from cleanup import run_to_completion
 from consultation import (
-    CANCELLED_JOB, JOB_RETENTION_SECONDS, PROVIDERS, BridgeError, job_expired, job_outcome, job_state, job_view, new_job_record, stopped_outcome,
-    valid_job_outcome, valid_job_record, validate_session_id,
+    CANCELLED_JOB, JOB_RETENTION_SECONDS, PROVIDERS, BridgeError, job_expired, job_outcome, job_state, job_view,
+    new_job_record, stopped_outcome, valid_job_outcome, valid_job_record, validate_session_id,
 )
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 
@@ -375,9 +375,9 @@ class JobStore:
 
 
 async def start_job(store, request, spawn):
-    """Publish a job for a job_request(), launch its runner with spawn(job_id), and return the job's first view, the only way its caller
-    learns the ID. A job published for a start that then fails or is cancelled is cancelled, so none is left to run
-    with nobody to read or cancel it; if that cancellation fails too, the error names the job's ID.
+    """Publish a job for a job_request(), launch its runner with spawn(job_id), and return the job's first view, the
+    only way its caller learns the ID. A job published for a start that then fails or is cancelled is cancelled, so
+    none is left to run with nobody to read or cancel it; if that cancellation fails too, the error names the job's ID.
 
     Job files are read and written in a worker thread, so a lock wait never holds up the event loop.
     """

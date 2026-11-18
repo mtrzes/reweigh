@@ -58,7 +58,10 @@ flowchart TB
   stops all of it when the consultation ends, times out or is cancelled, and when the bridge's own process dies, even
   by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, these probes use the time left
   from the peer's timeout. Each guard holds the conversation's lock, so the conversation and its checkout stay busy
-  until the process group has stopped. The bridge's last signal to a group always comes before it reaps the guard,
+  until the process group has stopped. Opening a conversation gives one scope that holds its lock, its record and its
+  checkout's fixed location; every process of the consultation starts through that scope, and it saves the record only
+  once the peer's result has been checked against it. The sweep of leftover checkouts takes another conversation's
+  lock the same way, without opening its record. The bridge's last signal to a group always comes before it reaps the guard,
   which would free the group's ID. A descendant that leaves the group, by starting its own session or group, is not stopped.
 - **A pinned checkout is prepared within one budget.** Every git command that prepares it, from finding the
   repository to writing the files, including removing a checkout an earlier run left in its place, shares a checkout
