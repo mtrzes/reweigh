@@ -1,6 +1,6 @@
 {
   "name": "peer-bridge",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "description": "Consult Claude Code from Codex through read-only, resumable sessions, pinned to a commit when needed, run in the background for long reviews, and read Claude Code's recent sessions in the same repository.",
   "author": {
     "name": "mtrzes",
