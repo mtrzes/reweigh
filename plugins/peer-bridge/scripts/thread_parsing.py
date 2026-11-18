@@ -399,6 +399,13 @@ def claude_cwd_search(identifier):
     return search
 
 
+def claude_turns_search(belongs, identifier, max_messages):
+    """turns_search over a Claude session. Only a window that starts at byte zero holds the whole ancestry: in one cut
+    from the file's end, a gap may be closed by earlier records."""
+    return turns_search(
+        lambda records: scan_claude(records, belongs, identifier=identifier, whole=records.from_start), max_messages)
+
+
 def claude_title_search(belongs, identifier):
     """Search for the title of the session's current stay in the repository: the stay's start decides, else the
     last window's records. Only the active branch can enter the repository, as for replies; if its ancestry is still

@@ -25,11 +25,11 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    GIT_LOCATION_ENV, NOT_IN_REPOSITORY, TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable,
-    claude_cwd_search, claude_head, claude_snapshot, claude_title_search, codex_main_thread, codex_snapshot,
-    git_output_path, is_interactive_claude_session, is_supported_history, listing_result, match_thread, newest_first,
-    parse_session_index, rollout_identifier, scan_claude, scan_codex, search_tail, snapshot_result, turns_search,
-    UUID_PATTERN,
+    GIT_LOCATION_ENV, NOT_IN_REPOSITORY, TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary,
+    ThreadUnavailable, UUID_PATTERN, claude_cwd_search, claude_head, claude_snapshot, claude_title_search,
+    claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
+    is_supported_history, listing_result, match_thread, newest_first, parse_session_index, rollout_identifier,
+    scan_codex, search_tail, snapshot_result, turns_search,
 )
 
 __all__ = [
@@ -205,10 +205,7 @@ class ClaudeSessionsSource:
             if cwd is None or not belongs(cwd):
                 raise ThreadUnavailable(NOT_IN_REPOSITORY)
 
-            def scan_records(records):
-                return scan_claude(records, belongs, identifier=summary.id, whole=records.from_start)
-
-            scan = search_tail(history.tail, turns_search(scan_records, max_messages), TAIL_WINDOWS)
+            scan = search_tail(history.tail, claude_turns_search(belongs, summary.id, max_messages), TAIL_WINDOWS)
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
             # The turns search stops once it has enough messages; the title comes from the listing's own search.
             name = search_tail(history.tail, claude_title_search(belongs, summary.id), TAIL_WINDOWS)

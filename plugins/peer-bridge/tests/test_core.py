@@ -756,18 +756,31 @@ class ClaudeParsingTests(unittest.TestCase):
         self.assertFalse(t.scan_is_enough(self.scan(cases[0][1]), 3))
 
 
+class Tail:
+    """A history's tail as the capture serves it, in memory: the last size bytes, from byte zero once size covers them
+    all. It logs the sizes it was asked for."""
+
+    def __init__(self, *records):
+        self.data = b"".join(json.dumps(record).encode() + b"\n" for record in records)
+        self.sizes = []
+
+    def __call__(self, size):
+        self.sizes.append(size)
+        return t.TailRecords(self.data[max(0, len(self.data) - size):], size >= len(self.data))
+
+
 class TailSearchTests(unittest.TestCase):
-    """Each tail search over in-memory windows: what decides it, and what it answers when no earlier records remain."""
+    """Each tail search over in-memory windows: what decides it, and what it answers when no earlier records remain.
+
+    A record that a search must not reach is malformed, so reading past the deciding window fails the test.
+    """
 
     WIDE = t.TailWindows(1024, 1024 * 1024)
-    CAPPED = t.TailWindows(1024, 2048)
+    # Not a doubling of initial: the last window is clamped to the cap.
+    CAPPED = t.TailWindows(1024, 3000)
     LARGE = {"type": "file-history-snapshot", "snapshot": "x" * 4096}
-
-    @staticmethod
-    def tail(*records):
-        """A history's tail as the capture serves it: the last size bytes, from byte zero once size covers them all."""
-        data = b"".join(json.dumps(record).encode() + b"\n" for record in records)
-        return lambda size: t.TailRecords(data[max(0, len(data) - size):], size >= len(data))
+    MALFORMED_CODEX = {"type": "event_msg", "payload": {"type": 5}}
+    MALFORMED_CLAUDE = {"type": "user", "uuid": "bad", "parentUuid": 5, "cwd": "/repo", "message": {"content": "q"}}
 
     @staticmethod
     def codex_turn(turn, text):
@@ -777,61 +790,69 @@ class TailSearchTests(unittest.TestCase):
 
     def test_turns_search(self):
         noise = [CodexParsingTests.event("token_count", "t1", info="x" * 200) for _ in range(40)]
-        early = self.tail(*self.codex_turn("t1", "Early."), *noise)
-        both = self.tail(*self.codex_turn("t0", "Old."), *noise, *self.codex_turn("t1", "New."))
+        early = (*self.codex_turn("t1", "Early."), *noise)
+        both = (self.MALFORMED_CODEX, *noise, *self.codex_turn("t0", "Old."), *noise, *self.codex_turn("t1", "New."))
         # Byte zero and the cap both end the search; fewer messages stand at either, no turn is refused at either.
-        for label, tail, windows, expected in (
-            ("grows to byte zero", early, self.WIDE, ["Early."]),
-            ("no turn within the cap", early, self.CAPPED, t.NO_TURN),
-            ("fewer messages at the cap", both, self.CAPPED, ["New."]),
-            ("enough messages before the cap", both, self.WIDE, ["Old.", "New."]),
+        for label, records, windows, expected, sizes in (
+            ("grows to byte zero", early, self.WIDE, ["Early."], [1024, 2048, 4096, 8192, 16384]),
+            ("no turn within the cap", early, self.CAPPED, t.NO_TURN, [1024, 2048, 3000]),
+            ("fewer messages at the cap", both, self.CAPPED, ["New."], [1024, 2048, 3000]),
+            ("enough messages before the cap", both, self.WIDE, ["Old.", "New."], [1024, 2048, 4096, 8192, 16384]),
         ):
             with self.subTest(label):
-                search = t.turns_search(t.scan_codex, 2)
+                tail, search = Tail(*records), t.turns_search(t.scan_codex, 2)
                 if isinstance(expected, str):
                     with self.assertRaisesRegex(t.ThreadUnavailable, f"^{expected}$"):
                         t.search_tail(tail, search, windows)
                 else:
                     self.assertEqual([message.text for message in t.search_tail(tail, search, windows).messages],
                                      expected)
+                self.assertEqual(tail.sizes, sizes)
 
-    def test_turns_search_widens_past_an_ancestry_gap_up_to_the_cap(self):
+    def test_claude_turns_search_widens_past_an_ancestry_gap_up_to_the_cap(self):
         user, reply = ClaudeParsingTests.user, ClaudeParsingTests.assistant
-        tail = self.tail(
+        records = (
             user("q1", "u1") | {"parentUuid": None}, reply("Kept.", "end_turn", uuid="a1", parentUuid="u1"), self.LARGE,
             user("q2", "u2") | {"parentUuid": "a1"}, reply("Abandoned.", "end_turn", uuid="a2", parentUuid="u2"),
             user("q3", "u3") | {"parentUuid": "a1"}, reply("After rewind.", "end_turn", uuid="a3", parentUuid="u3"),
         )
-
-        def search():
-            return t.turns_search(
-                lambda records: t.scan_claude(records, ClaudeParsingTests.belongs, whole=records.from_start), 2)
-
-        self.assertEqual([message.text for message in t.search_tail(tail, search(), self.WIDE).messages],
+        search = t.claude_turns_search(ClaudeParsingTests.belongs, None, 2)
+        self.assertEqual([message.text for message in t.search_tail(Tail(*records), search, self.WIDE).messages],
                          ["Kept.", "After rewind."])
         with self.assertRaisesRegex(t.ThreadUnavailable, f"^{t.ANCESTRY_UNRESOLVED}$"):
-            t.search_tail(tail, search(), self.CAPPED)
+            t.search_tail(Tail(*records), search, self.CAPPED)
 
     def test_claude_cwd_and_title_searches(self):
         user = ClaudeParsingTests.user
-        moved = self.tail(user("q"), user("q2", "u2", "/other"), self.LARGE)
-        titled = self.tail(user("q"), {"type": "custom-title", "customTitle": "Mine"}, self.LARGE)
-        for label, tail, windows, expected in (
-            ("a move hidden beyond the first window", moved, self.WIDE, "/other"),
-            ("no directory within the cap", moved, self.CAPPED, t.NO_CLAUDE_CWD),
-            ("no directory at byte zero", self.tail({"type": "summary"}), self.WIDE, t.NO_CLAUDE_CWD),
+        moved = (self.MALFORMED_CLAUDE, self.LARGE, user("q"), user("q2", "u2", "/other"), self.LARGE)
+        for label, records, windows, expected, sizes in (
+            ("a move hidden beyond the first window", moved, self.WIDE, "/other", [1024, 2048, 4096, 8192]),
+            ("no directory within the cap", moved, self.CAPPED, t.NO_CLAUDE_CWD, [1024, 2048, 3000]),
+            ("no directory at byte zero", ({"type": "summary"},), self.WIDE, t.NO_CLAUDE_CWD, [1024]),
         ):
             with self.subTest(label):
+                tail = Tail(*records)
                 if expected == t.NO_CLAUDE_CWD:
                     with self.assertRaisesRegex(t.ThreadUnavailable, f"^{expected}$"):
                         t.search_tail(tail, t.claude_cwd_search(None), windows)
                 else:
                     self.assertEqual(t.search_tail(tail, t.claude_cwd_search(None), windows), expected)
-        # The title search ends at the stay's start, else at its last window: within the cap, no title is found.
-        for windows, expected in ((self.WIDE, "Mine"), (self.CAPPED, None)):
-            with self.subTest(windows=windows):
-                search = t.claude_title_search(ClaudeParsingTests.belongs, None)
-                self.assertEqual(t.search_tail(titled, search, windows), expected)
+                self.assertEqual(tail.sizes, sizes)
+        # The title search ends at the stay's start, else at its last window.
+        title = {"type": "custom-title", "customTitle": "Mine"}
+        for label, records, windows, expected, sizes in (
+            ("the stay starts in the first window",
+             (self.MALFORMED_CLAUDE, self.LARGE, user("q", "u1", "/other"), user("q2", "u2"), title), self.WIDE,
+             "Mine", [1024]),
+            ("no stay's start: up to byte zero", (user("q"), title, self.LARGE), self.WIDE, "Mine",
+             [1024, 2048, 4096, 8192]),
+            ("no stay's start within the cap", (user("q"), title, self.LARGE), self.CAPPED, None, [1024, 2048, 3000]),
+        ):
+            with self.subTest(label):
+                tail = Tail(*records)
+                self.assertEqual(t.search_tail(tail, t.claude_title_search(ClaudeParsingTests.belongs, None), windows),
+                                 expected)
+                self.assertEqual(tail.sizes, sizes)
 
 
 class GitOutputTests(unittest.TestCase):
