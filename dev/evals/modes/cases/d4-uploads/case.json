@@ -1,0 +1,18 @@
+{
+  "kind": "double-crux",
+  "message": "Return the stored path from save_upload()",
+  "verdict": "no-fix",
+  "evidence": [
+    {
+      "path": "handlers.py",
+      "first": 6,
+      "last": 6
+    },
+    {
+      "path": "names.py",
+      "first": 4,
+      "last": 10
+    }
+  ],
+  "claim": "An attacker can write outside UPLOAD_DIR through handle_upload(): save_upload() joins the client's file name to UPLOAD_DIR unchecked."
+}

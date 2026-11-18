@@ -1,0 +1,18 @@
+{
+  "kind": "staged",
+  "message": "Add bulk_delete()",
+  "verdict": "no-fix",
+  "evidence": [
+    {
+      "path": "db.py",
+      "first": 10,
+      "last": 12
+    },
+    {
+      "path": "repo.py",
+      "first": 11,
+      "last": 11
+    }
+  ],
+  "claim": "bulk_delete() deletes other tenants' invoices: its WHERE clause filters on id only."
+}

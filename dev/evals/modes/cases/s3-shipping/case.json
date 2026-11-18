@@ -1,0 +1,17 @@
+{
+  "kind": "steelman",
+  "message": "Simplify the free-shipping check: 50.00 is the advertised threshold",
+  "verdict": "reject",
+  "evidence": [
+    {
+      "path": "tests/test_shipping.py",
+      "first": 10,
+      "last": 11
+    },
+    {
+      "path": "docs/policy.md",
+      "first": 3,
+      "last": 4
+    }
+  ]
+}

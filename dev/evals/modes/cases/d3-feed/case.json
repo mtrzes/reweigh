@@ -1,0 +1,18 @@
+{
+  "kind": "double-crux",
+  "message": "Use the ISO timestamp in is_stale()",
+  "verdict": "fix",
+  "evidence": [
+    {
+      "path": "feed.py",
+      "first": 5,
+      "last": 6
+    },
+    {
+      "path": "producer.py",
+      "first": 5,
+      "last": 6
+    }
+  ],
+  "claim": "is_stale() raises TypeError on every entry: published timestamps carry a UTC offset, and datetime.now() is naive."
+}

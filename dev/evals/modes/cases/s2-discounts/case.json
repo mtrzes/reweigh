@@ -1,0 +1,17 @@
+{
+  "kind": "steelman",
+  "message": "Validate the order again after discounts",
+  "verdict": "accept",
+  "evidence": [
+    {
+      "path": "partners.py",
+      "first": 10,
+      "last": 13
+    },
+    {
+      "path": "orders.py",
+      "first": 14,
+      "last": 15
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "kind": "double-crux",
+  "message": "Retry gateway timeouts in pay()",
+  "verdict": "no-fix",
+  "evidence": [
+    {
+      "path": "payments.py",
+      "first": 7,
+      "last": 7
+    },
+    {
+      "path": "gateway.py",
+      "first": 16,
+      "last": 20
+    }
+  ],
+  "claim": "The retry in pay() can charge a card twice: a timeout can arrive after the gateway has recorded the charge."
+}

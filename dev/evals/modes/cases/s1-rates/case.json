@@ -1,0 +1,17 @@
+{
+  "kind": "steelman",
+  "message": "Read exchange rates on every conversion",
+  "verdict": "accept",
+  "evidence": [
+    {
+      "path": "rates.py",
+      "first": 3,
+      "last": 4
+    },
+    {
+      "path": "tests/test_rates.py",
+      "first": 17,
+      "last": 20
+    }
+  ]
+}
