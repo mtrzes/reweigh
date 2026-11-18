@@ -37,6 +37,15 @@ call `get_consultation` with its `job_id`, passing `wait_seconds` (at most 60) t
 available, the `start`, `job` and `cancel` commands of `../../scripts/bridge.py` (relative to this skill's directory)
 do the same; usage is in [the plugin README](../../README.md#command-line-consultations).
 
+## Steelman and double-crux
+
+Two request shapes sharpen a consultation:
+
+- **Reject only after a steelman.** When you lean towards rejecting a change, proposal or design, even one that looks
+  plainly wrong, or the operator asks for a steelman, read [steelman.md](steelman.md) before you consult or advise.
+- **Double-crux**: when you dispute a peer finding and the answer changes what the operator does, or the operator asks
+  for a double-crux, even before any consultation, read [double-crux.md](double-crux.md).
+
 ## Review requests
 
 When the consultation is a code review, give the request this shape so reviews come back comparable:
@@ -55,15 +64,6 @@ IDs are not accepted.
 The peer uses restricted consultation tools and cannot delegate through the bridge. If a request times out or reports
 unavailable authentication, report that limitation and continue independent work within the authorized task. Do not
 switch to a permission bypass or an unrestricted peer invocation to complete the consultation.
-
-## Steelman and double-crux
-
-Two request shapes sharpen a consultation:
-
-- **Steelman**: when the operator asks to steelman a change, proposal or design, or before you reject one, read
-  [steelman.md](steelman.md).
-- **Double-crux**: when you dispute a peer finding and the answer changes what the operator does, or the operator asks
-  for a double-crux, even before any consultation, read [double-crux.md](double-crux.md).
 
 ## Threads in the other app
 
