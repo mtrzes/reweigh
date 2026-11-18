@@ -346,6 +346,13 @@ class ReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ImportError, "incompatible architecture"):
                 history_capture.zstandard_module()
 
+    def test_a_claude_read_returns_the_title_it_was_selected_by(self):
+        # The last replies fit the first tail window; the title lies further back, where only the title search looks.
+        replies = [entry for _ in range(60) for entry in (claude_prompt(), claude_reply("x" * 5000))]
+        claude_session(self.claude_home, self.project, claude_prompt(),
+                       {"type": "custom-title", "customTitle": "Early title"}, *replies)
+        self.assertEqual(self.read("claude", "Early title")["name"], "Early title")
+
     def test_claude_sessions_are_listed_and_read_by_the_same_rules(self):
         home = self.claude_home
         finished, _ = claude_session(home, self.project, claude_prompt(), claude_reply("Checking.", "tool_use"),

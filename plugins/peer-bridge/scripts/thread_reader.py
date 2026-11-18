@@ -210,7 +210,9 @@ class ClaudeSessionsSource:
 
             scan = search_tail(history.tail, turns_search(scan_records, max_messages), TAIL_WINDOWS)
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
-            current = replace(summary, cwd=cwd, name=scan.title, source_kind=entrypoint)
+            # The turns search stops once it has enough messages; the title comes from the listing's own search.
+            name = search_tail(history.tail, claude_title_search(belongs, summary.id), TAIL_WINDOWS)
+            current = replace(summary, cwd=cwd, name=name, source_kind=entrypoint)
             return claude_snapshot(current, scan, max_messages)
 
         return read_stable(self.home, lambda: self.session_file(summary.id), read)
