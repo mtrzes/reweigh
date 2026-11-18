@@ -739,6 +739,84 @@ class ClaudeParsingTests(unittest.TestCase):
         self.assertFalse(t.scan_is_enough(self.scan(cases[0][1]), 3))
 
 
+class TailSearchTests(unittest.TestCase):
+    """Each tail search over in-memory windows: what decides it, and what it answers when no earlier records remain."""
+
+    WIDE = t.TailWindows(1024, 1024 * 1024)
+    CAPPED = t.TailWindows(1024, 2048)
+    LARGE = {"type": "file-history-snapshot", "snapshot": "x" * 4096}
+
+    @staticmethod
+    def tail(*records):
+        """A history's tail as the capture serves it: the last size bytes, from byte zero once size covers them all."""
+        data = b"".join(json.dumps(record).encode() + b"\n" for record in records)
+        return lambda size: t.TailRecords(data[max(0, len(data) - size):], size >= len(data))
+
+    @staticmethod
+    def codex_turn(turn, text):
+        event = CodexParsingTests.event
+        return [event("task_started", turn), CodexParsingTests().message(turn, text),
+                event("task_complete", turn, last_agent_message=text)]
+
+    def test_turns_search(self):
+        noise = [CodexParsingTests.event("token_count", "t1", info="x" * 200) for _ in range(40)]
+        early = self.tail(*self.codex_turn("t1", "Early."), *noise)
+        both = self.tail(*self.codex_turn("t0", "Old."), *noise, *self.codex_turn("t1", "New."))
+        # Byte zero and the cap both end the search; fewer messages stand at either, no turn is refused at either.
+        for label, tail, windows, expected in (
+            ("grows to byte zero", early, self.WIDE, ["Early."]),
+            ("no turn within the cap", early, self.CAPPED, t.NO_TURN),
+            ("fewer messages at the cap", both, self.CAPPED, ["New."]),
+            ("enough messages before the cap", both, self.WIDE, ["Old.", "New."]),
+        ):
+            with self.subTest(label):
+                search = t.turns_search(t.scan_codex, 2)
+                if isinstance(expected, str):
+                    with self.assertRaisesRegex(t.ThreadUnavailable, f"^{expected}$"):
+                        t.search_tail(tail, search, windows)
+                else:
+                    self.assertEqual([message.text for message in t.search_tail(tail, search, windows).messages],
+                                     expected)
+
+    def test_turns_search_widens_past_an_ancestry_gap_up_to_the_cap(self):
+        user, reply = ClaudeParsingTests.user, ClaudeParsingTests.assistant
+        tail = self.tail(
+            user("q1", "u1") | {"parentUuid": None}, reply("Kept.", "end_turn", uuid="a1", parentUuid="u1"), self.LARGE,
+            user("q2", "u2") | {"parentUuid": "a1"}, reply("Abandoned.", "end_turn", uuid="a2", parentUuid="u2"),
+            user("q3", "u3") | {"parentUuid": "a1"}, reply("After rewind.", "end_turn", uuid="a3", parentUuid="u3"),
+        )
+
+        def search():
+            return t.turns_search(
+                lambda records: t.scan_claude(records, ClaudeParsingTests.belongs, whole=records.from_start), 2)
+
+        self.assertEqual([message.text for message in t.search_tail(tail, search(), self.WIDE).messages],
+                         ["Kept.", "After rewind."])
+        with self.assertRaisesRegex(t.ThreadUnavailable, f"^{t.ANCESTRY_UNRESOLVED}$"):
+            t.search_tail(tail, search(), self.CAPPED)
+
+    def test_claude_cwd_and_title_searches(self):
+        user = ClaudeParsingTests.user
+        moved = self.tail(user("q"), user("q2", "u2", "/other"), self.LARGE)
+        titled = self.tail(user("q"), {"type": "custom-title", "customTitle": "Mine"}, self.LARGE)
+        for label, tail, windows, expected in (
+            ("a move hidden beyond the first window", moved, self.WIDE, "/other"),
+            ("no directory within the cap", moved, self.CAPPED, t.NO_CLAUDE_CWD),
+            ("no directory at byte zero", self.tail({"type": "summary"}), self.WIDE, t.NO_CLAUDE_CWD),
+        ):
+            with self.subTest(label):
+                if expected == t.NO_CLAUDE_CWD:
+                    with self.assertRaisesRegex(t.ThreadUnavailable, f"^{expected}$"):
+                        t.search_tail(tail, t.claude_cwd_search(None), windows)
+                else:
+                    self.assertEqual(t.search_tail(tail, t.claude_cwd_search(None), windows), expected)
+        # The title search ends at the stay's start, else at its last window: within the cap, no title is found.
+        for windows, expected in ((self.WIDE, "Mine"), (self.CAPPED, None)):
+            with self.subTest(windows=windows):
+                search = t.claude_title_search(ClaudeParsingTests.belongs, None)
+                self.assertEqual(t.search_tail(titled, search, windows), expected)
+
+
 class GitOutputTests(unittest.TestCase):
     def test_git_output_path_removes_only_the_line_end(self):
         cases = ((b"/r/.git\n", "/r/.git"), (b"/r/.git \n", "/r/.git "), (b"/r/.git\n\n", "/r/.git\n"),

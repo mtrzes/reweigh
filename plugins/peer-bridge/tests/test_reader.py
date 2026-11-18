@@ -26,7 +26,7 @@ from support import (
 )
 import history_capture  # found through the script directory support.py adds
 import thread_reader
-from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadSummary, ThreadUnavailable
+from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 
 class ReaderTests(unittest.TestCase):
@@ -346,14 +346,6 @@ class ReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ImportError, "incompatible architecture"):
                 history_capture.zstandard_module()
 
-    def test_codex_tail_window_grows_until_it_reaches_a_turn(self):
-        noise = [codex_event("token_count", "t1", info="x" * 200) for _ in range(200)]
-        codex_thread(self.codex_home, self.project, codex_turn("t1", "Early answer."), noise, name="Long")
-        with patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024):
-            result = self.read("codex", "Long")
-        self.assertEqual(result["messages"], [{"text": "Early answer.", "phase": "final_answer"}])
-        self.assertTrue(result["latest_turn"]["finished"])
-
     def test_claude_sessions_are_listed_and_read_by_the_same_rules(self):
         home = self.claude_home
         finished, _ = claude_session(home, self.project, claude_prompt(), claude_reply("Checking.", "tool_use"),
@@ -379,24 +371,6 @@ class ReaderTests(unittest.TestCase):
                          {"status": "inProgress", "finished": False, "liveness": "unknown"})
         self.assertEqual(self.read("claude", stopped)["latest_turn"]["status"], "interrupted")
 
-    def test_claude_read_expands_the_tail_to_resolve_a_rewind(self):
-        records = [
-            claude_prompt() | {"uuid": "u1", "parentUuid": None},
-            claude_reply("Kept.") | {"uuid": "a1", "parentUuid": "u1"},
-            {"type": "file-history-snapshot", "snapshot": "x" * 4096},
-            claude_prompt() | {"uuid": "u2", "parentUuid": "a1"},
-            claude_reply("Abandoned.") | {"uuid": "a2", "parentUuid": "u2"},
-            claude_prompt() | {"uuid": "u3", "parentUuid": "a1"},
-            claude_reply("After rewind.") | {"uuid": "a3", "parentUuid": "u3"},
-        ]
-        identifier, _ = claude_session(self.claude_home, self.project, *records)
-        with patch.object(thread_reader, "INITIAL_TAIL_BYTES", 2048):
-            self.assertEqual([m["text"] for m in self.read("claude", identifier, max_messages=1)["messages"]],
-                             ["After rewind."])
-            with patch.object(thread_reader, "MAX_TAIL_BYTES", 2048):
-                with self.assertRaisesRegex(ThreadUnavailable, "active ancestry could not be resolved"):
-                    self.read("claude", identifier, max_messages=1)
-
     def test_a_claude_session_belongs_where_its_latest_records_are(self):
         home = self.claude_home
         moved_in, path = claude_session(home, self.other, claude_prompt(), claude_reply("Started elsewhere."),
@@ -416,12 +390,10 @@ class ReaderTests(unittest.TestCase):
         self.assertNotIn(moved_out, json.dumps(listing))
         # The read decides again from the bytes it returns: each row runs in homes of its own.
         elsewhere = {"cwd": str(self.other)}
-        large_record = json.dumps({"type": "file-history-snapshot", "snapshot": "x" * 4096}) + "\n"
 
         def append(path, *records):
             with path.open("a", encoding="utf-8") as history:
-                history.write("".join(record if isinstance(record, str) else json.dumps(record) + "\n"
-                                      for record in records))
+                history.write("".join(json.dumps(record) + "\n" for record in records))
 
         def at_selection(action):
             """Run action after the listing has picked the thread and before the source reads it."""
@@ -459,22 +431,6 @@ class ReaderTests(unittest.TestCase):
             stack.enter_context(at_selection(lambda: os.replace(foreign, path)))
             return lambda: self.read("codex", thread), "^No readable thread with that ID"
 
-        def move_hidden_beyond_the_first_window(stack, codex, claude):
-            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
-            append(path, {**claude_prompt(), **elsewhere}, {**claude_reply("Elsewhere."), **elsewhere}, large_record)
-            stack.enter_context(patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024))
-            return lambda: self.read("claude", thread), "^No readable thread with that ID"
-
-        def directory_beyond_the_cap(stack, codex, claude):
-            thread, path = claude_session(claude, self.project, claude_prompt(), claude_reply("Here."))
-            append(path, large_record)
-            stack.enter_context(patch.object(thread_reader, "INITIAL_TAIL_BYTES", 1024))
-            stack.enter_context(patch.object(thread_reader, "MAX_TAIL_BYTES", 2048))
-            include = self.reader("claude").same_repository(self.project)
-            summary = ThreadSummary(thread, None, str(self.project), 0.0)
-            return (lambda: ClaudeSessionsSource().read_thread(summary, 3, include),
-                    "^The session's recent history does not name its working directory.$")
-
         def moved_in_after_a_foreign_answer(stack, codex, claude):
             thread, path = claude_session(claude, self.other, claude_prompt(), claude_reply("Started elsewhere."),
                                           {"type": "custom-title", "customTitle": "Elsewhere title"}, project="other")
@@ -487,7 +443,7 @@ class ReaderTests(unittest.TestCase):
                     ([], {"status": "inProgress", "finished": False, "liveness": "unknown"}, None))
 
         rows = (claude_append_after_selection, cwd_symlink_retargeted_after_selection, codex_replaced_after_selection,
-                move_hidden_beyond_the_first_window, directory_beyond_the_cap, moved_in_after_a_foreign_answer)
+                moved_in_after_a_foreign_answer)
         for row in rows:
             homes = self.root / row.__name__
             codex, claude = homes / "codex-home", homes / "claude-home"

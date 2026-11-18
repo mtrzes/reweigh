@@ -25,10 +25,11 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    ClaudeAncestryGap, GIT_LOCATION_ENV, NOT_IN_REPOSITORY, ThreadListing, ThreadSnapshot, ThreadSummary,
-    ThreadUnavailable, claude_head, claude_last_cwd, claude_snapshot, codex_main_thread, codex_snapshot,
+    GIT_LOCATION_ENV, NOT_IN_REPOSITORY, TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable,
+    claude_cwd_search, claude_head, claude_snapshot, claude_title_search, codex_main_thread, codex_snapshot,
     git_output_path, is_interactive_claude_session, is_supported_history, listing_result, match_thread, newest_first,
-    parse_session_index, rollout_identifier, scan_claude, scan_codex, scan_is_enough, snapshot_result, UUID_PATTERN,
+    parse_session_index, rollout_identifier, scan_claude, scan_codex, search_tail, snapshot_result, turns_search,
+    UUID_PATTERN,
 )
 
 __all__ = [
@@ -36,7 +37,8 @@ __all__ = [
     "ThreadUnavailable", "git_common_dir",
 ]
 
-INITIAL_TAIL_BYTES = 256 * 1024
+# Each search starts at 256 KiB of a history's tail and doubles its window up to the most a capture keeps.
+TAIL_WINDOWS = TailWindows(256 * 1024, MAX_TAIL_BYTES)
 MAX_HEAD_LINES = 50
 
 
@@ -55,35 +57,6 @@ class ThreadSource(Protocol):
 
     def has_history(self, session_id: str) -> bool:
         """Whether the app still keeps a history file for the session, in any format, consultations included."""
-
-
-def grown(window):
-    return min(window * 2, MAX_TAIL_BYTES)
-
-
-def scan_tail(history, scan, enough):
-    """Grow the tail window until the scan has enough, or reaches the whole file or the cap."""
-    window = INITIAL_TAIL_BYTES
-    while True:
-        records = history.tail(window)
-        whole = records.from_start
-        at_limit = whole or window >= MAX_TAIL_BYTES
-        try:
-            result = scan(records, whole)
-        except ClaudeAncestryGap:
-            if at_limit:
-                raise
-        else:
-            if at_limit or enough(result):
-                return result
-        window = grown(window)
-
-
-def scan_turns(history, max_messages, scan):
-    result = scan_tail(history, scan, lambda result: scan_is_enough(result, max_messages))
-    if result.latest is None:
-        raise ThreadUnavailable("No turn was found in the thread's recent history.")
-    return result
 
 
 class CodexFilesSource:
@@ -169,8 +142,8 @@ class CodexFilesSource:
             if forked_from_id:
                 raise ThreadUnavailable("Forked Codex threads are not supported yet.")
             current = replace(summary, cwd=cwd, source_kind=source, forked_from_id=forked_from_id)
-            return codex_snapshot(current, scan_turns(history, max_messages,
-                                                      lambda records, _whole: scan_codex(records)), max_messages)
+            scan = search_tail(history.tail, turns_search(scan_codex, max_messages), TAIL_WINDOWS)
+            return codex_snapshot(current, scan, max_messages)
 
         return read_stable(self.home, lambda: self.rollout(summary.id), read)
 
@@ -196,23 +169,11 @@ class ClaudeSessionsSource:
     @staticmethod
     def current_cwd(history, identifier):
         """The working directory the session's latest records name and its entrypoint, for an interactive session;
-        else (None, None).
-
-        The window grows until a record names a directory: a large record without one can follow the latest move. If
-        none does within the cap, which repository the session is in is unknown, and the session is refused.
-        """
+        else (None, None)."""
         first_cwd, entrypoint = claude_head(islice(history.head_lines(), MAX_HEAD_LINES), identifier)
         if first_cwd is None or not is_interactive_claude_session(entrypoint):
             return None, None
-        window = INITIAL_TAIL_BYTES
-        while True:
-            records = history.tail(window)
-            cwd = claude_last_cwd(records, identifier)
-            if cwd is not None:
-                return cwd, entrypoint
-            if records.from_start or window >= MAX_TAIL_BYTES:
-                raise ThreadUnavailable("The session's recent history does not name its working directory.")
-            window = grown(window)
+        return search_tail(history.tail, claude_cwd_search(identifier), TAIL_WINDOWS), entrypoint
 
     def list_threads(self, include):
         threads, unreadable = [], []
@@ -234,11 +195,7 @@ class ClaudeSessionsSource:
         cwd, entrypoint = self.current_cwd(history, identifier)
         if cwd is None or not include(cwd):
             return None
-
-        def scan(records, _whole):
-            return scan_claude(records, include, title_only=True, identifier=identifier)
-
-        name = scan_tail(history, scan, lambda result: result.segment_start).title
+        name = search_tail(history.tail, claude_title_search(include, identifier), TAIL_WINDOWS)
         return ThreadSummary(id=identifier, name=name, cwd=cwd, recency_at=history.recency, source_kind=entrypoint)
 
     def read_thread(self, summary, max_messages, include):
@@ -247,8 +204,11 @@ class ClaudeSessionsSource:
             cwd, entrypoint = self.current_cwd(history, summary.id)
             if cwd is None or not belongs(cwd):
                 raise ThreadUnavailable(NOT_IN_REPOSITORY)
-            scan = scan_turns(history, max_messages,
-                              lambda records, whole: scan_claude(records, belongs, identifier=summary.id, whole=whole))
+
+            def scan_records(records):
+                return scan_claude(records, belongs, identifier=summary.id, whole=records.from_start)
+
+            scan = search_tail(history.tail, turns_search(scan_records, max_messages), TAIL_WINDOWS)
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
             current = replace(summary, cwd=cwd, name=scan.title, source_kind=entrypoint)
             return claude_snapshot(current, scan, max_messages)

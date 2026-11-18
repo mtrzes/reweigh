@@ -16,9 +16,8 @@ import os
 import stat
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 
-from thread_parsing import ThreadUnavailable, complete_records, parse_line, rollout_format
+from thread_parsing import TailRecords, ThreadUnavailable, parse_line, rollout_format
 
 # The most recent decoded content a compressed capture keeps, and so the largest tail window any capture serves.
 MAX_TAIL_BYTES = 32 * 1024 * 1024
@@ -137,15 +136,6 @@ class BoundedInput:
             raise HistoryChanged
         self.remaining -= length
         return block
-
-
-@dataclass(frozen=True)
-class TailRecords:
-    data: bytes
-    from_start: bool
-
-    def __iter__(self):
-        return complete_records(self.data, self.from_start)
 
 
 class PlainHistory:
