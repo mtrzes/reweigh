@@ -33,7 +33,8 @@ Each app reaches the bridge through its own plugin; the shell uses the same scri
 
 All rules (request checks, the peer's command line, environment cleanup, the handoff text, failure diagnosis, job
 states) live in two pure modules, `consultation.py` and `thread_parsing.py`; the rest only starts processes and
-touches files.
+touches files. Failure diagnosis, for example, decides there which facts a failed run needs for its provider and
+whether it resumed; a probe in `bridge.py` observes each one as true, false or unknown.
 
 ## One consultation
 
@@ -56,9 +57,10 @@ flowchart TB
   `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the peer's process group and
   stops all of it when the consultation ends, times out or is cancelled, and when the bridge's own process dies, even
-  by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, the sign-in probe uses the time
-  left from the peer's timeout. Each guard holds the conversation's lock, so the conversation and its checkout stay
-  busy until the process group has stopped. Opening a conversation gives one scope that holds its lock, its record and
+  by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, the sign-in probe and the
+  lookup of the peer's history use the time left from the peer's timeout, and neither starts once it is spent. Each
+  guard holds the conversation's lock, so the conversation and its checkout stay busy until the process group has
+  stopped. Opening a conversation gives one scope that holds its lock, its record and
   its checkout's fixed location; every process of the consultation starts through that scope, and it saves the record
   only once the peer's result has been checked against it. The sweep of leftover checkouts takes another
   conversation's lock the same way, without opening its record. The bridge's last signal to a group always comes

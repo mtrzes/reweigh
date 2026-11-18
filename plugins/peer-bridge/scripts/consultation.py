@@ -558,6 +558,20 @@ def git_entry_found(directory, lstat):
     return False
 
 
+def failure_probes(provider, resuming):
+    """The facts a failed consultation needs a probe for, in the order they are gathered: whether the CLI is signed in;
+    on a follow-up, whether the peer still keeps the session's history; for Codex, on a follow-up, whether another app
+    holds the thread's writer lock, and always whether working_directory is in a git repository."""
+    probes = ["signed_in"]
+    if resuming:
+        probes.append("history_present")
+    if provider == "codex":
+        if resuming:
+            probes.append("writer_lock_present")
+        probes.append("in_git_repository")
+    return tuple(probes)
+
+
 def failure_message(provider, facts, generic):
     """The message for a failed consultation: a named cause when the facts establish one, else the generic message."""
     names = {"name": PROVIDER_NAMES[provider], "model_setting": MODEL_SETTINGS[provider]}

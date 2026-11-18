@@ -22,8 +22,8 @@ import anyio
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
-    BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, bridge, codex_thread, codex_turn, consultation,
-    eventually_async, git, git_repository, read_pid, running,
+    BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, RecordingProbe, bridge, codex_thread, codex_turn,
+    consultation, eventually_async, git, git_repository, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
 
@@ -374,11 +374,9 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
         git_repository(self.project)
-        cases = (  # one row per fact: sign-in probes, the result's status field, the stderr tag, settings, .git
-            ("claude", {"SIMULATED_SIGNED_IN": "0"}, {}, "Claude Code is not signed in"),
+        # One row per path a fact travels to the message; test_core holds the rules that read them.
+        cases = (  # the sign-in probe, the peer's stderr, the model settings, a real .git lookup
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
-            ("claude", {"SIMULATED_PEER_MODE": "api_error", "SIMULATED_API_STATUS": "401"}, {},
-             "Claude Code is not signed in"),
             ("claude", {"SIMULATED_FAILURE_TEXT": '[claude-code:unrecognized_model] {"model":"x"}'}, {},
              "Claude Code rejected the requested model."),
             ("codex", {"PEER_BRIDGE_CODEX_MODEL": "gpt-x"}, {}, "codex consultation failed (exit 1). Check CLI "
@@ -393,6 +391,39 @@ class ConsultationTests(BridgeTestCase):
         message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
         self.assertEqual(message, consultation.OUTSIDE_GIT)
         self.assertEqual(list(self.state.glob("*.json")), [])
+
+    async def test_diagnosis_asks_the_probes_its_provider_and_resume_state_need(self):
+        git_repository(self.project)
+        for provider in ("claude", "codex"):
+            conversation = (await self.consult(provider))["conversation_id"]
+            session = json.loads((self.state / f"{conversation}.json").read_text())["backend_session_id"]
+            for resumed, arguments, answers, expected in (
+                (None, {}, {"signed_in": False}, "is not signed in"),
+                (session, {"conversation_id": conversation}, {"signed_in": True, "history_present": False},
+                 "no longer has this conversation's history"),
+            ):
+                with self.subTest(provider=provider, resumed=bool(resumed)):
+                    self.client.probe = RecordingProbe(answers)
+                    message = await self.failure_message(provider, {}, **arguments)
+                    self.assertIn(expected, message)
+                    self.assertEqual(self.client.probe.asked,
+                                     [(name, resumed) for name in consultation.failure_probes(provider, bool(resumed))])
+
+    async def test_the_history_lookup_never_starts_once_the_peers_budget_is_spent(self):
+        clock, looked_up = SimpleNamespace(now=100.0), []
+
+        def rollouts():
+            looked_up.append(clock.now)
+            return {"session": []}
+
+        source = SimpleNamespace(rollouts=rollouts)
+        scope = bridge.ConversationLock(None, None, lambda: clock.now, None)
+        peer = scope.budget(5)
+        probe = bridge.FailureProbe("codex", self.project, scope, peer, source)
+        self.assertIs(await probe.observe("history_present", "session"), True)
+        clock.now += 5
+        self.assertIsNone(await probe.observe("history_present", "session"))
+        self.assertEqual(looked_up, [100.0])
 
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
         git_repository(self.project)

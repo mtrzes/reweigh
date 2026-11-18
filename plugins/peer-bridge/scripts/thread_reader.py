@@ -92,9 +92,6 @@ class ThreadSource(Protocol):
         whether the thread's working directory passes include, and refuses the thread otherwise.
         """
 
-    def has_history(self, session_id: str) -> bool:
-        """Whether the app still keeps a history file for the session, in any format, consultations included."""
-
 
 def zstandard_module():
     try:
@@ -365,9 +362,6 @@ class CodexFilesSource:
                         continue
         return found
 
-    def has_history(self, session_id):
-        return session_id in self.rollouts()
-
     def writer_lock_present(self, session_id):
         return (self.home / "thread-writer-locks" / f"{session_id}.lock").exists()
 
@@ -438,11 +432,12 @@ class ClaudeSessionsSource:
     def home(self):
         return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
 
-    def has_history(self, session_id):
-        return any((self.home / "projects").glob(f"*/{session_id}.jsonl"))
+    def session_files(self, session_id):
+        """Every history file for the session, consultations included: read here, and by failure diagnosis."""
+        return list((self.home / "projects").glob(f"*/{session_id}.jsonl"))
 
     def session_file(self, session_id):
-        paths = list((self.home / "projects").glob(f"*/{session_id}.jsonl"))
+        paths = self.session_files(session_id)
         if len(paths) != 1:
             raise ThreadUnavailable("The session's history file was not found.")
         return paths[0]

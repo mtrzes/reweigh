@@ -1,5 +1,6 @@
 """Table-driven tests for the pure consultation and thread rules. No process, file or environment access."""
 
+import dataclasses
 import json
 import os
 import stat
@@ -393,6 +394,17 @@ class OutcomeTests(unittest.TestCase):
 
             with self.subTest(entries=entries):
                 self.assertIs(c.git_entry_found(directory, lstat), expected)
+
+    def test_failure_probes(self):
+        for provider, resuming, expected in (
+            ("claude", False, ("signed_in",)),
+            ("claude", True, ("signed_in", "history_present")),
+            ("codex", False, ("signed_in", "in_git_repository")),
+            ("codex", True, ("signed_in", "history_present", "writer_lock_present", "in_git_repository")),
+        ):
+            with self.subTest(provider=provider, resuming=resuming):
+                self.assertEqual(c.failure_probes(provider, resuming), expected)
+                self.assertLessEqual(set(expected), {field.name for field in dataclasses.fields(c.FailureFacts)})
 
     def test_failure_message_names_a_cause_only_when_the_facts_establish_it(self):
         generic = "GENERIC"

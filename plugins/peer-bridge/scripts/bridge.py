@@ -31,7 +31,7 @@ from consultation import (
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
-    git_entry_found,
+    failure_probes, git_entry_found,
 )
 from cleanup import run_to_completion
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
@@ -307,6 +307,52 @@ async def signed_in(provider, directory, scope, peer):
     except (BridgeError, OSError):
         return None
     return signed_in_from(provider, return_code, output.decode("utf-8", errors="replace"))
+
+
+class FailureProbe:
+    """Observe what may explain one failed consultation: the real adapter behind diagnosis, which decides what to ask.
+
+    Each observation is True, False, or None when it cannot tell. The conversation's scope supplies lock-bound
+    execution and the peer's budget, whose remainder bounds the sign-in probe and the history lookup; the thread
+    reader's source supplies the shared lookups of the peer's files.
+    """
+
+    def __init__(self, provider, directory, scope, peer, source):
+        self.provider, self.directory, self.scope, self.peer, self.source = provider, directory, scope, peer, source
+
+    async def observe(self, name, session):
+        observations = {"signed_in": self.signed_in, "history_present": self.history_present,
+                        "writer_lock_present": self.writer_lock_present, "in_git_repository": self.in_git_repository}
+        return await observations[name](session)
+
+    async def signed_in(self, session):
+        return await signed_in(self.provider, self.directory, self.scope, self.peer)
+
+    async def history_present(self, session):
+        """Whether the peer still keeps any history file for the session, consultations included. It is not started
+        once the peer's budget is spent, nor waited for beyond it: listing a large history can take a while."""
+        left = self.peer.left()
+        if left <= 0:
+            return None
+        if self.provider == "codex":
+            def lookup():
+                return session in self.source.rollouts()
+        else:
+            def lookup():
+                return bool(self.source.session_files(session))
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(lookup), left)
+        except (OSError, asyncio.TimeoutError):
+            return None
+
+    async def writer_lock_present(self, session):
+        try:
+            return self.source.writer_lock_present(session)
+        except OSError:
+            return None
+
+    async def in_git_repository(self, session):
+        return await asyncio.to_thread(git_entry_found, Path(os.path.realpath(self.directory)), os.lstat)
 
 
 def codex_catalogue():
@@ -611,7 +657,7 @@ async def pinned_checkout(scope, directory, ref):
 
 
 class Bridge:
-    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None):
+    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None):
         self.store = store or SessionStore(state_directory())
         self.readers = readers or {
             "claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource()),
@@ -619,6 +665,8 @@ class Bridge:
         self.timeout = consultation_timeout(os.environ, timeout)
         self.jobs = jobs or JobStore(self.store.directory)
         self.spawn = spawn or spawn_runner
+        # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
+        self.probe = probe or FailureProbe
 
     def checked_request(self, provider, prompt, working_directory, conversation_id, model=None, reasoning_effort=None):
         """Check what can be checked before a consultation starts; return the canonical project directory and the
@@ -738,33 +786,22 @@ class Bridge:
                     raise failure
                 backend_session_id, reply = consultation_outcome(provider, return_code, output)
             except PeerFailure as exc:
-                facts = await self.failure_facts(provider, directory, conversation.record, output, errors,
-                                                 scope=conversation, peer=peer,
+                probe = self.probe(provider, directory, conversation, peer, self.readers[provider].source)
+                facts = await self.failure_facts(provider, conversation.record, output, errors, probe,
                                                  chose_model=bool(model or reasoning_effort))
                 raise BridgeError(failure_message(provider, facts, str(exc))) from exc
             conversation.save(backend_session_id, commit)
             return consultation_result(provider, conversation.identifier, reply, commit, model, reasoning_effort)
 
-    async def failure_facts(self, provider, directory, record, output, errors, *, scope, peer, chose_model=False):
-        """Establish what may explain a failed run, from exact fields and checks, never from the CLI's text."""
+    @staticmethod
+    async def failure_facts(provider, record, output, errors, probe, chose_model=False):
+        """Establish what may explain a failed run, from exact fields and the probes failure_probes selects for the
+        provider and resume state, never from the CLI's text."""
         session = record.get("backend_session_id")
-        source = self.readers[provider].source
-
-        def check(question, *arguments):
-            try:
-                return question(*arguments)
-            except OSError:
-                return None
-
-        facts = {"resuming": bool(session), "signed_in": await signed_in(provider, directory, scope, peer),
-                 **output_signals(provider, output, errors)}
-        if session:
-            facts["history_present"] = await asyncio.to_thread(check, source.has_history, session)
+        facts = {"resuming": bool(session), **output_signals(provider, output, errors)}
+        for name in failure_probes(provider, bool(session)):
+            facts[name] = await probe.observe(name, session)
         if provider == "codex":
-            if session:
-                facts["writer_lock_present"] = check(source.writer_lock_present, session)
-            facts["in_git_repository"] = await asyncio.to_thread(
-                git_entry_found, Path(os.path.realpath(directory)), os.lstat)
             facts["model_setting"] = chose_model
         return FailureFacts(**facts)
 
