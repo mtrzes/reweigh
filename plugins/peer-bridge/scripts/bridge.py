@@ -38,6 +38,10 @@ import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
+START_UNCONFIRMED = (
+    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
+    "with that job ID."
+)
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
@@ -274,6 +278,8 @@ async def run_to_completion(cleanup):
                 # Keep the first: anyio recognises its own cancellation by the message.
                 if cancellation is None:
                     cancellation = exc
+            except Exception:
+                pass  # the cleanup failed: its error is raised below, unless a cancellation came first
     if cancellation is not None:
         raise cancellation
     return task.result()
@@ -624,8 +630,20 @@ class Bridge:
                     # The runner is busy with the job already: the caller still needs its ID.
                     return {"job_id": job_id, "provider": provider, "state": "queued"}
             except asyncio.CancelledError:
-                # The caller will never learn this job's ID, so it is cancelled rather than left to run.
-                await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
+                # The caller will never learn this job's ID, so it is cancelled rather than left to run. A cleanup that
+                # fails does not turn the interruption into an ordinary failure: nobody is left to read either.
+                try:
+                    await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
+                except (BridgeError, OSError):
+                    pass
+                raise
+            except (BridgeError, OSError) as exc:
+                # Nor when the job cannot be read. Cancelling reads the job first, so it can fail the same way; then
+                # the ID is the only way left to reach the job.
+                try:
+                    await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
+                except (BridgeError, OSError):
+                    raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from exc
                 raise
 
     async def discard_created(self, creating, provider):

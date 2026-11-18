@@ -233,6 +233,61 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
         self.assertFalse((folder / "request.json").exists())
 
+    async def test_a_start_whose_first_view_fails_cancels_its_job_or_names_it(self):
+        # The caller learns a job's ID only from that view, so a job it cannot read is cancelled rather than left to
+        # run; if cancelling fails too, the failure carries the ID.
+        self.client.spawn = lambda job_id: None
+        jobs_folder = self.state / "jobs"
+        for failure, expected in (
+            (bridge.BridgeError("A fixed message."), "A fixed message."),
+            (OSError("disk"), "Cannot read or write the consultation job files."),
+        ):
+            with self.subTest(failure=failure):
+                before = set(jobs_folder.iterdir()) if jobs_folder.exists() else set()
+                with (
+                    patch.object(self.client.jobs, "view", side_effect=failure),
+                    self.assertRaises(bridge.BridgeError) as raised,
+                ):
+                    await self.start(prompt="PRIVATE QUESTION")
+                self.assertEqual(str(raised.exception), expected)
+                [folder] = set(jobs_folder.iterdir()) - before
+                self.assertFalse((folder / "request.json").exists())  # read first: a status read deletes it too
+                self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
+        before = set(jobs_folder.iterdir())
+        with (
+            patch.object(self.client.jobs, "view", side_effect=OSError("disk")),
+            patch.object(self.client.jobs, "cancel", side_effect=OSError("disk")),
+            self.assertRaises(bridge.BridgeError) as raised,
+        ):
+            await self.start()
+        [folder] = set(jobs_folder.iterdir()) - before
+        self.assertIn(folder.name, str(raised.exception))
+        self.assertIn("cancellation could not be confirmed", str(raised.exception))
+
+    async def test_an_interrupted_start_stays_cancelled_when_its_cleanup_fails(self):
+        # The caller is interrupted during the first view, or during the cleanup that follows a failed one.
+        self.client.spawn = lambda job_id: None
+        for interrupted in ("view", "cancel"):
+            entered, release = threading.Event(), threading.Event()
+
+            def held(*arguments, entered=entered, release=release, **options):
+                entered.set()
+                release.wait(DEADLINE_SECONDS)
+                raise OSError("disk")
+
+            hooks = {"view": OSError("disk"), "cancel": OSError("disk"), interrupted: held}
+            with (
+                self.subTest(interrupted=interrupted),
+                patch.object(self.client.jobs, "view", side_effect=hooks["view"]),
+                patch.object(self.client.jobs, "cancel", side_effect=hooks["cancel"]),
+            ):
+                task = asyncio.create_task(self.start())
+                self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
+                task.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
     async def test_a_start_cancelled_during_creation_leaves_no_runnable_job(self):
         entered, release = threading.Event(), threading.Event()
         real_create, spawned = self.client.jobs.create, []
