@@ -80,8 +80,35 @@ class ScanEventsTest(unittest.TestCase):
         self.assertEqual(scan["denied"], ["Read"])
         self.assertFalse(scan["is_error"])
 
+    def test_a_mode_read_counts_after_reply_only_once_a_peer_reply_came_before_it(self):
+        ask, start = ev.CONSULT_TOOLS
+        mode = "/p/plugins/peer-bridge/skills/consult-peer/double-crux.md"
+        rows = [
+            ([tool_use("r1", "Read", file_path=mode), tool_use("a1", ask, prompt="q"),
+              tool_result("a1", {"conversation_id": "c1", "reply": "r"})], []),
+            ([tool_use("a1", ask, prompt="q"), tool_result("a1", {"conversation_id": "c1", "reply": "r"}),
+              tool_use("r1", "Read", file_path=mode)], ["double-crux"]),
+            ([tool_use("a1", ask, prompt="q"), tool_result("a1", {"error": "timeout"}, is_error=True),
+              tool_use("r1", "Read", file_path=mode)], []),
+            ([tool_use("s1", start, prompt="q"), tool_result("s1", {"job_id": "j", "state": "queued"}),
+              tool_use("r1", "Read", file_path=mode)], []),
+            ([tool_use("s1", start, prompt="q"), tool_result("s1", {"job_id": "j", "state": "queued"}),
+              tool_use("g1", ev.POLL_TOOL, job_id="j"), tool_result("g1", {"state": "completed", "reply": "r"}),
+              tool_use("r1", "Read", file_path=mode)], ["double-crux"]),
+        ]
+        for events, after in rows:
+            with self.subTest(events=[e["message"]["content"][0].get("name") or "result" for e in events]):
+                self.assertEqual(ev.scan_events(events)["modes_read_after_reply"], after)
+
     def test_missing_result_is_an_error(self):
         self.assertTrue(ev.scan_events([])["is_error"])
+
+
+class BuildPromptTest(unittest.TestCase):
+    def test_a_dispute_prompt_carries_the_fact_and_the_contract(self):
+        prompt = ev.build_prompt({"kind": "dispute", "message": "m", "fact": "THE-FACT"}, "+x")
+        self.assertIn('"THE-FACT"', prompt)
+        self.assertIn("VERDICT: fix|no-fix|unresolved", prompt)
 
 
 class CodexCostTest(unittest.TestCase):

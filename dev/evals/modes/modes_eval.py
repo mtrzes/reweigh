@@ -32,10 +32,12 @@ ROOT = HERE.parents[2]
 CASES = HERE / "cases"
 SERVER_TOOLS = "mcp__plugin_peer-bridge_peer-bridge"
 CONSULT_TOOLS = (f"{SERVER_TOOLS}__ask_codex", f"{SERVER_TOOLS}__start_codex_consultation")
+POLL_TOOL = f"{SERVER_TOOLS}__get_consultation"
 MODE_FILES = {"steelman": "skills/consult-peer/steelman.md", "double-crux": "skills/consult-peer/double-crux.md"}
 # The mode each kind of case is meant to exercise.
-TARGET_MODE = {"steelman": "steelman", "double-crux": "double-crux", "staged": "double-crux"}
-VERDICTS = {"steelman": ("accept", "reject"), "double-crux": ("fix", "no-fix"), "staged": ("fix", "no-fix")}
+TARGET_MODE = {"steelman": "steelman", "double-crux": "double-crux", "staged": "double-crux", "dispute": "double-crux"}
+VERDICTS = {"steelman": ("accept", "reject"), "double-crux": ("fix", "no-fix"), "staged": ("fix", "no-fix"),
+            "dispute": ("fix", "no-fix")}
 UNRESOLVED = "unresolved"
 MAX_EVIDENCE = 3
 
@@ -46,6 +48,10 @@ ASK = {
     "fix it before merging. Load the consult-peer skill, then consult Codex through peer-bridge before you decide.",
     "staged": 'Earlier in this review you concluded about commit HEAD in this repository (diff below): "{claim}" '
     "I will act on that unless it is wrong. Load the consult-peer skill, then consult Codex through peer-bridge, then give me your final call.",
+    # The lead holds a fact the repository lacks; Codex first reviews without it, so a dispute can arise.
+    "dispute": "Review commit HEAD in this repository (diff below) and decide whether it needs a fix before merging. "
+    "Load the consult-peer skill, then ask Codex through peer-bridge for an independent recommendation based on the "
+    'repository and diff alone. After its first reply, use this fact from me in making your decision: "{fact}"',
 }
 CONTRACT = (
     "Do not change any file. End your reply with these lines, exactly in this form:\n"
@@ -61,7 +67,7 @@ CONTRACT = (
 
 def build_prompt(case: dict, diff: str) -> str:
     first, second = VERDICTS[case["kind"]]
-    ask = ASK[case["kind"]].format(message=case["message"], claim=case.get("claim", ""))
+    ask = ASK[case["kind"]].format(message=case["message"], claim=case.get("claim", ""), fact=case.get("fact", ""))
     return f"{ask}\n\n```diff\n{diff.rstrip()}\n```\n\n{CONTRACT.format(first=first, second=second)}"
 
 
@@ -109,12 +115,24 @@ def score(case: dict, answer: dict, roots: list[str]) -> dict:
     }
 
 
+def _reply_of(block: dict) -> bool:
+    """Whether a tool result carries a peer reply: a JSON payload with a non-empty "reply" field."""
+    content = block.get("content")
+    for text in [c.get("text", "") for c in content] if isinstance(content, list) else [str(content or "")]:
+        try:
+            if json.loads(text).get("reply"):
+                return True
+        except (ValueError, AttributeError):
+            pass
+    return False
+
+
 def scan_events(events: list[dict]) -> dict:
     """Count consultations, follow-ups, failures and mode-file reads from stream-json events."""
     calls, failed_ids, follow_ups, modes_read, conversations, skill_loaded = {}, set(), 0, set(), set(), False
-    denied = []
+    denied, polls, read_at, first_reply_at = [], set(), {}, None
     result = {}
-    for event in events:
+    for position, event in enumerate(events):
         if event.get("type") == "result":
             result = event
         if event.get("subtype") == "permission_denied":
@@ -130,13 +148,22 @@ def scan_events(events: list[dict]) -> dict:
                     follow_ups += bool(args.get("conversation_id"))
                 if name == "Skill" and args.get("skill") == "peer-bridge:consult-peer":
                     skill_loaded = True
+                if name == POLL_TOOL:
+                    polls.add(block.get("id"))
                 if name == "Read":
                     for mode, suffix in MODE_FILES.items():
                         if str(args.get("file_path", "")).endswith("/" + suffix):
                             modes_read.add(mode)
+                            read_at.setdefault(mode, []).append(position)
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in polls:
+                # A background job's reply arrives through get_consultation, not through the start call.
+                if first_reply_at is None and _reply_of(block):
+                    first_reply_at = position
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
                 if block.get("is_error"):
                     failed_ids.add(block.get("tool_use_id"))
+                elif first_reply_at is None and _reply_of(block):
+                    first_reply_at = position
                 content = block.get("content")
                 texts = [c.get("text", "") for c in content] if isinstance(content, list) else [str(content or "")]
                 for text in texts:
@@ -154,6 +181,8 @@ def scan_events(events: list[dict]) -> dict:
         "skill_loaded": skill_loaded,
         "modes_read": sorted(modes_read),
         "denied": denied,
+        "modes_read_after_reply": sorted(mode for mode, positions in read_at.items()
+                                         if first_reply_at is not None and max(positions) > first_reply_at),
         "conversations": sorted(conversations),
         "text": result.get("result") or "",
         "lead_cost_usd": result.get("total_cost_usd") or 0.0,
@@ -270,6 +299,7 @@ def run_one(args, case_id: str, arm: str, plugin: Path, rep: int) -> dict:
     record = {"case": case_id, "kind": case["kind"], "arm": arm, "rep": rep, "timed_out": timed_out,
               **score(case, parse_answer(scan["text"], case["kind"]), roots),
               "target_mode_read": TARGET_MODE[case["kind"]] in scan["modes_read"],
+              "target_mode_read_after_reply": TARGET_MODE[case["kind"]] in scan["modes_read_after_reply"],
               **{k: v for k, v in scan.items() if k != "text"},
               "codex_tokens": tokens, "codex_sessions": len(files), "truth_leak": leaked}
     (run_dir / "record.json").write_text(json.dumps(record, indent=2))
@@ -306,14 +336,16 @@ def summary(args) -> None:
         print(f"{arm}: runs={n} correct={sum(r['correct'] for r in rows)} unresolved={sum(r['unresolved'] for r in rows)} "
               f"evidence_hit={sum(r['evidence_hit'] for r in rows)} format_ok={sum(r['format_ok'] for r in rows)} "
               f"skill_loaded={sum(r.get('skill_loaded', False) for r in rows)} "
-              f"mode_read={sum(r['target_mode_read'] for r in rows)} consultations={sum(r['consultations'] for r in rows)} "
+              f"mode_read={sum(r['target_mode_read'] for r in rows)} "
+              f"after_reply={sum(r.get('target_mode_read_after_reply', False) for r in rows)} "
+              f"correct_with_evidence={sum(r['correct'] and r['evidence_hit'] for r in rows)} consultations={sum(r['consultations'] for r in rows)} "
               f"follow_ups={sum(r['follow_ups'] for r in rows)} failed={sum(r['failed'] for r in rows)} "
               f"denied={sum(len(r.get('denied', [])) for r in rows)} leaks={sum(r['truth_leak'] for r in rows)} "
               f"lead=${lead:.2f} codex~${codex:.2f}")
         for r in rows:
             t = r["codex_tokens"]
             print(f"  {r['case']} rep{r['rep']}: verdict={r['verdict']} correct={r['correct']} evidence={r['evidence_hit']} "
-                  f"modes_read={r['modes_read']} consults={r['consultations']} follow_ups={r['follow_ups']} "
+                  f"modes_read={r['modes_read']} after_reply={r.get('modes_read_after_reply', [])} consults={r['consultations']} follow_ups={r['follow_ups']} "
                   f"turns={r['turns']} {r['duration_ms'] / 1000:.0f}s lead=${r['lead_cost_usd']:.2f} "
                   f"codex in={t.get('input_tokens', 0)} cached={t.get('cached_input_tokens', 0)} out={t.get('output_tokens', 0)}")
 
