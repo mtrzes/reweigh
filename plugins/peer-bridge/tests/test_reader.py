@@ -24,7 +24,8 @@ from support import (
     PRIVATE_MARKERS, bridge, claude_prompt, claude_reply, claude_session, claude_tool_result, codex_event,
     codex_thread, codex_turn, git, git_repository, isolate,
 )
-import thread_reader  # found through the script directory support.py adds
+import history_capture  # found through the script directory support.py adds
+import thread_reader
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadSummary, ThreadUnavailable
 
 
@@ -161,15 +162,13 @@ class ReaderTests(unittest.TestCase):
         other, _ = codex_thread(self.codex_home, self.project, codex_turn("t2", "Also done."), mtime=2_000)
         archive = self.codex_home / "archived_sessions"
         archive.mkdir()
-        parse = thread_reader.parse_line
 
-        def archive_after_header(line):
-            record = parse(line)
-            if record.get("payload", {}).get("id") == moving:
-                path.rename(archive / path.name)
-            return record
+        class ArchiveAfterHeader(history_capture.ReadPoints):
+            def header_read(self, read_path):
+                if read_path == path:
+                    path.rename(archive / path.name)
 
-        with patch.object(thread_reader, "parse_line", archive_after_header):
+        with patch.object(history_capture, "READ_POINTS", ArchiveAfterHeader()):
             rows = self.threads("codex")["threads"]
         self.assertEqual([row["id"] for row in rows], [other, moving])
         self.assertEqual(rows[1]["updated_at"], "1970-01-01T00:16:40+00:00")
@@ -180,7 +179,7 @@ class ReaderTests(unittest.TestCase):
         index = self.codex_home / "session_index.jsonl"
         first, second = index.read_bytes().splitlines(keepends=True)
         index.write_bytes(first + b"x" * 1024 + b"\n" + second)
-        with patch.object(thread_reader, "MAX_METADATA_BYTES", len(second) + 10, create=True):
+        with patch.object(history_capture, "MAX_METADATA_BYTES", len(second) + 10):
             names = {row["id"]: row["name"] for row in self.threads("codex")["threads"]}
         self.assertEqual(names, {older: None, newer: "Newer"})
 
@@ -219,8 +218,8 @@ class ReaderTests(unittest.TestCase):
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t0", "Old answer."), noise,
                                codex_turn("t1", "Answer."), suffix=".jsonl.zst")
         def decompressed(limit=None):
-            with thread_reader.open_history(path) as source:
-                return thread_reader.decompress_history(source, limit)
+            with history_capture.open_history(path) as source:
+                return history_capture.decompress_history(source, limit)
 
         head, whole, from_start = decompressed()
         self.assertTrue(from_start)
@@ -258,11 +257,11 @@ class ReaderTests(unittest.TestCase):
         content = path.read_bytes()
         skippable = struct.pack("<II", 0x184D2A50, 4096) + bytes(4096)
         path.write_bytes(skippable + content)
-        with patch.object(thread_reader, "MAX_METADATA_BYTES", 1024, create=True):
+        with patch.object(history_capture, "MAX_METADATA_BYTES", 1024):
             self.assertEqual(self.threads("codex")["threads"], [])
         path.write_bytes(content + skippable)
         self.assertEqual([row["id"] for row in self.threads("codex")["threads"]], [identifier])
-        with patch.object(thread_reader, "MAX_COMPRESSED_BYTES", 1024, create=True):
+        with patch.object(history_capture, "MAX_COMPRESSED_BYTES", 1024):
             with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
                 self.read("codex", identifier)
 
@@ -270,22 +269,23 @@ class ReaderTests(unittest.TestCase):
         identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
                                         suffix=".jsonl.zst")
         content = path.read_bytes()
-        decompress = thread_reader.decompress_history
-        attempts = []
+        captures = []
 
-        def change_during_decompression(source, limit=None):
-            attempts.append(1)
-            if len(attempts) == 1:
-                path.write_bytes(b"\x00" * len(content))
-                try:
-                    return decompress(source, limit)
-                finally:
+        class DamageFirstAttempt(history_capture.ReadPoints):
+            def opened(self, read_path, attempt):
+                if attempt == 0:
+                    path.write_bytes(b"\x00" * len(content))
+
+            def attempted(self, read_path, attempt, history):
+                captures.append(history)
+                if attempt == 0:
                     path.write_bytes(content)
-            return decompress(source, limit)
 
-        with patch.object(thread_reader, "decompress_history", change_during_decompression):
+        with patch.object(history_capture, "READ_POINTS", DamageFirstAttempt()):
             self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
-        self.assertEqual(len(attempts), 2)
+        # The first attempt was refused as damaged before it built a capture; the change sent it round once more.
+        self.assertEqual(len(captures), 2)
+        self.assertIsNone(captures[0])
 
     def test_each_compressed_read_attempt_uses_its_open_extent(self):
         import zstandard
@@ -294,18 +294,18 @@ class ReaderTests(unittest.TestCase):
                                         suffix=".jsonl.zst")
         records = "".join(json.dumps(record) + "\n" for record in codex_turn("t2", "Second.")).encode()
         frame = zstandard.ZstdCompressor().compress(records)
-        decompress = thread_reader.decompress_history
         decoded = []
 
-        def append_during_decompression(source, limit=None):
-            if not decoded:
-                with path.open("ab") as output:
-                    output.write(frame)
-            result = decompress(source, limit)
-            decoded.append(result[1])
-            return result
+        class AppendAfterFirstOpen(history_capture.ReadPoints):
+            def opened(self, read_path, attempt):
+                if attempt == 0:
+                    with path.open("ab") as output:
+                        output.write(frame)
 
-        with patch.object(thread_reader, "decompress_history", append_during_decompression):
+            def attempted(self, read_path, attempt, history):
+                decoded.append(history.tail(history_capture.MAX_TAIL_BYTES).data)
+
+        with patch.object(history_capture, "READ_POINTS", AppendAfterFirstOpen()):
             self.assertEqual(self.read("codex", identifier)["messages"][-1]["text"], "Second.")
         self.assertEqual(len(decoded), 2)
         self.assertFalse(decoded[0].endswith(records))
@@ -313,21 +313,19 @@ class ReaderTests(unittest.TestCase):
 
     def test_a_history_that_changes_while_it_is_read_is_read_once_more_then_refused(self):
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Moving")
-        real_scan = thread_reader.scan_codex
 
-        def scan_while_appending(times):
-            def scan(records):
-                if times:
-                    times.pop()
-                    with path.open("a", encoding="utf-8") as history:
-                        history.write(json.dumps(codex_event("token_count", "t1")) + "\n")
-                return real_scan(records)
-            return scan
+        def appending_on(attempts):
+            class Append(history_capture.ReadPoints):
+                def opened(self, read_path, attempt):
+                    if attempt in attempts:
+                        with path.open("a", encoding="utf-8") as history:
+                            history.write(json.dumps(codex_event("token_count", "t1")) + "\n")
+            return patch.object(history_capture, "READ_POINTS", Append())
 
-        with patch.object(thread_reader, "scan_codex", scan_while_appending([1])):
+        with appending_on({0}):
             self.assertEqual([message["text"] for message in self.read("codex", "Moving")["messages"]], ["Done."])
         with (
-            patch.object(thread_reader, "scan_codex", scan_while_appending([1, 1])),
+            appending_on({0, 1}),
             self.assertRaisesRegex(ThreadUnavailable, "^The thread's history file changed while it was read.$"),
         ):
             self.read("codex", "Moving")
@@ -335,7 +333,7 @@ class ReaderTests(unittest.TestCase):
     def test_only_a_missing_zstandard_package_is_reported_as_missing(self):
         with patch.dict(sys.modules, {"zstandard": None}):
             with self.assertRaisesRegex(ThreadUnavailable, "needs the zstandard package"):
-                thread_reader.zstandard_module()
+                history_capture.zstandard_module()
         real_import = __import__
 
         def broken(name, *arguments, **keywords):
@@ -346,7 +344,7 @@ class ReaderTests(unittest.TestCase):
         with patch.dict(sys.modules), patch("builtins.__import__", broken):
             sys.modules.pop("zstandard", None)
             with self.assertRaisesRegex(ImportError, "incompatible architecture"):
-                thread_reader.zstandard_module()
+                history_capture.zstandard_module()
 
     def test_codex_tail_window_grows_until_it_reaches_a_turn(self):
         noise = [codex_event("token_count", "t1", info="x" * 200) for _ in range(200)]
