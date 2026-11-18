@@ -286,8 +286,8 @@ time.sleep({4 * DEADLINE_SECONDS})
                     await self.start(prompt="PRIVATE QUESTION")
                 self.assertEqual(str(raised.exception), expected)
                 [folder] = set(jobs_folder.iterdir()) - before
+                self.assertFalse((folder / "request.json").exists())  # read first: a status read deletes it too
                 self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
-                self.assertFalse((folder / "request.json").exists())
         before = set(jobs_folder.iterdir())
         with (
             patch.object(self.client.jobs, "view", side_effect=OSError("disk")),
@@ -296,7 +296,32 @@ time.sleep({4 * DEADLINE_SECONDS})
         ):
             await self.start()
         [folder] = set(jobs_folder.iterdir()) - before
-        self.assertEqual(str(raised.exception), jobs.START_UNCONFIRMED.format(job_id=folder.name))
+        self.assertIn(folder.name, str(raised.exception))
+        self.assertIn("cancellation could not be confirmed", str(raised.exception))
+
+    async def test_an_interrupted_start_stays_cancelled_when_its_cleanup_fails(self):
+        # The caller is interrupted during the first view, or during the cleanup that follows a failed one.
+        self.client.spawn = lambda job_id: None
+        for interrupted in ("view", "abandon"):
+            entered, release = threading.Event(), threading.Event()
+
+            def held(*arguments, entered=entered, release=release, **options):
+                entered.set()
+                release.wait(DEADLINE_SECONDS)
+                raise OSError("disk")
+
+            hooks = {"view": OSError("disk"), "abandon": OSError("disk"), interrupted: held}
+            with (
+                self.subTest(interrupted=interrupted),
+                patch.object(self.client.jobs, "view", side_effect=hooks["view"]),
+                patch.object(self.client.jobs, "abandon", side_effect=hooks["abandon"]),
+            ):
+                task = asyncio.create_task(self.start())
+                self.assertTrue(await asyncio.to_thread(entered.wait, DEADLINE_SECONDS))
+                task.cancel()
+                release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
 
     async def test_a_start_cancelled_during_creation_leaves_no_runnable_job(self):
         entered, release = threading.Event(), threading.Event()

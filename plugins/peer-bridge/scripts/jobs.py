@@ -399,7 +399,12 @@ async def start_job(store, request, spawn):
         try:
             return await asyncio.to_thread(first_view, store, job_id, provider)
         except asyncio.CancelledError:
-            await run_to_completion(asyncio.to_thread(store.abandon, job_id, provider))
+            # A cleanup that fails does not turn the interruption into an ordinary failure: nobody is left to read
+            # either.
+            try:
+                await run_to_completion(asyncio.to_thread(store.abandon, job_id, provider))
+            except (BridgeError, OSError):
+                pass
             raise
         except (BridgeError, OSError) as exc:
             # Cancelling reads the job first, so it can fail the same way; then the ID is the only way left to it.

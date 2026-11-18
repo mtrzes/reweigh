@@ -21,6 +21,8 @@ async def run_to_completion(cleanup):
                 # Keep the first: anyio recognises its own cancellation by the message.
                 if cancellation is None:
                     cancellation = exc
+            except Exception:
+                pass  # the cleanup failed: its error is raised below, unless a cancellation came first
     if cancellation is not None:
         raise cancellation
     return task.result()

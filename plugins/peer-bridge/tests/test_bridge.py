@@ -11,7 +11,6 @@ import signal
 import stat
 import subprocess
 import sys
-import time
 import unittest
 import uuid
 from pathlib import Path
@@ -375,7 +374,7 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
         git_repository(self.project)
-        cases = (  # one row per fact: sign-in probes, the result's status field, the stderr tag, settings
+        cases = (  # one row per fact: sign-in probes, the result's status field, the stderr tag, settings, .git
             ("claude", {"SIMULATED_SIGNED_IN": "0"}, {}, "Claude Code is not signed in"),
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
             ("claude", {"SIMULATED_PEER_MODE": "api_error", "SIMULATED_API_STATUS": "401"}, {},
@@ -391,42 +390,15 @@ class ConsultationTests(BridgeTestCase):
             with self.subTest(provider=provider, environment=environment, arguments=arguments):
                 message = await self.failure_message(provider, environment, **arguments)
                 self.assertTrue(message.startswith(expected), message)
+        message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
+        self.assertEqual(message, consultation.OUTSIDE_GIT)
         self.assertEqual(list(self.state.glob("*.json")), [])
 
-    async def test_only_the_git_probes_answer_is_a_fact_about_the_repository(self):
-        # git exits 128 for any fatal error, such as a missing or unreadable directory as well as one outside a
-        # repository, and says which only in its text, so no failure establishes that Codex ran outside one.
-        for outcome, expected in (
-            (OSError("git is missing"), None),
-            (bridge.CommandTimeout("git timed out"), None),
-            (bridge.BridgeError("the guard failed"), None),
-            ((128, b"", b""), None),
-            ((0, b"/project/.git\n", b""), True),
-        ):
-            with self.subTest(outcome=outcome):
-                commands = []
-
-                async def recording(command, *arguments, outcome=outcome, **options):
-                    commands.append(command)
-                    if command[0] != "git":
-                        return 0, b"", b""
-                    if isinstance(outcome, BaseException):
-                        raise outcome
-                    return outcome
-
-                scope = bridge.ConversationLock(None, None, time.monotonic, recording)
-                facts = await self.client.failure_facts("codex", self.other_project, {}, "", "", scope=scope,
-                                                        peer=scope.budget(30))
-                self.assertIs(facts.in_git_repository, expected)
-                self.assertEqual(commands[-1], [
-                    "git", "-C", str(self.other_project), "rev-parse", "--path-format=absolute", "--git-common-dir",
-                ])
-
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
+        git_repository(self.project)
         self.client.timeout = 5
         sign_in = str(self.peer), 2
         for peer_seconds, sign_in_seconds, expected in (
-            (3, 1, [sign_in, ("git", 1)]),
             (3, 2, [sign_in]),
             (5, 0, []),
         ):

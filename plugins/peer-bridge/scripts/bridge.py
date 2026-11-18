@@ -31,6 +31,7 @@ from consultation import (
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
+    git_entry_found,
 )
 from cleanup import run_to_completion
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
@@ -39,6 +40,10 @@ import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
+START_UNCONFIRMED = (
+    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
+    "with that job ID."
+)
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
@@ -48,7 +53,6 @@ BUNDLED_CODEX_PATH = Path("ChatGPT.app", "Contents", "Resources", "codex-cli", "
 CHECKOUT_PREPARATION_SECONDS = 300
 CHECKOUT_REMOVAL_SECONDS = 120
 GIT_LATE = "git did not finish in time while preparing the pinned ref."
-GIT_REPOSITORY_PROBE_SECONDS = 10
 SIGN_IN_PROBE_SECONDS = 30
 SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
@@ -759,16 +763,8 @@ class Bridge:
         if provider == "codex":
             if session:
                 facts["writer_lock_present"] = check(source.writer_lock_present, session)
-            timeout = min(GIT_REPOSITORY_PROBE_SECONDS, peer.left())
-            if timeout > 0:
-                try:
-                    if await scope.git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                       failure="Cannot find the git repository.", timeout=timeout):
-                        facts["in_git_repository"] = True
-                except BridgeError:
-                    # git exits 128 for every fatal error, a missing or unreadable directory as well as one outside a
-                    # repository, and tells them apart only in its text, so a failure leaves the question open.
-                    pass
+            facts["in_git_repository"] = await asyncio.to_thread(
+                git_entry_found, Path(os.path.realpath(directory)), os.lstat)
             facts["model_setting"] = chose_model
         return FailureFacts(**facts)
 
