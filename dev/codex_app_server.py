@@ -494,7 +494,7 @@ def compare(file_source, app_source):
         except ThreadUnavailable as exc:
             unreadable[str(exc)] = unreadable.get(str(exc), 0) + 1
             continue
-        except (OSError, TypeError, AttributeError) as exc:
+        except Exception as exc:
             raise AppServerError(f"The file reader failed on thread {summary.id}.") from exc
         compared += 1
         if summary.id not in app_threads:
