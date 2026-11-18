@@ -54,6 +54,8 @@ CHECKOUT_PREPARATION_SECONDS = 300
 CHECKOUT_REMOVAL_SECONDS = 120
 GIT_LATE = "git did not finish in time while preparing the pinned ref."
 SIGN_IN_PROBE_SECONDS = 30
+# How long the lookup of a .git entry above working_directory may take, on a volume that has stopped answering.
+GIT_ENTRY_PROBE_SECONDS = 10
 SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
 # How long past the guard's own grace period to wait for it to stop the peer's group.
@@ -154,8 +156,8 @@ class SessionStore:
 
         A guard given the descriptor keeps the lock after this context ends, for as long as the guard lives, so this
         never unlocks explicitly: flock belongs to the open file description the guard shares, and LOCK_UN would free
-        the conversation while the guard is still stopping its group (test_jobs
-        test_a_killed_runners_conversation_stays_locked_until_its_guard_has_stopped_the_peer). Closing only this
+        the conversation while the guard is still stopping its group (test_bridge
+        test_a_conversation_lock_outlives_its_context_while_a_shared_descriptor_holds_it). Closing only this
         process's copy is what lets the guard keep it. JobStore.flock, whose descriptor no process inherits, unlocks
         explicitly; the two are not interchangeable.
         """
@@ -330,16 +332,21 @@ class FailureProbe:
 
     async def history_present(self, session):
         """Whether the peer still keeps any history file for the session, consultations included. It is not started
-        once the peer's budget is spent, nor waited for beyond it: listing a large history can take a while."""
+        once the peer's budget is spent, nor waited for beyond it: listing a large history can take a while. A lookup
+        already running when the wait ends is not interrupted; its answer is dropped."""
         left = self.peer.left()
         if left <= 0:
             return None
         if self.provider == "codex":
-            def lookup():
+            def find():
                 return session in self.source.rollouts()
         else:
-            def lookup():
+            def find():
                 return bool(self.source.session_files(session))
+
+        def lookup():
+            # A worker may start late; once the budget is spent it does not start the lookup at all.
+            return find() if self.peer.left() > 0 else None
         try:
             return await asyncio.wait_for(asyncio.to_thread(lookup), left)
         except (OSError, asyncio.TimeoutError):
@@ -352,7 +359,12 @@ class FailureProbe:
             return None
 
     async def in_git_repository(self, session):
-        return await asyncio.to_thread(git_entry_found, Path(os.path.realpath(self.directory)), os.lstat)
+        """The directory is already resolved: nothing touches the filesystem on the event loop."""
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(git_entry_found, self.directory, os.lstat),
+                                          GIT_ENTRY_PROBE_SECONDS)
+        except asyncio.TimeoutError:
+            return None
 
 
 def codex_catalogue():
@@ -635,8 +647,9 @@ async def pinned_checkout(scope, directory, ref):
         raise BridgeError("Cannot create the bridge's state directory.") from exc
     if worktree.is_symlink():
         raise BridgeError(PRIVATE)
-    await discard_worktree(scope, repository, preparation)
     try:
+        # A checkout an earlier run left in place; if removing it fails, the removal below tries again.
+        await discard_worktree(scope, repository, preparation)
         await scope.git(repository, "worktree", "add", "--detach", "--no-checkout", "--force", "--quiet", str(worktree),
                         commit, failure="Cannot check out the ref in a temporary worktree.", timeout=preparation.left())
         filters = filter_overrides(await scope.git(
@@ -653,7 +666,10 @@ async def pinned_checkout(scope, directory, ref):
             raise BridgeError("working_directory does not exist at that ref.")
         yield consulted, commit
     finally:
-        await run_to_completion(discard_worktree(scope, repository, scope.removal_budget()))
+        try:
+            await run_to_completion(discard_worktree(scope, repository, scope.removal_budget()))
+        except BridgeError:
+            pass  # left for a later consultation's sweep: the reply, error or cancellation stands
 
 
 class Bridge:

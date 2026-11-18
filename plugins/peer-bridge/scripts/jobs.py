@@ -389,12 +389,21 @@ async def start_job(store, request, spawn):
         try:
             job_id = await asyncio.shield(creating)
         except asyncio.CancelledError:
-            await run_to_completion(abandon_created(store, creating, provider))
+            # As below: a cleanup that fails does not turn the interruption into an ordinary failure.
+            try:
+                await run_to_completion(abandon_created(store, creating, provider))
+            except (BridgeError, OSError):
+                pass
             raise
         try:
             spawn(job_id)
-        except OSError as exc:
-            await run_to_completion(asyncio.to_thread(store.abandon, job_id, provider))
+        except Exception as exc:
+            # The runner may have started even so, such as when only its reaper thread failed: the job is cancelled,
+            # which a runner honours before it consults, or else named.
+            try:
+                await run_to_completion(asyncio.to_thread(store.abandon, job_id, provider))
+            except (BridgeError, OSError):
+                raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from exc
             raise BridgeError(RUNNER_FAILED) from exc
         try:
             return await asyncio.to_thread(first_view, store, job_id, provider)

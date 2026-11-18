@@ -60,16 +60,19 @@ flowchart TB
   by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, the sign-in probe and the
   lookup of the peer's history use the time left from the peer's timeout, and neither starts once it is spent. Each
   guard holds the conversation's lock, so the conversation and its checkout stay busy until the process group has
-  stopped. Opening a conversation gives one scope that holds its lock, its record and
-  its checkout's fixed location; every process of the consultation starts through that scope, and it saves the record
-  only once the peer's result has been checked against it. The sweep of leftover checkouts takes another
+  stopped. Opening a conversation gives one scope that holds its lock, its record and its checkout's fixed location;
+  the peer, the sign-in probe and the pinned checkout's git commands start through that scope, and it saves the record
+  only once the peer's result has been checked against it. Reading a `seed_thread` comes before the conversation is
+  opened, and the git command its repository check runs is not guarded. The sweep of leftover checkouts takes another
   conversation's lock the same way, without opening its record. The bridge's last signal to a group always comes
   before it reaps the guard, which would free the group's ID. A descendant that leaves the group, by starting its own
   session or group, is not stopped.
 - **A pinned checkout is prepared within one budget.** Every git command that prepares it, from finding the
   repository to writing the files, including removing a checkout an earlier run left in its place, shares a checkout
   preparation budget of 300 seconds; a command is not started once the budget is spent. Removing the checkout
-  afterwards has 120 seconds of its own and runs to its end even when the consultation is cancelled. The peer's
+  afterwards, whether the consultation succeeded, failed or was cancelled, has 120 seconds of its own and runs to its
+  end; a checkout it cannot remove is left for a later consultation's sweep, and the consultation's own outcome
+  stands. The peer's
   timeout starts once the checkout is ready. Reading a `seed_thread`, and sweeping up checkouts that runs which died
   left behind (each with its own 120 seconds), come before both.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is

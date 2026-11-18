@@ -11,6 +11,8 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -424,6 +426,32 @@ class ConsultationTests(BridgeTestCase):
         clock.now += 5
         self.assertIsNone(await probe.observe("history_present", "session"))
         self.assertEqual(looked_up, [100.0])
+        # A worker that starts only after the budget is spent does not look either.
+        readings = iter((200.0, 200.0, 206.0))
+        late = bridge.ConversationLock(None, None, lambda: clock.now, None)
+        late.clock = lambda: next(readings, 206.0)
+        probe = bridge.FailureProbe("codex", self.project, late, late.budget(5), source)
+        self.assertIsNone(await probe.observe("history_present", "session"))
+        self.assertEqual(looked_up, [100.0])
+
+    async def test_the_git_entry_lookup_gives_up_on_a_volume_that_stops_answering(self):
+        stalled, release = threading.Event(), threading.Event()
+
+        def git_entry_found(directory, lstat):
+            stalled.set()
+            release.wait(DEADLINE_SECONDS)
+            return True
+
+        scope = bridge.ConversationLock(None, None, time.monotonic, None)
+        probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(30), None)
+        try:
+            with (
+                patch.object(bridge, "git_entry_found", git_entry_found),
+                patch.object(bridge, "GIT_ENTRY_PROBE_SECONDS", 0),
+            ):
+                self.assertIsNone(await probe.observe("in_git_repository", None))
+        finally:
+            release.set()
 
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
         git_repository(self.project)
@@ -890,6 +918,53 @@ class ConsultationTests(BridgeTestCase):
                     await self.consult(ref="HEAD")
             self.assertEqual(calls, expected)
             self.assertEqual(len(self.registered_worktrees()), 1)  # only the project's own
+        # A checkout left in place whose removal runs out of preparation time is removed with the final allowance.
+        self.client.store = self.store
+        identifier = (await self.consult(ref="HEAD"))["conversation_id"]
+        leftover = self.state / "worktrees" / identifier
+        leftover.mkdir()
+        (leftover / ".git").write_text("gitdir: /unmounted\n")  # so the sweep before it leaves the folder alone
+        calls, step = [], preparation / 3
+        self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
+        with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
+            await self.consult(conversation_id=identifier)
+        self.assertEqual(calls, [("rev-parse", removal), ("rev-parse", preparation), ("rev-parse", preparation - step),
+                                 ("worktree", preparation - 2 * step), ("worktree", removal),
+                                 ("worktree", removal - step)])
+        self.assertFalse(leftover.exists())
+
+    async def test_a_checkout_that_cannot_be_removed_keeps_the_reply_and_is_swept_later(self):
+        git_repository(self.project)
+        consulted = []
+
+        async def failing_removal(command, prompt, directory, timeout, **options):
+            if prompt is not None:
+                consulted.append(True)
+            elif consulted and command[3] == "worktree":
+                return 128, b"", b""  # git cannot remove or list the worktree after the peer has answered
+            return await bridge.run_command(command, prompt, directory, timeout, **options)
+
+        self.client.store = bridge.SessionStore(self.state, runner=failing_removal)
+        reply = await self.consult(ref="HEAD")
+        self.assertEqual(reply["reply"], "claude consulted: Explain the query.")
+        self.assertEqual(len(self.registered_worktrees()), 2)
+        self.client.store = self.store
+        await self.consult()
+        self.assertEqual(len(self.registered_worktrees()), 1)
+
+    async def test_a_conversation_lock_outlives_its_context_while_a_shared_descriptor_holds_it(self):
+        # A guard inherits the locked descriptor, sharing its open file description, as a duplicate does here.
+        identifier = str(uuid.uuid4())
+        self.state.mkdir(mode=0o700)
+        with self.store.holding(identifier) as held:
+            inherited = os.dup(held.descriptor)
+        try:
+            with self.store.holding(identifier) as other:
+                self.assertIsNone(other)
+        finally:
+            os.close(inherited)
+        with self.store.holding(identifier) as other:
+            self.assertIsNotNone(other)
 
     async def test_thread_reading_and_seed_thread_are_off_unless_turned_on(self):
         git_repository(self.project)

@@ -231,6 +231,25 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertFalse((folder / "request.json").exists())
         self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
 
+    async def test_a_runner_launch_that_fails_any_way_cancels_its_job_or_names_it(self):
+        # spawn can fail after the runner started, such as when only its reaper thread cannot start.
+        def started_then_failed(job_id):
+            raise RuntimeError("can't start new thread")
+
+        self.client.spawn = started_then_failed
+        with self.assertRaisesRegex(bridge.BridgeError, "Cannot start the consultation runner"):
+            await self.start(prompt="PRIVATE QUESTION")
+        [folder] = (self.state / "jobs").iterdir()
+        self.assertFalse((folder / "request.json").exists())
+        self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
+        with (
+            patch.object(self.client.jobs, "abandon", side_effect=OSError("disk")),
+            self.assertRaises(bridge.BridgeError) as raised,
+        ):
+            await self.start()
+        [folder] = set((self.state / "jobs").iterdir()) - {folder}
+        self.assertEqual(str(raised.exception), jobs.START_UNCONFIRMED.format(job_id=folder.name))
+
     async def test_a_start_returns_its_job_id_while_the_runner_holds_the_job(self):
         # The runner may already hold the state lock to claim its job when the start reads it.
         spawned = []
@@ -300,19 +319,23 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertIn("cancellation could not be confirmed", str(raised.exception))
 
     async def test_an_interrupted_start_stays_cancelled_when_its_cleanup_fails(self):
-        # The caller is interrupted during the first view, or during the cleanup that follows a failed one.
+        # The caller is interrupted during creation, the first view, or the cleanup that follows a failed view.
         self.client.spawn = lambda job_id: None
-        for interrupted in ("view", "abandon"):
+        real_create = self.client.jobs.create
+        for interrupted in ("create", "view", "abandon"):
             entered, release = threading.Event(), threading.Event()
 
-            def held(*arguments, entered=entered, release=release, **options):
+            def held(*arguments, entered=entered, release=release, interrupted=interrupted, **options):
                 entered.set()
                 release.wait(DEADLINE_SECONDS)
+                if interrupted == "create":
+                    return real_create(*arguments)
                 raise OSError("disk")
 
-            hooks = {"view": OSError("disk"), "abandon": OSError("disk"), interrupted: held}
+            hooks = {"create": real_create, "view": OSError("disk"), "abandon": OSError("disk"), interrupted: held}
             with (
                 self.subTest(interrupted=interrupted),
+                patch.object(self.client.jobs, "create", side_effect=hooks["create"]),
                 patch.object(self.client.jobs, "view", side_effect=hooks["view"]),
                 patch.object(self.client.jobs, "abandon", side_effect=hooks["abandon"]),
             ):
@@ -521,7 +544,8 @@ time.sleep({4 * DEADLINE_SECONDS})
             with self.subTest(call=call.__name__), patch.object(jobs, "time", clock):
                 with self.client.jobs.flock(state_lock, blocking=False) as acquired:
                     self.assertTrue(acquired)
-                    with self.assertRaises(bridge.BridgeError) as error:
+                    # JobBusy in particular: a start tells the busy runner apart from a failure by it.
+                    with self.assertRaises(jobs.JobBusy) as error:
                         await asyncio.wait_for(call(job_id, CLAUDE), timeout=1)
                 self.assertEqual(str(error.exception), "The consultation job is busy. Try again.")
                 self.assertEqual(clock.now, 1001.0)

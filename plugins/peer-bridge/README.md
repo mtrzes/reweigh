@@ -118,10 +118,10 @@ cause only when an exact field or a check establishes it, and never by reading t
 | A model Claude Code does not know | A stderr line starting with Claude Code's `[claude-code:unrecognized_model]` tag |
 | Codex outside a git repository | No `.git` entry in `working_directory` or any parent, the check Codex itself makes |
 
-The bridge runs the sign-in check and the history lookup only while time remains from the consultation timeout. If
-the checks and result fields establish no cause, the bridge returns a generic error. When a Codex model or reasoning effort was chosen, per
-call or by environment, a failed Codex consultation adds that the choice may be the cause, because Codex reports a
-rejected choice only in prose.
+The bridge runs the sign-in check and the history lookup only while time remains from the consultation timeout, and
+gives up looking for a `.git` entry after 10 seconds. If the checks and result fields establish no cause, the bridge
+returns a generic error. When a Codex model or reasoning effort was chosen, per call or by environment, a failed Codex
+consultation adds that the choice may be the cause, because Codex reports a rejected choice only in prose.
 
 ### Pinned refs
 
