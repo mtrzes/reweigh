@@ -503,9 +503,11 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
             if any(not isinstance(block, dict) or block.get("type") == "tool_result" for block in blocks):
                 continue
             texts = [block.get("text") for block in blocks if block.get("type") == "text"]
-            if any(text is not None and not isinstance(text, str) for text in texts):
+            # A text block, or a prompt that is not a list of blocks, must carry its text: an empty or absent one
+            # would pass for a new question.
+            if any(not isinstance(text, str) for text in texts):
                 raise ThreadUnavailable(MALFORMED_CLAUDE_MESSAGE)
-            text = "".join(text or "" for text in texts)
+            text = "".join(texts)
             if text in CLAUDE_INTERRUPTION_MARKERS:
                 latest = TurnState(turn_id, "interrupted")
             else:

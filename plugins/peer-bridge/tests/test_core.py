@@ -673,6 +673,7 @@ class ClaudeParsingTests(unittest.TestCase):
     def test_malformed_claude_prompt_and_reply_fields_are_refused(self):
         cases = (
             self.user(5, "u2"), self.user({"text": "q2"}, "u2"), self.user([{"type": "text", "text": ["q2"]}], "u2"),
+            self.user(None, "u2"), self.user([{"type": "text", "text": None}], "u2"), self.user([{"type": "text"}], "u2"),
             self.assistant("a", ["end_turn"]), self.assistant("a", 3),
         )
         for malformed in cases:
