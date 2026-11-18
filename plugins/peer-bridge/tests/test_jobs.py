@@ -233,6 +233,36 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
         self.assertFalse((folder / "request.json").exists())
 
+    async def test_a_start_whose_first_view_fails_cancels_its_job_or_names_it(self):
+        # The caller learns a job's ID only from that view, so a job it cannot read is cancelled rather than left to
+        # run; if cancelling fails too, the failure carries the ID.
+        self.client.spawn = lambda job_id: None
+        jobs_folder = self.state / "jobs"
+        for failure, expected in (
+            (bridge.BridgeError("A fixed message."), "A fixed message."),
+            (OSError("disk"), "Cannot read or write the consultation job files."),
+        ):
+            with self.subTest(failure=failure):
+                before = set(jobs_folder.iterdir()) if jobs_folder.exists() else set()
+                with (
+                    patch.object(self.client.jobs, "view", side_effect=failure),
+                    self.assertRaises(bridge.BridgeError) as raised,
+                ):
+                    await self.start(prompt="PRIVATE QUESTION")
+                self.assertEqual(str(raised.exception), expected)
+                [folder] = set(jobs_folder.iterdir()) - before
+                self.assertEqual((await self.client.job(folder.name, CLAUDE))["state"], "cancelled")
+                self.assertFalse((folder / "request.json").exists())
+        before = set(jobs_folder.iterdir())
+        with (
+            patch.object(self.client.jobs, "view", side_effect=OSError("disk")),
+            patch.object(self.client.jobs, "cancel", side_effect=OSError("disk")),
+            self.assertRaises(bridge.BridgeError) as raised,
+        ):
+            await self.start()
+        [folder] = set(jobs_folder.iterdir()) - before
+        self.assertEqual(str(raised.exception), bridge.START_UNCONFIRMED.format(job_id=folder.name))
+
     async def test_a_start_cancelled_during_creation_leaves_no_runnable_job(self):
         entered, release = threading.Event(), threading.Event()
         real_create, spawned = self.client.jobs.create, []

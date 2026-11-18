@@ -38,6 +38,10 @@ import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
+START_UNCONFIRMED = (
+    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
+    "with that job ID."
+)
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
@@ -626,6 +630,14 @@ class Bridge:
             except asyncio.CancelledError:
                 # The caller will never learn this job's ID, so it is cancelled rather than left to run.
                 await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
+                raise
+            except (BridgeError, OSError) as exc:
+                # Nor when the job cannot be read. Cancelling reads the job first, so it can fail the same way; then
+                # the ID is the only way left to reach the job.
+                try:
+                    await run_to_completion(asyncio.to_thread(self.jobs.cancel, job_id, {provider}, wait=True))
+                except (BridgeError, OSError):
+                    raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from exc
                 raise
 
     async def discard_created(self, creating, provider):
