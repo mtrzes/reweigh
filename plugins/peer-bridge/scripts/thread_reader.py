@@ -195,7 +195,12 @@ class ClaudeSessionsSource:
         cwd, entrypoint = self.current_cwd(history, identifier)
         if cwd is None or not include(cwd):
             return None
-        name = search_tail(history.tail, claude_title_search(include, identifier), TAIL_WINDOWS)
+        try:
+            name = search_tail(history.tail, claude_title_search(include, identifier), TAIL_WINDOWS)
+        except ThreadUnavailable:
+            # Counted as unreadable, a session refused only after it matched the repository would show in the
+            # machine-wide count from this repository alone. It is listed without a title; its read refuses it.
+            name = None
         return ThreadSummary(id=identifier, name=name, cwd=cwd, recency_at=history.recency, source_kind=entrypoint)
 
     def read_thread(self, summary, max_messages, include):

@@ -111,8 +111,8 @@ and used for exact-name selection. A read searches as far back for the title as 
 its replies: for a session unchanged since it was selected, that is the title it was selected by. A session that has
 just moved in shows an unfinished turn and no messages. Claude replies and titles follow the active branch's parent
 links after a rewind, so an abandoned branch cannot bring a session into the repository. If a gap between those links
-cannot be resolved within the recent history window, the read is refused and the listing shows no title; a session whose
-links are malformed is not listed.
+cannot be resolved within the recent history window, a read that needs the records beyond it is refused, and no title is
+shown; a session whose links are malformed is listed without a title and its read is refused.
 
 A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a reply's stop
 reason of the wrong type. Message phases are the recorded `commentary` or `final_answer` tokens, or null when the

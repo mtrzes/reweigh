@@ -185,6 +185,16 @@ class ReaderTests(unittest.TestCase):
             names = {row["id"]: row["name"] for row in self.threads("codex")["threads"]}
         self.assertEqual(names, {older: None, newer: "Newer"})
 
+    def test_a_session_refused_after_its_repository_matched_is_not_counted(self):
+        # The unsupported count is machine-wide: it must not depend on which repository the listing asks about.
+        broken, _ = claude_session(self.claude_home, self.project, claude_prompt() | {"parentUuid": 5},
+                                   claude_reply("Done."), title="Broken ancestry")
+        for directory, rows in ((self.project, [(broken, None)]), (self.other, [])):
+            with self.subTest(directory=directory):
+                listing = self.threads("claude", directory)
+                self.assertEqual([(row["id"], row["name"]) for row in listing["threads"]], rows)
+                self.assertNotIn("unsupported_threads_machine_wide", listing)
+
     def test_a_malformed_prompt_leaves_the_session_listed(self):
         claude_session(self.claude_home, self.project, claude_prompt(5), claude_reply("Done."), title="Claude types")
         claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."), entrypoint=5)
