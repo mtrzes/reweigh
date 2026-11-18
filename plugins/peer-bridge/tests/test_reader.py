@@ -180,7 +180,7 @@ class ReaderTests(unittest.TestCase):
         index = self.codex_home / "session_index.jsonl"
         first, second = index.read_bytes().splitlines(keepends=True)
         index.write_bytes(first + b"x" * 1024 + b"\n" + second)
-        with patch.object(thread_reader, "MAX_METADATA_BYTES", len(second) + 10, create=True):
+        with patch.object(thread_reader, "MAX_METADATA_BYTES", len(second) + 10):
             names = {row["id"]: row["name"] for row in self.threads("codex")["threads"]}
         self.assertEqual(names, {older: None, newer: "Newer"})
 
@@ -252,11 +252,11 @@ class ReaderTests(unittest.TestCase):
         content = path.read_bytes()
         skippable = struct.pack("<II", 0x184D2A50, 4096) + bytes(4096)
         path.write_bytes(skippable + content)
-        with patch.object(thread_reader, "MAX_METADATA_BYTES", 1024, create=True):
+        with patch.object(thread_reader, "MAX_METADATA_BYTES", 1024):
             self.assertEqual(self.threads("codex")["threads"], [])
         path.write_bytes(content + skippable)
         self.assertEqual([row["id"] for row in self.threads("codex")["threads"]], [identifier])
-        with patch.object(thread_reader, "MAX_COMPRESSED_BYTES", 1024, create=True):
+        with patch.object(thread_reader, "MAX_COMPRESSED_BYTES", 1024):
             with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
                 self.read("codex", identifier)
 
