@@ -891,7 +891,7 @@ def run_command_line(arguments):
     except BridgeError as exc:
         result = {"error": str(exc)}
     except (asyncio.CancelledError, KeyboardInterrupt):
-        result = {"error": "The consultation was cancelled."}
+        result = {"error": consultation.CANCELLED_JOB}
     print(json.dumps(result, ensure_ascii=False))
     return 1 if "error" in result else 0
 

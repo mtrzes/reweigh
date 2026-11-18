@@ -361,7 +361,7 @@ time.sleep({4 * DEADLINE_SECONDS})
         with self.assertRaises(asyncio.CancelledError):
             await runner
         view = await self.client.job(job_id, CLAUDE)
-        self.assertEqual((view["state"], view["error"]), ("cancelled", jobs.CANCELLED))
+        self.assertEqual((view["state"], view["error"]), ("cancelled", consultation.CANCELLED_JOB))
 
     async def test_the_runner_can_be_cancelled_while_its_state_lock_is_held(self):
         for phase in ("claim", "reply", "cancel"):

@@ -561,7 +561,10 @@ UNFINISHED_JOB_STATES = ("queued", "running")
 JOB_START_GRACE_SECONDS = 120
 JOB_RETENTION_SECONDS = 7 * 24 * 3600
 MAX_WAIT_SECONDS = 60
+# The errors a job stopped without a result is stored with.
 LOST_JOB = "The consultation's runner stopped without a result. Start the consultation again."
+CANCELLED_JOB = "The consultation was cancelled."
+STOPPED_JOB_ERRORS = {"lost": LOST_JOB, "cancelled": CANCELLED_JOB}
 # The only fields a completed job's result adds to its view; the job's own state, ID and provider always win.
 RESULT_FIELDS = ("conversation_id", "reply", "commit", "model", "reasoning_effort")
 
@@ -625,6 +628,11 @@ def job_state(record, outcome, runner_present, now, cancel_requested=False):
     if queued:
         return "cancelled" if cancel_requested else "queued"
     return "lost"
+
+
+def stopped_outcome(state, now):
+    """The outcome to store for a job judged lost or cancelled before it finished, or None for any other state."""
+    return job_outcome(state, now, error=STOPPED_JOB_ERRORS[state]) if state in STOPPED_JOB_ERRORS else None
 
 
 def job_view(job_id, record, outcome, state):

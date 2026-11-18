@@ -419,6 +419,14 @@ class JobRuleTests(unittest.TestCase):
             with self.subTest(record=record, outcome=outcome, alive=alive, now=now, cancel=cancel):
                 self.assertEqual(c.job_state(record, outcome, alive, now, cancel), expected)
 
+    def test_stopped_outcome(self):
+        for state, error in (("lost", c.LOST_JOB), ("cancelled", c.CANCELLED_JOB)):
+            with self.subTest(state=state):
+                self.assertEqual(c.stopped_outcome(state, 7.0), {"state": state, "finished_at": 7.0, "error": error})
+        for state in ("queued", "running", "cancelling", "completed", "failed"):
+            with self.subTest(state=state):
+                self.assertIsNone(c.stopped_outcome(state, 7.0))
+
     def test_job_view(self):
         done = c.job_outcome("completed", 1.0, result={"conversation_id": "conv", "reply": "hi", "provider": "codex"})
         self.assertEqual(c.job_view("j", self.RECORD, done, "completed"),
