@@ -42,46 +42,40 @@ TAIL_WINDOWS = TailWindows(256 * 1024, MAX_TAIL_BYTES)
 MAX_HEAD_LINES = 50
 
 
+def listed(directory, keep):
+    """The entries of directory that keep passes, and 1 if directory could not be listed, else 0. A missing directory
+    lists as empty; one that cannot be listed is counted, never taken as empty, as Path.glob and Path.rglob would."""
+    try:
+        with os.scandir(directory) as entries:
+            return [entry for entry in entries if keep(entry)], 0
+    except (FileNotFoundError, NotADirectoryError):
+        return [], 0
+    except OSError:
+        return [], 1
+
+
 def regular_files_below(directory, matches):
     """Regular files at any depth below directory whose name passes matches, without following symlinks, and how many
-    directories could not be listed. A missing directory holds no files; one that cannot be listed is counted, never
-    taken as empty, as Path.rglob would."""
+    directories could not be listed."""
     found, unreadable, pending = [], 0, [directory]
     while pending:
-        current = pending.pop()
-        try:
-            with os.scandir(current) as entries:
-                for entry in entries:
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                    elif matches(entry.name) and entry.is_file(follow_symlinks=False):
-                        found.append(Path(entry.path))
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError:
-            unreadable += 1
+        entries, missed = listed(pending.pop(), lambda entry: entry.is_dir(follow_symlinks=False)
+                                 or matches(entry.name) and entry.is_file(follow_symlinks=False))
+        unreadable += missed
+        for entry in entries:
+            (pending if entry.is_dir(follow_symlinks=False) else found).append(Path(entry.path))
     return found, unreadable
 
 
 def entries_one_level_down(directory, matches):
     """Entries of any type in each subdirectory of directory whose name passes matches, like Path.glob("*/name"), and
-    how many directories could not be listed, which Path.glob would take as empty."""
-    found, unreadable = [], 0
-    try:
-        with os.scandir(directory) as entries:
-            folders = [Path(entry.path) for entry in entries if entry.is_dir()]
-    except (FileNotFoundError, NotADirectoryError):
-        return found, unreadable
-    except OSError:
-        return found, 1
+    how many directories could not be listed."""
+    folders, unreadable = listed(directory, lambda entry: entry.is_dir())
+    found = []
     for folder in folders:
-        try:
-            with os.scandir(folder) as entries:
-                found.extend(Path(entry.path) for entry in entries if matches(entry.name))
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError:
-            unreadable += 1
+        entries, missed = listed(folder.path, lambda entry: matches(entry.name))
+        unreadable += missed
+        found.extend(Path(entry.path) for entry in entries)
     return found, unreadable
 
 
