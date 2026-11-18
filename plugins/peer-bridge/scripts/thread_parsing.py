@@ -101,9 +101,6 @@ class Scan:
     segment_start: bool = False
     """Claude only: the records include where the session entered the requested repository, so older records cannot
     count and a larger window cannot add any."""
-    ancestry_gap: bool = False
-    """Claude only: the active branch reaches a parent before these records, so they decide nothing; only earlier
-    records can."""
 
 
 def parse_line(line):
@@ -189,27 +186,32 @@ def search_tail(tail, search, windows):
         window = min(window * 2, windows.cap)
 
 
+def tail_search(examine, decides, last):
+    """A search that returns what examine(records) found once decides(found) holds, and last(found) on its last
+    window. found is EARLIER when the records themselves say only earlier ones can decide."""
+    def search(records, final):
+        found = examine(records)
+        if found is not EARLIER and decides(found):
+            return found
+        return last(found) if final else EARLIER
+
+    return search
+
+
 def turns_search(scan, max_messages):
     """Search for the latest turn and up to max_messages messages with scan(records), which returns a Scan.
 
     Once no earlier records remain, fewer messages stand, no turn is a refusal and an unresolved ancestry gap is a
     refusal of its own.
     """
-    def search(records, final):
-        result = scan(records)
-        if result.ancestry_gap:
-            if final:
-                raise ThreadUnavailable(ANCESTRY_UNRESOLVED)
-            return EARLIER
-        if scan_is_enough(result, max_messages):
-            return result
-        if not final:
-            return EARLIER
+    def last(result):
+        if result is EARLIER:
+            raise ThreadUnavailable(ANCESTRY_UNRESOLVED)
         if result.latest is None:
             raise ThreadUnavailable(NO_TURN)
         return result
 
-    return search
+    return tail_search(scan, lambda result: scan_is_enough(result, max_messages), last)
 
 
 def text_of(blocks, block_type):
@@ -388,15 +390,10 @@ def claude_cwd_search(identifier):
     """Search for the working directory the session's latest records name. A large record without one can follow the
     latest move, so only a named directory decides; if none is named once no earlier records remain, which repository
     the session is in is unknown, and the session is refused."""
-    def search(records, final):
-        cwd = claude_last_cwd(records, identifier)
-        if cwd is not None:
-            return cwd
-        if final:
-            raise ThreadUnavailable(NO_CLAUDE_CWD)
-        return EARLIER
+    def last(_cwd):
+        raise ThreadUnavailable(NO_CLAUDE_CWD)
 
-    return search
+    return tail_search(lambda records: claude_last_cwd(records, identifier), lambda cwd: cwd is not None, last)
 
 
 def claude_turns_search(belongs, identifier, max_messages):
@@ -407,16 +404,12 @@ def claude_turns_search(belongs, identifier, max_messages):
 
 
 def claude_title_search(belongs, identifier):
-    """Search for the title of the session's current stay in the repository: the stay's start decides, else the
-    last window's records. Only the active branch can enter the repository, as for replies; if its ancestry is still
-    unresolved in the last window, the session has no title here."""
-    def search(records, final):
-        scan = scan_claude(records, belongs, title_only=True, identifier=identifier, whole=records.from_start)
-        if scan.ancestry_gap:
-            return None if final else EARLIER
-        return scan.title if scan.segment_start or final else EARLIER
-
-    return search
+    """Search for the scan holding the title of the session's current stay in the repository: the stay's start
+    decides, else the last window's records. Only the active branch can enter the repository, as for replies; if its
+    ancestry is still unresolved in the last window, the session has no title here."""
+    return tail_search(
+        lambda records: scan_claude(records, belongs, title_only=True, identifier=identifier, whole=records.from_start),
+        lambda scan: scan.segment_start, lambda scan: Scan(None, []) if scan is EARLIER else scan)
 
 
 def is_interactive_claude_session(entrypoint):
@@ -471,7 +464,8 @@ def claude_active_branch(records, identifier, whole):
 
 
 def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=True):
-    """Find the latest turn, agent messages and title in the session's current stay in the requested repository.
+    """Find the latest turn, agent messages and title in the session's current stay in the requested repository, or
+    EARLIER when the active branch reaches a parent before records cut from the file's end.
 
     A record that names a working directory sets where the following records are; belongs says whether a directory is
     in the requested repository, worktrees included. A move outside it drops everything found so far, also when the
@@ -481,7 +475,7 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
     """
     active = claude_active_branch(records, identifier, whole)
     if active is EARLIER:
-        return Scan(None, [], ancestry_gap=True)
+        return EARLIER
     latest, messages, turn_id, titles = None, [], None, {}
     inside, segment_start = None, False
     for entry in main_claude_records(records, identifier):
