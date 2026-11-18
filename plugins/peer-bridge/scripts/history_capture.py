@@ -1,14 +1,8 @@
 """Capture the other app's history files: open them safely and serve only the bytes they held when opened.
 
-A capture reads one open descriptor, plain or zstd-compressed, never past the extent the file had when it was opened,
-and within fixed byte budgets. The readers use it by three policies:
-
-- read_header: a bounded first record, with recency from the open descriptor (the Codex listing);
-- read_once: one capture, for head and tail reads or a bounded suffix of the file (the Claude listing, the Codex name
-  index);
-- read_stable: a full read that counts only if the file stayed the same throughout, retried once (a thread read).
-
-A file that holds fewer bytes than its captured extent is refused as changed: HistoryChanged never leaves this module.
+Each read uses one open descriptor and never reads past the extent captured when it was opened, so what a reader
+decides and what it returns come from the same bytes. A file that holds fewer bytes than that extent is refused as
+changed.
 """
 
 import io
@@ -35,21 +29,9 @@ IDENTITY_FIELDS = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
 CHANGED_WHILE_READ = "The thread's history file changed while it was read."
 
 
-class ReadPoints:
-    """Fixed points in a capture where a test can change the file deterministically. The reader does nothing there."""
-
-    def header_read(self, path):
-        """read_header has read the first record; the file is still open."""
-
-    def opened(self, path, attempt):
-        """A read_stable attempt has opened the file and captured its extent; no byte has been read yet."""
-
-    def attempted(self, path, attempt, history):
-        """A read_stable attempt has finished reading, or failed; history is None if the capture could not be built.
-        The file is still open and its identity not yet checked again."""
-
-
-READ_POINTS = ReadPoints()
+def checkpoint(point, *details):
+    """Does nothing. Reads call it at fixed points, "header_read", "opened" and "attempted", with the file still open,
+    so a test can change the file there deterministically."""
 
 
 def open_history(path, root=None):
@@ -97,12 +79,6 @@ def decompression_errors():
         if zstandard is not None and isinstance(exc, zstandard.ZstdError):
             raise ThreadUnavailable("The thread's compressed history file is damaged.") from exc
         raise
-
-
-def zstd_reader(source):
-    """A buffered reader of a zstd-compressed file's content."""
-    decompressor = zstandard_module().ZstdDecompressor()
-    return io.BufferedReader(decompressor.stream_reader(source, read_across_frames=True, closefd=False))
 
 
 def first_record(line):
@@ -202,15 +178,15 @@ class CompressedHistory:
         return TailRecords(self.content[-window:], False)
 
 
-def decompress_history(raw, limit=None):
-    """Decompress a zstd rollout, keeping its content's first line, its last limit bytes and whether those start at
+def decompress_history(raw):
+    """Decompress a zstd rollout, keeping its content's first line, its last MAX_TAIL_BYTES and whether those start at
     the beginning.
 
     A compressed file cannot be read from its end, so the whole stream is decompressed once. The decompressor returns
     a cut-off file's partial content without an error, so the file is refused unless its last frame ends and its
     content ends with a complete record: otherwise its last surviving turn need not be the thread's latest.
     """
-    limit = MAX_TAIL_BYTES if limit is None else limit
+    limit = MAX_TAIL_BYTES
     zstandard = zstandard_module()
     head, tail, total, frame_open = bytearray(), bytearray(), 0, False
     decompressor = zstandard.ZstdDecompressor().decompressobj()
@@ -260,11 +236,14 @@ def read_header(path, root):
     with open_history(path, root) as raw, changes_refused(), decompression_errors():
         opened = os.fstat(raw.fileno())
         if rollout_format(path.name) == "zstd":
-            with zstd_reader(BoundedInput(raw, min(opened.st_size, MAX_METADATA_BYTES))) as source:
-                record = first_record(source.readline(MAX_FIRST_LINE_BYTES))
+            content = zstandard_module().ZstdDecompressor().stream_reader(
+                BoundedInput(raw, min(opened.st_size, MAX_METADATA_BYTES)), read_across_frames=True, closefd=False)
+            with io.BufferedReader(content) as source:
+                line = source.readline(MAX_FIRST_LINE_BYTES)
         else:
-            record = PlainHistory(raw, opened).first_line()
-        READ_POINTS.header_read(path)
+            line = raw.readline(min(MAX_FIRST_LINE_BYTES, opened.st_size))
+        record = first_record(line)
+        checkpoint("header_read", path)
         return record, opened.st_mtime
 
 
@@ -298,7 +277,7 @@ def read_stable(root, locate, read):
         path = locate()
         with open_history(path, root) as source:
             opened = os.fstat(source.fileno())
-            READ_POINTS.opened(path, attempt)
+            checkpoint("opened", path, attempt)
             history = failure = None
             changed = False
             try:
@@ -308,7 +287,7 @@ def read_stable(root, locate, read):
                 changed = True
             except ThreadUnavailable as exc:
                 failure = exc
-            READ_POINTS.attempted(path, attempt, history)
+            checkpoint("attempted", path, attempt, history)
             identities = {file_identity(opened), file_identity(os.fstat(source.fileno())), path_identity(path)}
         if not changed and len(identities) == 1:
             if failure is not None:
