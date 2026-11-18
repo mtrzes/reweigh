@@ -758,9 +758,9 @@ class Bridge:
             raise BridgeError(str(exc)) from exc
         except OSError as exc:
             raise BridgeError("Cannot read the thread history files.") from exc
-        except (TypeError, AttributeError) as exc:
-            # A record whose values have unexpected types, such as a number where text belongs.
-            raise BridgeError("The thread's history file has a malformed line.") from exc
+        except Exception as exc:
+            # A fault in the reader itself, not a damaged file: the parsers name each malformed field they read.
+            raise BridgeError("The thread reader failed unexpectedly.") from exc
 
     async def consult(self, provider, prompt, working_directory, context="", conversation_id=None, ref=None,
                       seed_thread=None, model=None, reasoning_effort=None):

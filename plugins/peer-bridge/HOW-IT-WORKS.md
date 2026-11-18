@@ -126,14 +126,18 @@ thread, working directory, not forked), for Claude Code from the latest working 
 Claude sidechains never set that directory. Each read attempt checks the recorded directories against the repository
 resolved at the start of the request. Each attempt reads the extent captured when the file was opened, including
 for compressed rollouts. A file that changes while it is read is retried once, even if parsing the first attempt fails.
-The Claude reader searches up to 32 MiB of recent history and refuses a session whose main working directory is
-missing there. Only the current stay in the repository contributes replies and a title, including the title shown
-in the listing and used for exact-name selection. A session that has just moved in shows an unfinished turn and
-no messages. Claude replies follow the active branch's parent links after a rewind. If a gap between those links
-cannot be resolved within the recent history window, the read is refused.
+The Claude reader searches up to 32 MiB of recent history and refuses a session whose main working directory is missing
+there. Only the current stay in the repository contributes replies and a title, including the title shown in the listing
+and used for exact-name selection. A read searches as far back for the title as the listing does, in the same bytes as
+its replies: for a session unchanged since it was selected, that is the title it was selected by. A session that has
+just moved in shows an unfinished turn and no messages. Claude replies and titles follow the active branch's parent
+links after a rewind, so an abandoned branch cannot bring a session into the repository. If a gap between those links
+cannot be resolved within the recent history window, a read that needs the records beyond it is refused, and no title is
+shown; a session whose links are malformed is listed without a title and its read is refused.
 
-A Codex read refuses malformed turn and message fields. Message phases are the recorded `commentary` or
-`final_answer` tokens, or null when the phase is absent.
+A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a reply's stop
+reason of the wrong type. Message phases are the recorded `commentary` or `final_answer` tokens, or null when the
+phase is absent. Any other failure inside the reader is reported as a reader fault, not as a damaged file.
 
 The reader parses tail records one at a time and refuses windows with more than 131,072 complete lines. It uses up
 to 8 MiB for the start of a Claude session, the latest part of the Codex name index, or the stored bytes needed to
