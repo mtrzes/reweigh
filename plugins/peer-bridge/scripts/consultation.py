@@ -558,6 +558,14 @@ def git_entry_found(directory, lstat):
     return False
 
 
+def history_presence(found, unreadable_directories):
+    """Whether the peer keeps a history file for the session: True once one is found; None when none is found but a
+    directory could not be listed, since the file may be in it; False only after every directory was listed."""
+    if found:
+        return True
+    return None if unreadable_directories else False
+
+
 def failure_probes(provider, resuming):
     """The facts a failed consultation needs a probe for, in the order they are gathered: whether the CLI is signed in;
     on a follow-up, whether the peer still keeps the session's history; for Codex, on a follow-up, whether another app

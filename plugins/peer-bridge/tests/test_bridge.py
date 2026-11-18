@@ -28,6 +28,7 @@ from support import (
     consultation, eventually_async, git, git_repository, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
+from thread_parsing import HistoryLookup  # noqa: E402
 
 
 class ConsultationTests(BridgeTestCase):
@@ -416,7 +417,7 @@ class ConsultationTests(BridgeTestCase):
 
         def rollouts():
             looked_up.append(clock.now)
-            return {"session": []}
+            return HistoryLookup({"session": []})
 
         source = SimpleNamespace(rollouts=rollouts)
         scope = bridge.ConversationLock(None, None, lambda: clock.now, None)

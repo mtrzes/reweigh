@@ -31,7 +31,7 @@ from consultation import (
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
-    failure_probes, git_entry_found,
+    failure_probes, git_entry_found, history_presence,
 )
 from cleanup import run_to_completion
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
@@ -331,18 +331,21 @@ class FailureProbe:
         return await signed_in(self.provider, self.directory, self.scope, self.peer)
 
     async def history_present(self, session):
-        """Whether the peer still keeps any history file for the session, consultations included. It is not started
-        once the peer's budget is spent, nor waited for beyond it: listing a large history can take a while. A lookup
-        already running when the wait ends is not interrupted; its answer is dropped."""
+        """Whether the peer still keeps any history file for the session, consultations included; None when a history
+        directory could not be listed. It is not started once the peer's budget is spent, nor waited for beyond it:
+        listing a large history can take a while. A lookup already running when the wait ends is not interrupted; its
+        answer is dropped."""
         left = self.peer.left()
         if left <= 0:
             return None
         if self.provider == "codex":
             def find():
-                return session in self.source.rollouts()
+                lookup = self.source.rollouts()
+                return history_presence(session in lookup.found, lookup.unreadable_directories)
         else:
             def find():
-                return bool(self.source.session_files(session))
+                lookup = self.source.session_files(session)
+                return history_presence(bool(lookup.found), lookup.unreadable_directories)
 
         def lookup():
             # A worker may start late; once the budget is spent it does not start the lookup at all.

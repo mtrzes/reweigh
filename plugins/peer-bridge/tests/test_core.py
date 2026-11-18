@@ -395,6 +395,16 @@ class OutcomeTests(unittest.TestCase):
             with self.subTest(entries=entries):
                 self.assertIs(c.git_entry_found(directory, lstat), expected)
 
+    def test_history_is_absent_only_when_every_directory_was_listed(self):
+        for found, unreadable_directories, expected in (
+            (True, 0, True),
+            (True, 2, True),
+            (False, 0, False),
+            (False, 1, None),
+        ):
+            with self.subTest(found=found, unreadable_directories=unreadable_directories):
+                self.assertIs(c.history_presence(found, unreadable_directories), expected)
+
     def test_failure_probes(self):
         for provider, resuming, expected in (
             ("claude", False, ("signed_in",)),
@@ -814,15 +824,18 @@ class ResultTests(unittest.TestCase):
     def test_listing_result(self):
         listing = t.newest_first(t.ThreadListing(
             [t.ThreadSummary("old", None, "/r", 0), t.ThreadSummary("new", "N", "/r", 60, writer_lock_present=True)],
-            ("x", "y"),
+            ("x", "y"), 3,
         ))
         self.assertEqual(t.listing_result("codex", listing, 1), {
             "provider": "codex",
             "threads": [{"id": "new", "name": "N", "updated_at": "1970-01-01T00:01:00+00:00", "archived": False,
                          "writer_lock_file": True}],
             "unsupported_threads_machine_wide": 2,
+            "unreadable_history_directories_machine_wide": 3,
         })
-        self.assertNotIn("unsupported_threads_machine_wide", t.listing_result("claude", t.ThreadListing([]), 20))
+        empty = t.listing_result("claude", t.ThreadListing([]), 20)
+        self.assertNotIn("unsupported_threads_machine_wide", empty)
+        self.assertNotIn("unreadable_history_directories_machine_wide", empty)
 
 
 if __name__ == "__main__":

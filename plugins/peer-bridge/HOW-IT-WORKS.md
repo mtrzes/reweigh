@@ -116,9 +116,12 @@ Job cleanup removes only folders named with a canonical job UUID, optionally pre
 The reader opens the other app's session files read-only: Claude Code's `projects/*/*.jsonl`, and Codex's rollouts,
 plain or zstd-compressed. It opens regular files without following symlinks below the configured app home and
 checks the recorded session ID against the filename. The listing takes Codex recency from the open rollout so
-an archive move cannot interrupt the listing. The reader returns agent messages and the latest turn's state for
-threads in the same git repository. `seed_thread` carries a thread's recent messages into a new consultation, so a
-review left in Codex Desktop can be followed up without touching it.
+an archive move cannot interrupt the listing. One lookup per app finds the history files for listing, reading and
+failure diagnosis; it counts each history folder it cannot list instead of taking it as empty. The listing reports that
+count, and diagnosis never says a conversation's history is gone while a folder could not be listed. The reader
+returns agent messages and the latest turn's state for threads in the same git repository. `seed_thread` carries a
+thread's recent messages into a new consultation, so a review left in Codex Desktop can be followed up without
+touching it.
 
 The listing only picks a thread. The read opens the thread's file once and decides again, from the same bytes it
 returns messages from, whether the thread is in this repository: for Codex from the rollout's `session_meta` (main
