@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- The consult-peer skill has two request shapes: a steelman, where the peer makes the strongest case for a change before
-  its critique, and a double-crux, where the lead and the peer settle a disputed finding by a question about the pinned
-  code that would change one side's mind.
-
 ## 1.0.0-beta.2
 
 Hardening from architecture, security and implementation reviews of 1.0.0-beta.1.

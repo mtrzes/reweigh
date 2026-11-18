@@ -1,6 +1,6 @@
 ---
 name: consult-peer
-description: Consult Codex from Claude Code or Claude Code from Codex when the user requests a peer opinion, a review, a steelman, a double-crux or delegation, or asks to send or hand something to the other app or one of its sessions, with scoped context and resumable follow-ups; also read the other app's recent thread in the same repository, such as a review left in Codex Desktop. It cannot write into the other app's existing sessions: a handoff goes in your reply, which that session reads with read_codex_thread or read_claude_thread; never operate the other app's interface.
+description: Consult Codex from Claude Code or Claude Code from Codex when the user requests a peer opinion, a review or delegation, or asks to send or hand something to the other app or one of its sessions, with scoped context and resumable follow-ups; also read the other app's recent thread in the same repository, such as a review left in Codex Desktop. It cannot write into the other app's existing sessions: a handoff goes in your reply, which that session reads with read_codex_thread or read_claude_thread; never operate the other app's interface.
 ---
 
 # Consult a peer
@@ -36,15 +36,6 @@ call `get_consultation` with its `job_id`, passing `wait_seconds` (at most 60) t
 `lost` job carries an `error` to report; `cancel_consultation` stops a job the task no longer needs. Where the tools are not
 available, the `start`, `job` and `cancel` commands of `../../scripts/bridge.py` (relative to this skill's directory)
 do the same; usage is in [the plugin README](../../README.md#command-line-consultations).
-
-## Steelman and double-crux
-
-Two request shapes sharpen a consultation:
-
-- **Reject only after a steelman.** When you lean towards rejecting a change, proposal or design, even one that looks
-  plainly wrong, or the operator asks for a steelman, read [steelman.md](steelman.md) before you consult or advise.
-- **Double-crux**: when you dispute a peer finding and the answer changes what the operator does, or the operator asks
-  for a double-crux, even before any consultation, read [double-crux.md](double-crux.md).
 
 ## Review requests
 
