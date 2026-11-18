@@ -27,12 +27,15 @@ DIFFERENT_PEER = "This conversation belongs to a different provider or working d
 
 
 class ReleaseTests(unittest.TestCase):
-    def test_both_manifests_and_the_newest_changelog_entry_name_one_version(self):
+    def test_both_manifests_and_the_newest_release_in_the_changelog_name_one_version(self):
         root = BRIDGE_PATH.parents[1]
         versions = {json.loads((root / folder / "plugin.json").read_text(encoding="utf-8"))["version"]
                     for folder in (".claude-plugin", ".codex-plugin")}
         headings = [line for line in (root.parents[1] / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
                     if line.startswith("## ")]
+        # Changes waiting for a release sit under "## Unreleased" above it; the release renames that heading.
+        if headings[:1] == ["## Unreleased"]:
+            headings = headings[1:]
         self.assertTrue(headings, "CHANGELOG.md has no release heading.")
         self.assertEqual(versions, {headings[0].split()[1]})
 
