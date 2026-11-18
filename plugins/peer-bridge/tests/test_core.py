@@ -491,7 +491,7 @@ class RecordParsingTests(unittest.TestCase):
                     list(t.complete_records(data, from_start=True))
 
     def test_tail_decodes_only_during_iteration_and_stops_at_its_record_budget(self):
-        with patch.object(t, "MAX_TAIL_RECORDS", 2, create=True):
+        with patch.object(t, "MAX_TAIL_RECORDS", 2):
             records = iter(t.complete_records(b'{"a": 1}\n{}\n{bad}\n', True))
             self.assertEqual(next(records), {"a": 1})
             self.assertEqual(next(records), {})

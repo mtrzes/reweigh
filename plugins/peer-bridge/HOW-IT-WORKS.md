@@ -83,7 +83,8 @@ deadline, cancellation of a queued job with no runner takes effect immediately. 
 `cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The runner deletes
 the request file after reading it. If it cannot read the request for a valid job, it deletes the file and records
 `failed` with a fixed error. SIGTERM or SIGHUP during a CLI `start` cancels the pending start and cleans up any job it
-published during creation.
+published during creation. A start that cannot read its job once the runner is launched cancels the job, since
+the caller never learns its ID; if that cancellation fails too, the error names the job's ID.
 
 Each status read or cancellation waits at most one second for the lock on the job's state, then reports that the job
 is busy. The runner can respond to `SIGTERM` or `SIGHUP` while waiting for the lock.
