@@ -184,14 +184,20 @@ class ReaderTests(unittest.TestCase):
             names = {row["id"]: row["name"] for row in self.threads("codex")["threads"]}
         self.assertEqual(names, {older: None, newer: "Newer"})
 
-    def test_history_with_unexpected_value_types_is_refused_with_a_reason(self):
+    def test_a_malformed_prompt_leaves_the_session_listed(self):
         claude_session(self.claude_home, self.project, claude_prompt(5), claude_reply("Done."), title="Claude types")
         claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Done."), entrypoint=5)
-        # The bridge turns a value of the wrong type, which the parser meets as a TypeError, into a named refusal.
-        client = bridge.Bridge(readers={"claude": self.reader("claude")})
-        with self.assertRaisesRegex(bridge.BridgeError, "malformed line"):
-            asyncio.run(client.thread("claude", str(self.project), "Claude types"))
+        # The listing reads only titles; the read refuses the prompt (test_core).
         self.assertEqual([thread["name"] for thread in self.threads("claude")["threads"]], ["Claude types"])
+
+    def test_a_reader_fault_is_not_reported_as_a_damaged_file(self):
+        class Faulty:
+            def read(self, *arguments):
+                raise AttributeError("a fault in the reader")
+
+        client = bridge.Bridge(readers={"claude": Faulty()})
+        with self.assertRaisesRegex(bridge.BridgeError, "^The thread reader failed unexpectedly.$"):
+            asyncio.run(client.thread("claude", str(self.project), "Claude types"))
 
     def test_compressed_rollouts_are_listed_and_read_like_plain_ones(self):
         turns = (codex_turn("t1", "First answer."), codex_turn("t2", "Second answer."))

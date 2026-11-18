@@ -16,6 +16,7 @@ CODEX_MAIN_SOURCES = {"vscode", "cli"}
 CODEX_TURN_EVENTS = ("task_started", "task_complete", "turn_aborted", "item_completed")
 CODEX_MESSAGE_PHASES = (None, "commentary", "final_answer")
 MALFORMED_CODEX_EVENT = "The thread's history file has a malformed line for a Codex event."
+MALFORMED_CLAUDE_MESSAGE = "The thread's history file has a malformed line for a Claude message."
 # Codex compresses older rollouts with zstd; the records inside are the same JSONL.
 ROLLOUT_FORMATS = ((".jsonl", "jsonl"), (".jsonl.zst", "zstd"))
 UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -398,7 +399,10 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
             blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
             if any(not isinstance(block, dict) or block.get("type") == "tool_result" for block in blocks):
                 continue
-            text = "".join(block.get("text") or "" for block in blocks if block.get("type") == "text")
+            texts = [block.get("text") for block in blocks if block.get("type") == "text"]
+            if any(text is not None and not isinstance(text, str) for text in texts):
+                raise ThreadUnavailable(MALFORMED_CLAUDE_MESSAGE)
+            text = "".join(text or "" for text in texts)
             if text in CLAUDE_INTERRUPTION_MARKERS:
                 latest = TurnState(turn_id, "interrupted")
             else:
@@ -408,10 +412,13 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
             if entry.get("isApiErrorMessage"):
                 latest = TurnState(turn_id, "failed")
                 continue
+            stop_reason = message.get("stop_reason")
+            if stop_reason is not None and not isinstance(stop_reason, str):
+                raise ThreadUnavailable(MALFORMED_CLAUDE_MESSAGE)
             text = text_of(content, "text")
             if text.strip():
                 messages.append(AgentMessage(turn_id, text))
-            latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(message.get("stop_reason")))
+            latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(stop_reason))
     return Scan(latest, messages, title=chosen_title(titles), segment_start=segment_start)
 
 

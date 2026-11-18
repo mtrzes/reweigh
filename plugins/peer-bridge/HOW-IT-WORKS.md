@@ -111,8 +111,9 @@ in the listing and used for exact-name selection. A session that has just moved 
 no messages. Claude replies follow the active branch's parent links after a rewind. If a gap between those links
 cannot be resolved within the recent history window, the read is refused.
 
-A Codex read refuses malformed turn and message fields. Message phases are the recorded `commentary` or
-`final_answer` tokens, or null when the phase is absent.
+A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a reply's stop
+reason of the wrong type. Message phases are the recorded `commentary` or `final_answer` tokens, or null when the
+phase is absent. Any other failure inside the reader is reported as a reader fault, not as a damaged file.
 
 The reader parses tail records one at a time and refuses windows with more than 131,072 complete lines. It uses up
 to 8 MiB for the start of a Claude session, the latest part of the Codex name index, or the stored bytes needed to

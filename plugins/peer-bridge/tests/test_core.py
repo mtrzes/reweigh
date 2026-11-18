@@ -654,6 +654,15 @@ class ClaudeParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(t.ThreadUnavailable, "does not know"):
             t.claude_snapshot(self.SUMMARY, self.scan([self.user("q"), self.assistant("a", "new_reason")]), 3)
 
+    def test_malformed_claude_prompt_and_reply_fields_are_refused(self):
+        cases = (
+            self.user(5, "u2"), self.user({"text": "q2"}, "u2"), self.user([{"type": "text", "text": ["q2"]}], "u2"),
+            self.assistant("a", ["end_turn"]), self.assistant("a", 3),
+        )
+        for malformed in cases:
+            with self.subTest(malformed=malformed), self.assertRaisesRegex(t.ThreadUnavailable, "malformed line"):
+                self.scan([self.user("q"), self.assistant("a", "end_turn"), malformed])
+
     def test_tool_results_side_chains_and_meta_entries_are_not_turns(self):
         records = [
             self.user("q"), self.assistant("calling", "tool_use"),
