@@ -165,12 +165,11 @@ class ReaderTests(unittest.TestCase):
         archive = self.codex_home / "archived_sessions"
         archive.mkdir()
 
-        class ArchiveAfterHeader(history_capture.ReadPoints):
-            def header_read(self, read_path):
-                if read_path == path:
-                    path.rename(archive / path.name)
+        def archive_after_header(point, read_path, *details):
+            if (point, read_path) == ("header_read", path):
+                path.rename(archive / path.name)
 
-        with patch.object(history_capture, "READ_POINTS", ArchiveAfterHeader()):
+        with patch.object(history_capture, "checkpoint", archive_after_header):
             rows = self.threads("codex")["threads"]
         self.assertEqual((path.exists(), (archive / path.name).exists()), (False, True))
         self.assertEqual([row["id"] for row in rows], [other, moving])
@@ -230,14 +229,15 @@ class ReaderTests(unittest.TestCase):
         noise = [codex_event("token_count", "t1", info="x" * 200) for _ in range(200)]
         _, path = codex_thread(self.codex_home, self.project, codex_turn("t0", "Old answer."), noise,
                                codex_turn("t1", "Answer."), suffix=".jsonl.zst")
-        def decompressed(limit=None):
+        def decompressed():
             with history_capture.open_history(path) as source:
-                return history_capture.decompress_history(source, limit)
+                return history_capture.decompress_history(source)
 
         head, whole, from_start = decompressed()
         self.assertTrue(from_start)
         self.assertEqual(json.loads(head.split(b"\n")[0])["type"], "session_meta")
-        head_again, tail, from_start = decompressed(limit=4096)
+        with patch.object(history_capture, "MAX_TAIL_BYTES", 4096):
+            head_again, tail, from_start = decompressed()
         self.assertEqual((head_again, len(tail), from_start), (head, 4096, False))
         self.assertTrue(whole.endswith(tail))
 
@@ -290,28 +290,6 @@ class ReaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ThreadUnavailable, "compressed history is too large"):
                 self.read("codex", identifier)
 
-    def test_compressed_read_retries_a_parse_error_when_the_file_changed(self):
-        identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."),
-                                        suffix=".jsonl.zst")
-        content = path.read_bytes()
-        captures = []
-
-        class DamageFirstAttempt(history_capture.ReadPoints):
-            def opened(self, read_path, attempt):
-                if attempt == 0:
-                    path.write_bytes(b"\x00" * len(content))
-
-            def attempted(self, read_path, attempt, history):
-                captures.append(history)
-                if attempt == 0:
-                    path.write_bytes(content)
-
-        with patch.object(history_capture, "READ_POINTS", DamageFirstAttempt()):
-            self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
-        # The first attempt was refused as damaged before it built a capture; the change sent it round once more.
-        self.assertEqual(len(captures), 2)
-        self.assertIsNone(captures[0])
-
     def test_each_compressed_read_attempt_uses_its_open_extent(self):
         import zstandard
 
@@ -321,39 +299,47 @@ class ReaderTests(unittest.TestCase):
         frame = zstandard.ZstdCompressor().compress(records)
         decoded = []
 
-        class AppendAfterFirstOpen(history_capture.ReadPoints):
-            def opened(self, read_path, attempt):
-                if attempt == 0:
-                    with path.open("ab") as output:
-                        output.write(frame)
-
-            def attempted(self, read_path, attempt, history):
+        def append_after_first_open(point, read_path, attempt=None, history=None):
+            if (point, attempt) == ("opened", 0):
+                with path.open("ab") as output:
+                    output.write(frame)
+            elif point == "attempted":
                 decoded.append(history.tail(history_capture.MAX_TAIL_BYTES).data)
 
-        with patch.object(history_capture, "READ_POINTS", AppendAfterFirstOpen()):
+        with patch.object(history_capture, "checkpoint", append_after_first_open):
             self.assertEqual(self.read("codex", identifier)["messages"][-1]["text"], "Second.")
         self.assertEqual(len(decoded), 2)
         self.assertFalse(decoded[0].endswith(records))
         self.assertEqual(decoded[1], decoded[0] + records)
 
     def test_a_history_that_changes_while_it_is_read_is_read_once_more_then_refused(self):
-        _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), name="Moving")
+        import zstandard
 
-        def appending_on(attempts):
-            class Append(history_capture.ReadPoints):
-                def opened(self, read_path, attempt):
-                    if attempt in attempts:
-                        with path.open("a", encoding="utf-8") as history:
-                            history.write(json.dumps(codex_event("token_count", "t1")) + "\n")
-            return patch.object(history_capture, "READ_POINTS", Append())
+        record = (json.dumps(codex_event("token_count", "t1")) + "\n").encode()
+        for suffix, extra in ((".jsonl", record), (".jsonl.zst", zstandard.ZstdCompressor().compress(record))):
+            identifier, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."), suffix=suffix)
+            # Each change grows the file, so it is seen by its size whatever the clock's resolution.
+            for change, steps, expected in (
+                ("refused while damaged, then changed", {("opened", 0): "damage", ("attempted", 0): "restore"}, None),
+                ("changed once", {("opened", 0): "append"}, None),
+                ("changed twice", {("opened", 0): "append", ("opened", 1): "append"},
+                 history_capture.CHANGED_WHILE_READ),
+            ):
+                content = path.read_bytes()
+                actions = {"damage": lambda: path.write_bytes(b"\x00" * len(content)),
+                           "restore": lambda: path.write_bytes(content + extra),
+                           "append": lambda: path.write_bytes(path.read_bytes() + extra)}
 
-        with appending_on({0}):
-            self.assertEqual([message["text"] for message in self.read("codex", "Moving")["messages"]], ["Done."])
-        with (
-            appending_on({0, 1}),
-            self.assertRaisesRegex(ThreadUnavailable, "^The thread's history file changed while it was read.$"),
-        ):
-            self.read("codex", "Moving")
+                def change_at(point, read_path, attempt=None, history=None):
+                    if (point, attempt) in steps:
+                        actions[steps[point, attempt]]()
+
+                with self.subTest(suffix=suffix, change=change), patch.object(history_capture, "checkpoint", change_at):
+                    if expected:
+                        with self.assertRaisesRegex(ThreadUnavailable, f"^{expected}$"):
+                            self.read("codex", identifier)
+                    else:
+                        self.assertEqual(self.read("codex", identifier)["messages"][0]["text"], "Done.")
 
     def test_a_path_that_names_another_file_after_it_was_opened_is_read_again(self):
         thread, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Opened."))
@@ -361,16 +347,15 @@ class ReaderTests(unittest.TestCase):
                                       meta={"id": thread})
         moved = self.root / "moved-day"
 
-        class ReplaceDirectoryAfterOpen(history_capture.ReadPoints):
-            def opened(self, read_path, attempt):
-                if attempt == 0:
-                    # Moving the enclosing directory leaves the open file's own metadata untouched: only the path
-                    # check sees that the path now names another file.
-                    path.parent.rename(moved)
-                    path.parent.mkdir()
-                    os.replace(replacement, path)
+        def replace_directory_after_open(point, read_path, attempt=None, history=None):
+            if (point, attempt) == ("opened", 0):
+                # Moving the enclosing directory leaves the open file's own metadata untouched: only the path check
+                # sees that the path now names another file.
+                path.parent.rename(moved)
+                path.parent.mkdir()
+                os.replace(replacement, path)
 
-        with patch.object(history_capture, "READ_POINTS", ReplaceDirectoryAfterOpen()):
+        with patch.object(history_capture, "checkpoint", replace_directory_after_open):
             self.assertEqual(self.read("codex", thread)["messages"][0]["text"], "Replaced.")
 
     def test_a_history_below_a_symlinked_directory_is_not_opened(self):
@@ -598,7 +583,7 @@ class ReaderTests(unittest.TestCase):
                 path.parent.chmod(0)
                 self.addCleanup(path.parent.chmod, 0o700)
                 self.assertEqual(self.threads(provider)["unreadable_history_directories_machine_wide"], 1)
-                scope = bridge.ConversationLock(None, None, time.monotonic, None)
+                scope = bridge.Conversation(None, None, time.monotonic, None)
                 probe = bridge.FailureProbe(provider, self.project, scope, scope.budget(60), sources[provider])
                 self.assertIsNone(asyncio.run(probe.observe("history_present", session)))
 

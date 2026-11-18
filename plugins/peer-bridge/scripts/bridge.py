@@ -40,10 +40,6 @@ import peer_guard
 from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
-START_UNCONFIRMED = (
-    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
-    "with that job ID."
-)
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
@@ -102,40 +98,30 @@ def state_directory():
 
 
 class SessionStore:
-    """Keep bridge-owned sessions bound to their provider and project.
-
-    clock and runner, time.monotonic and run_command unless given, are what every conversation scope opened here times
-    its budgets with and runs its guarded commands through.
-    """
+    """Keep bridge-owned sessions bound to their provider and project. clock and runner are seams for tests."""
 
     def __init__(self, directory, clock=None, runner=None):
         self.directory = Path(directory).absolute()
         self.clock, self.runner = clock, runner
 
-    def checkout_location(self, identifier):
-        """Where a conversation's pinned checkout lives: fixed, because Claude resumes a session only from the directory
-        it ran in."""
-        return self.directory / "worktrees" / identifier
-
     @contextmanager
     def open(self, provider, working_directory, conversation_id):
-        """Open a conversation, new or resumed: yields its Conversation scope, holding its lock and record."""
+        """Open a conversation, new or resumed: yields its Conversation, holding its lock and record."""
         identifier = validate_session_id(conversation_id) if conversation_id else str(uuid.uuid4())
         try:
             ensure_private(self.directory)
         except OSError as exc:
             raise BridgeError("Cannot create the bridge's state directory.") from exc
-        with self.holding(identifier) as held:
-            if held is None:
+        with self.holding(identifier) as conversation:
+            if conversation is None:
                 raise BridgeError("This conversation is busy. Wait for its current consultation to finish.")
-            path = self.directory / f"{identifier}.json"
-            record = new_record(provider, working_directory)
+            conversation.record = new_record(provider, working_directory)
             if conversation_id:
-                saved = read_json(path, unreadable=UNKNOWN_CONVERSATION)
+                saved = read_json(conversation.path, unreadable=UNKNOWN_CONVERSATION)
                 if saved is None:
                     raise BridgeError(UNKNOWN_CONVERSATION)
-                record = resumed_record(saved, provider, working_directory)
-            yield Conversation(held, identifier, record, path)
+                conversation.record = resumed_record(saved, provider, working_directory)
+            yield conversation
 
     def idle_worktrees(self):
         """The conversations with a pinned checkout folder, whatever their state; holding() tells which are idle.
@@ -151,15 +137,13 @@ class SessionStore:
 
     @contextmanager
     def holding(self, identifier):
-        """Hold a conversation's lock while it is free: yields lock-bound execution on it, a ConversationLock, or None
-        when a consultation has it. It opens no record; open() builds on it.
+        """Hold a conversation's lock while it is free: yields its Conversation with no record read, or None when a
+        consultation has it.
 
-        A guard given the descriptor keeps the lock after this context ends, for as long as the guard lives, so this
-        never unlocks explicitly: flock belongs to the open file description the guard shares, and LOCK_UN would free
-        the conversation while the guard is still stopping its group (test_bridge
-        test_a_conversation_lock_outlives_its_context_while_a_shared_descriptor_holds_it). Closing only this
-        process's copy is what lets the guard keep it. JobStore.flock, whose descriptor no process inherits, unlocks
-        explicitly; the two are not interchangeable.
+        This never unlocks explicitly. A guard given the descriptor shares its open file description, so LOCK_UN would
+        free the conversation while the guard is still stopping its group; closing only this process's copy lets the
+        guard keep the lock (test_a_conversation_lock_outlives_its_context_while_a_shared_descriptor_holds_it). Do not
+        merge this with JobStore.flock, whose descriptor no process inherits.
         """
         try:
             descriptor = open_regular(self.directory / f"{identifier}.lock", os.O_CREAT | os.O_RDWR)
@@ -171,35 +155,28 @@ class SessionStore:
             except BlockingIOError:
                 yield None
                 return
-            yield ConversationLock(lock.fileno(), self.checkout_location(identifier), self.clock or time.monotonic,
-                                   self.runner or run_command)
+            # The checkout's location is fixed, because Claude resumes a session only from the directory it ran in.
+            yield Conversation(lock.fileno(), self.directory / "worktrees" / identifier, self.clock or time.monotonic,
+                               self.runner or run_command, identifier, self.directory / f"{identifier}.json")
 
 
-class ConversationLock:
-    """Lock-bound execution on one conversation: every command it runs, peer, sign-in probe or git, runs under the
-    guard, which inherits the conversation's locked descriptor, so the conversation and its checkout stay busy until
-    the command's process group has stopped. Its clock times the budgets those commands share."""
+class Conversation:
+    """One conversation's lock, record and checkout location. Every command it runs goes through the guard, which
+    inherits the locked descriptor, so the conversation stays busy until the command's process group has stopped."""
 
-    def __init__(self, descriptor, worktree, clock, runner):
+    def __init__(self, descriptor, worktree, clock, runner, identifier=None, path=None):
         self.descriptor, self.worktree, self.clock, self.runner = descriptor, worktree, clock, runner
+        self.identifier, self.path, self.record = identifier, path, None
 
     def budget(self, seconds):
         return Budget(seconds, self.clock)
 
-    def preparation_budget(self):
-        return self.budget(CHECKOUT_PREPARATION_SECONDS)
-
-    def removal_budget(self):
-        return self.budget(CHECKOUT_REMOVAL_SECONDS)
-
     async def run(self, command, prompt, directory, timeout, environment=None):
-        """run_command, with the guard holding this conversation's lock."""
         return await self.runner(command, prompt, directory, timeout, environment=environment, lock=self.descriptor)
 
     async def git(self, directory, *arguments, failure, timeout, config=(), allowed=()):
         """Run git under the guard, isolated from the repository's hooks, monitor and transports and from inherited
-        GIT_* variables, plus the settings in config; exit statuses in allowed count as success. A command with no
-        time left is not started.
+        GIT_* variables, plus the settings in config; exit statuses in allowed count as success.
 
         The output keeps git's exact bytes, decoded as file names are, without its one terminating newline.
         """
@@ -218,16 +195,8 @@ class ConversationLock:
             raise BridgeError(failure)
         return os.fsdecode(output).removesuffix("\n")
 
-
-class Conversation(ConversationLock):
-    """An open conversation: its lock, its record and where its pinned checkout lives. It saves the record only once
-    the peer's result is validated against it."""
-
-    def __init__(self, held, identifier, record, path):
-        super().__init__(held.descriptor, held.worktree, held.clock, held.runner)
-        self.identifier, self.record, self.path = identifier, record, path
-
     def save(self, backend_session_id, commit):
+        """Save the record once the peer's result has been validated against it."""
         record = completed_record(self.record, backend_session_id, commit)
         try:
             write_json(self.path, record)
@@ -293,65 +262,44 @@ def peer_executable(provider):
     raise BridgeError(f"{provider} CLI is unavailable. Install it and sign in before consulting it.")
 
 
-async def signed_in(provider, directory, scope, peer):
-    """Ask the peer CLI whether it is signed in: True, False, or None when it cannot tell. It runs within what is left
-    of the peer's budget.
-
-    The probe runs under the guard like the consultation, so a helper it starts cannot outlive a cancelled or timed
-    out consultation, and a cancellation passes on only once the probe's group has stopped.
-    """
-    timeout = min(SIGN_IN_PROBE_SECONDS, peer.left())
-    if timeout <= 0:
-        return None
-    try:
-        command = [peer_executable(provider), *SIGN_IN_PROBES[provider]]
-        return_code, output, _ = await scope.run(command, None, directory, timeout)
-    except (BridgeError, OSError):
-        return None
-    return signed_in_from(provider, return_code, output.decode("utf-8", errors="replace"))
-
-
 class FailureProbe:
-    """Observe what may explain one failed consultation: the real adapter behind diagnosis, which decides what to ask.
-
-    Each observation is True, False, or None when it cannot tell. The conversation's scope supplies lock-bound
-    execution and the peer's budget, whose remainder bounds the sign-in probe and the history lookup; the thread
-    reader's source supplies the shared lookups of the peer's files.
-    """
+    """The real adapter diagnosis observes a failed consultation through: each answer True, False, or None when it
+    cannot tell."""
 
     def __init__(self, provider, directory, scope, peer, source):
         self.provider, self.directory, self.scope, self.peer, self.source = provider, directory, scope, peer, source
 
     async def observe(self, name, session):
-        observations = {"signed_in": self.signed_in, "history_present": self.history_present,
-                        "writer_lock_present": self.writer_lock_present, "in_git_repository": self.in_git_repository}
-        return await observations[name](session)
+        return await self.OBSERVATIONS[name](self, session)
 
     async def signed_in(self, session):
-        return await signed_in(self.provider, self.directory, self.scope, self.peer)
+        """Ask the peer CLI, under the guard like the consultation, so a helper it starts cannot outlive a cancelled
+        consultation, and a cancellation passes on only once the probe's group has stopped."""
+        timeout = min(SIGN_IN_PROBE_SECONDS, self.peer.left())
+        if timeout <= 0:
+            return None
+        try:
+            command = [peer_executable(self.provider), *SIGN_IN_PROBES[self.provider]]
+            return_code, output, _ = await self.scope.run(command, None, self.directory, timeout)
+        except (BridgeError, OSError):
+            return None
+        return signed_in_from(self.provider, return_code, output.decode("utf-8", errors="replace"))
 
     async def history_present(self, session):
         """Whether the peer still keeps any history file for the session, consultations included; None when a history
-        directory could not be listed. It is not started once the peer's budget is spent, nor waited for beyond it:
-        listing a large history can take a while. A lookup already running when the wait ends is not interrupted; its
-        answer is dropped."""
-        left = self.peer.left()
-        if left <= 0:
-            return None
-        if self.provider == "codex":
-            def find():
-                lookup = self.source.rollouts()
-                return history_presence(session in lookup.found, lookup.unreadable_directories)
-        else:
-            def find():
-                lookup = self.source.session_files(session)
-                return history_presence(bool(lookup.found), lookup.unreadable_directories)
-
+        folder could not be listed. Waited for only while the peer's budget lasts, because listing a large history can
+        take a while; a lookup still running then is not interrupted, only ignored."""
         def lookup():
-            # A worker may start late; once the budget is spent it does not start the lookup at all.
-            return find() if self.peer.left() > 0 else None
+            if self.peer.left() <= 0:
+                return None  # the worker started late
+            if self.provider == "codex":
+                files = self.source.rollouts()
+                return history_presence(session in files.found, files.unreadable_directories)
+            files = self.source.session_files(session)
+            return history_presence(bool(files.found), files.unreadable_directories)
+
         try:
-            return await asyncio.wait_for(asyncio.to_thread(lookup), left)
+            return await asyncio.wait_for(asyncio.to_thread(lookup), self.peer.left())
         except (OSError, asyncio.TimeoutError):
             return None
 
@@ -362,12 +310,15 @@ class FailureProbe:
             return None
 
     async def in_git_repository(self, session):
-        """The directory is already resolved: nothing touches the filesystem on the event loop."""
+        # The directory is already resolved, so nothing touches the filesystem on the event loop.
         try:
             return await asyncio.wait_for(asyncio.to_thread(git_entry_found, self.directory, os.lstat),
                                           GIT_ENTRY_PROBE_SECONDS)
         except asyncio.TimeoutError:
             return None
+
+    OBSERVATIONS = {"signed_in": signed_in, "history_present": history_present,
+                    "writer_lock_present": writer_lock_present, "in_git_repository": in_git_repository}
 
 
 def codex_catalogue():
@@ -609,7 +560,7 @@ async def sweep_worktree(store, identifier):
         if scope is None:
             return
         worktree = scope.worktree
-        removal = scope.removal_budget()
+        removal = scope.budget(CHECKOUT_REMOVAL_SECONDS)
         try:
             repository = await scope.git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir",
                                          failure="Not a checkout.", timeout=removal.left())
@@ -630,12 +581,11 @@ async def pinned_checkout(scope, directory, ref):
 
     The checkout is registered without files first, so the filter drivers disabled are those configured where the
     files are written, which conditional includes and per-worktree configuration can make differ from the source's.
-    Every git command until the checkout is yielded shares one preparation budget; its removal has its own allowance.
     """
     if ref is None:
         yield directory, None
         return
-    worktree, preparation = scope.worktree, scope.preparation_budget()
+    worktree, preparation = scope.worktree, scope.budget(CHECKOUT_PREPARATION_SECONDS)
     repository = Path(await scope.git(
         directory, "rev-parse", "--show-toplevel",
         failure="A ref needs a working_directory inside a git repository.", timeout=preparation.left(),
@@ -670,7 +620,7 @@ async def pinned_checkout(scope, directory, ref):
         yield consulted, commit
     finally:
         try:
-            await run_to_completion(discard_worktree(scope, repository, scope.removal_budget()))
+            await run_to_completion(discard_worktree(scope, repository, scope.budget(CHECKOUT_REMOVAL_SECONDS)))
         except BridgeError:
             pass  # left for a later consultation's sweep: the reply, error or cancellation stands
 

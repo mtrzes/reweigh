@@ -601,8 +601,9 @@ class CodexParsingTests(unittest.TestCase):
     def event(kind, turn, **fields):
         return {"type": "event_msg", "payload": {"type": kind, "turn_id": turn, **fields}}
 
-    def message(self, turn, text):
-        return self.event("item_completed", turn, item={"type": "AgentMessage", "content": [
+    @staticmethod
+    def message(turn, text):
+        return CodexParsingTests.event("item_completed", turn, item={"type": "AgentMessage", "content": [
             {"type": "Text", "text": text}], "phase": "final_answer"})
 
     def test_turn_states(self):
@@ -842,7 +843,7 @@ class TailSearchTests(unittest.TestCase):
     @staticmethod
     def codex_turn(turn, text):
         event = CodexParsingTests.event
-        return [event("task_started", turn), CodexParsingTests().message(turn, text),
+        return [event("task_started", turn), CodexParsingTests.message(turn, text),
                 event("task_complete", turn, last_agent_message=text)]
 
     def test_turns_search(self):
@@ -907,8 +908,8 @@ class TailSearchTests(unittest.TestCase):
         ):
             with self.subTest(label):
                 tail = Tail(*records)
-                self.assertEqual(t.search_tail(tail, t.claude_title_search(ClaudeParsingTests.belongs, None), windows),
-                                 expected)
+                search = t.claude_title_search(ClaudeParsingTests.belongs, None)
+                self.assertEqual(t.search_tail(tail, search, windows).title, expected)
                 self.assertEqual(tail.sizes, sizes)
 
 

@@ -567,9 +567,7 @@ def history_presence(found, unreadable_directories):
 
 
 def failure_probes(provider, resuming):
-    """The facts a failed consultation needs a probe for, in the order they are gathered: whether the CLI is signed in;
-    on a follow-up, whether the peer still keeps the session's history; for Codex, on a follow-up, whether another app
-    holds the thread's writer lock, and always whether working_directory is in a git repository."""
+    """The FailureFacts fields a failed consultation needs a probe for, in the order they are gathered."""
     probes = ["signed_in"]
     if resuming:
         probes.append("history_present")

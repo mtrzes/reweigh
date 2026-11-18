@@ -231,7 +231,7 @@ class ClaudeSessionsSource:
         if cwd is None or not include(cwd):
             return None
         try:
-            name = search_tail(history.tail, claude_title_search(include, identifier), TAIL_WINDOWS)
+            name = search_tail(history.tail, claude_title_search(include, identifier), TAIL_WINDOWS).title
         except ThreadUnavailable:
             # Counted as unreadable, a session refused only after it matched the repository would show in the
             # machine-wide count from this repository alone. It is listed without a title; its read refuses it.
@@ -248,7 +248,7 @@ class ClaudeSessionsSource:
             scan = search_tail(history.tail, claude_turns_search(belongs, summary.id, max_messages), TAIL_WINDOWS)
             # The title is quoted into seed context, so it too comes only from the session's stay in this repository.
             # The turns search stops once it has enough messages; the title comes from the listing's own search.
-            name = search_tail(history.tail, claude_title_search(belongs, summary.id), TAIL_WINDOWS)
+            name = search_tail(history.tail, claude_title_search(belongs, summary.id), TAIL_WINDOWS).title
             current = replace(summary, cwd=cwd, name=name, source_kind=entrypoint)
             return claude_snapshot(current, scan, max_messages)
 
@@ -288,14 +288,15 @@ class ThreadReader:
 
         return include
 
+    def listing(self, include):
+        return newest_first(self.source.list_threads(cache(include)))
+
     def list(self, working_directory, limit):
-        listing = self.source.list_threads(cache(self.same_repository(working_directory)))
-        return listing_result(self.source.provider, newest_first(listing), limit)
+        return listing_result(self.source.provider, self.listing(self.same_repository(working_directory)), limit)
 
     def read(self, working_directory, thread, max_messages):
         # A read by ID goes through selection too, because an ID can equal another thread's exact name, which
         # selection reports as ambiguous; a direct lookup by ID would pick one of the two silently.
         include = self.same_repository(working_directory)
-        # The listing only picks the thread; the source decides again from the bytes it reads the messages from.
-        summary = match_thread(newest_first(self.source.list_threads(cache(include))).threads, thread)
+        summary = match_thread(self.listing(include).threads, thread)
         return snapshot_result(self.source.provider, self.source.read_thread(summary, max_messages, include))

@@ -413,41 +413,25 @@ class ConsultationTests(BridgeTestCase):
                                      [(name, resumed) for name in consultation.failure_probes(provider, bool(resumed))])
 
     async def test_the_history_lookup_never_starts_once_the_peers_budget_is_spent(self):
-        clock, looked_up = SimpleNamespace(now=100.0), []
-
-        def rollouts():
-            looked_up.append(clock.now)
-            return HistoryLookup({"session": []})
-
-        source = SimpleNamespace(rollouts=rollouts)
-        scope = bridge.ConversationLock(None, None, lambda: clock.now, None)
-        peer = scope.budget(5)
-        probe = bridge.FailureProbe("codex", self.project, scope, peer, source)
-        self.assertIs(await probe.observe("history_present", "session"), True)
-        clock.now += 5
-        self.assertIsNone(await probe.observe("history_present", "session"))
-        self.assertEqual(looked_up, [100.0])
-        # A worker that starts only after the budget is spent does not look either.
-        readings = iter((200.0, 200.0, 206.0))
-        late = bridge.ConversationLock(None, None, lambda: clock.now, None)
-        late.clock = lambda: next(readings, 206.0)
-        probe = bridge.FailureProbe("codex", self.project, late, late.budget(5), source)
-        self.assertIsNone(await probe.observe("history_present", "session"))
-        self.assertEqual(looked_up, [100.0])
+        looked_up = []
+        source = SimpleNamespace(rollouts=lambda: looked_up.append(True) or HistoryLookup({"session": []}))
+        # The clock as the budget, the wait and the worker read it; the second time the worker starts too late.
+        for readings, expected in (((100.0, 100.0, 100.0), True), ((100.0, 100.0, 106.0), None)):
+            with self.subTest(readings=readings):
+                looked_up.clear()
+                clock = iter(readings)
+                scope = bridge.Conversation(None, None, lambda: next(clock), None)
+                probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(5), source)
+                self.assertIs(await probe.observe("history_present", "session"), expected)
+                self.assertEqual(looked_up, [True] if expected else [])
 
     async def test_the_git_entry_lookup_gives_up_on_a_volume_that_stops_answering(self):
-        stalled, release = threading.Event(), threading.Event()
-
-        def git_entry_found(directory, lstat):
-            stalled.set()
-            release.wait(DEADLINE_SECONDS)
-            return True
-
-        scope = bridge.ConversationLock(None, None, time.monotonic, None)
+        release = threading.Event()
+        scope = bridge.Conversation(None, None, time.monotonic, None)
         probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(30), None)
         try:
             with (
-                patch.object(bridge, "git_entry_found", git_entry_found),
+                patch.object(bridge, "git_entry_found", lambda directory, lstat: release.wait(DEADLINE_SECONDS)),
                 patch.object(bridge, "GIT_ENTRY_PROBE_SECONDS", 0),
             ):
                 self.assertIsNone(await probe.observe("in_git_repository", None))
@@ -892,47 +876,46 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_checkout_preparation_shares_one_budget_and_removal_has_its_own(self):
         git_repository(self.project)
-        clock = SimpleNamespace(now=1000.0)
-        preparation, removal = bridge.CHECKOUT_PREPARATION_SECONDS, bridge.CHECKOUT_REMOVAL_SECONDS
-        for step, late, expected in (
-            (10, False, [("rev-parse", preparation), ("rev-parse", preparation - 10), ("worktree", preparation - 20),
-                  ("worktree", preparation - 30), ("config", preparation - 40), ("read-tree", preparation - 50),
-                  ("peer", self.client.timeout), ("worktree", removal)]),
-            # Out of time before the checkout is added: nothing more is started, and the removal still runs.
-            (preparation / 3, True, [("rev-parse", preparation), ("rev-parse", preparation * 2 / 3),
-                               ("worktree", preparation / 3), ("worktree", removal)]),
+        clock, calls, step = SimpleNamespace(now=1000.0), [], 0
+        prepare, remove = bridge.CHECKOUT_PREPARATION_SECONDS, bridge.CHECKOUT_REMOVAL_SECONDS
+
+        async def recording(command, prompt, directory, timeout, **options):
+            name = "peer" if prompt is not None else command[3].removeprefix(f"--work-tree={command[2]}")
+            calls.append((name or command[4], timeout))
+            clock.now += step
+            return await bridge.run_command(command, prompt, directory, timeout, **options)
+
+        third = prepare / 3
+        for step, leftover, expected in (
+            (10, False, [("rev-parse", prepare), ("rev-parse", prepare - 10), ("worktree", prepare - 20),
+                         ("worktree", prepare - 30), ("config", prepare - 40), ("read-tree", prepare - 50),
+                         ("peer", self.client.timeout), ("worktree", remove)]),
+            # Out of time before the checkout is added: nothing more starts, and the removal still runs.
+            (third, False, [("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
+                            ("worktree", remove)]),
+            # Out of time while removing a checkout left in place, after the sweep's own call: the final removal, with
+            # its own allowance, removes it.
+            (third, True, [("rev-parse", remove), ("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
+                           ("worktree", remove), ("worktree", remove - third)]),
         ):
-            calls = []
-
-            async def recording(command, prompt, directory, timeout, **options):
-                name = "peer" if prompt is not None else command[3].removeprefix(f"--work-tree={command[2]}")
-                calls.append((name or command[4], timeout))
-                clock.now += step
-                return await bridge.run_command(command, prompt, directory, timeout, **options)
-
+            arguments = {"ref": "HEAD"}
+            if leftover:
+                self.client.store = self.store
+                arguments = {"conversation_id": (await self.consult(ref="HEAD"))["conversation_id"]}
+                folder = self.state / "worktrees" / arguments["conversation_id"]
+                folder.mkdir()
+                (folder / ".git").write_text("gitdir: /unmounted\n")  # so the sweep leaves the folder alone
+            calls.clear()
             self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
-            with self.subTest(step=step):
-                if late:
-                    with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
-                        await self.consult(ref="HEAD")
+            with self.subTest(step=step, leftover=leftover):
+                if step == 10:
+                    await self.consult(**arguments)
                 else:
-                    await self.consult(ref="HEAD")
-            self.assertEqual(calls, expected)
-            self.assertEqual(len(self.registered_worktrees()), 1)  # only the project's own
-        # A checkout left in place whose removal runs out of preparation time is removed with the final allowance.
-        self.client.store = self.store
-        identifier = (await self.consult(ref="HEAD"))["conversation_id"]
-        leftover = self.state / "worktrees" / identifier
-        leftover.mkdir()
-        (leftover / ".git").write_text("gitdir: /unmounted\n")  # so the sweep before it leaves the folder alone
-        calls, step = [], preparation / 3
-        self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
-        with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
-            await self.consult(conversation_id=identifier)
-        self.assertEqual(calls, [("rev-parse", removal), ("rev-parse", preparation), ("rev-parse", preparation - step),
-                                 ("worktree", preparation - 2 * step), ("worktree", removal),
-                                 ("worktree", removal - step)])
-        self.assertFalse(leftover.exists())
+                    with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
+                        await self.consult(**arguments)
+                self.assertEqual(calls, expected)
+                self.assertEqual(list((self.state / "worktrees").iterdir()), [])
+                self.assertEqual(len(self.registered_worktrees()), 1)  # only the project's own
 
     async def test_a_checkout_that_cannot_be_removed_keeps_the_reply_and_is_swept_later(self):
         git_repository(self.project)
