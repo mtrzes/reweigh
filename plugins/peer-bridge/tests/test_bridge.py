@@ -373,7 +373,7 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
         git_repository(self.project)
-        cases = (  # one row per fact: sign-in probes, the result's status field, the stderr tag, settings, git
+        cases = (  # one row per fact: sign-in probes, the result's status field, the stderr tag, settings
             ("claude", {"SIMULATED_SIGNED_IN": "0"}, {}, "Claude Code is not signed in"),
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
             ("claude", {"SIMULATED_PEER_MODE": "api_error", "SIMULATED_API_STATUS": "401"}, {},
@@ -389,13 +389,34 @@ class ConsultationTests(BridgeTestCase):
             with self.subTest(provider=provider, environment=environment, arguments=arguments):
                 message = await self.failure_message(provider, environment, **arguments)
                 self.assertTrue(message.startswith(expected), message)
-        with patch.object(bridge, "run_command", wraps=bridge.run_command) as guarded:
-            message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
-        self.assertEqual(message, consultation.OUTSIDE_GIT)
-        self.assertEqual(guarded.await_args.args[0], [
-            "git", "-C", str(self.other_project), "rev-parse", "--path-format=absolute", "--git-common-dir",
-        ])
         self.assertEqual(list(self.state.glob("*.json")), [])
+
+    async def test_only_the_git_probes_answer_is_a_fact_about_the_repository(self):
+        # git exits 128 for any fatal error, such as a missing or unreadable directory as well as one outside a
+        # repository, and says which only in its text, so no failure establishes that Codex ran outside one.
+        for outcome, expected in (
+            (OSError("git is missing"), None),
+            (bridge.CommandTimeout("git timed out"), None),
+            (bridge.BridgeError("the guard failed"), None),
+            ((128, b"", b"fatal: not a git repository (or any of the parent directories): .git\n"), None),
+            ((0, b"", b""), None),
+            ((0, b"/project/.git\n", b""), True),
+        ):
+            with self.subTest(outcome=outcome), patch.object(bridge, "run_command") as guarded:
+                def command_result(command, *arguments, outcome=outcome, **options):
+                    if command[0] != "git":
+                        return 0, b"", b""
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    return outcome
+
+                guarded.side_effect = command_result
+                facts = await self.client.failure_facts("codex", self.other_project, {}, "", "",
+                                                        deadline=bridge.time.monotonic() + 30, lock=None)
+                self.assertIs(facts.in_git_repository, expected)
+                self.assertEqual(guarded.await_args.args[0], [
+                    "git", "-C", str(self.other_project), "rev-parse", "--path-format=absolute", "--git-common-dir",
+                ])
 
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
         self.client.timeout = 5
