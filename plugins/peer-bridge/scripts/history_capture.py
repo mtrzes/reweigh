@@ -279,9 +279,11 @@ def file_identity(stat_result):
 
 
 def path_identity(path):
+    """The identity of what the path names now, or None once nothing is there. Any other error is a fault to report,
+    not a sign that the file changed."""
     try:
         return file_identity(path.lstat())
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
 
 

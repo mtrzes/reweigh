@@ -4,6 +4,7 @@ Most tests give ThreadReader a stand-in for git's common-directory lookup; one r
 """
 
 import asyncio
+import errno
 import json
 import os
 import sqlite3
@@ -329,6 +330,14 @@ class ReaderTests(unittest.TestCase):
             self.assertRaisesRegex(ThreadUnavailable, "^The thread's history file changed while it was read.$"),
         ):
             self.read("codex", "Moving")
+
+    def test_an_io_error_in_the_identity_check_is_not_reported_as_a_change(self):
+        _, path = codex_thread(self.codex_home, self.project, codex_turn("t1", "Done."))
+        # Only the identity check uses lstat: the history is opened through directory descriptors.
+        with patch.object(Path, "lstat", side_effect=OSError(errno.EIO, "Input/output error")):
+            with self.assertRaises(OSError) as raised:
+                history_capture.read_stable(self.codex_home, lambda: path, lambda history: history.first_line())
+        self.assertEqual(raised.exception.errno, errno.EIO)
 
     def test_only_a_missing_zstandard_package_is_reported_as_missing(self):
         with patch.dict(sys.modules, {"zstandard": None}):
