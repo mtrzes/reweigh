@@ -304,8 +304,9 @@ the next consultation removes the leftover, and git's record of it, once no cons
 ## Verification
 
 From a checkout of the repository, at its root, install the locked dependencies into a virtual environment, then run
-the bridge's tests and the developer tools' tests. CI runs the same commands on macOS and Linux with Python 3.11 to
-3.13 (`.github/workflows/tests.yml`):
+the bridge's tests and the developer tools' tests, before each commit. CI runs the same commands on macOS and Linux
+with Python 3.11 to 3.13 only for a release: started by hand on the release commit, and again on its `v*` tag
+(`.github/workflows/tests.yml`):
 
 ```sh
 uv venv --managed-python --python 3.11 .venv

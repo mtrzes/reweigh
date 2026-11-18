@@ -1,16 +1,18 @@
 name: Tests
 
+# The suites run locally before each commit; this matrix runs only for a release, by hand on the release commit and
+# again on its tag (ADR 0002).
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
-  pull_request:
+    tags: ["v*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: tests-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   unittest:
