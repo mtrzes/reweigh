@@ -11,9 +11,11 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import anyio
@@ -857,6 +859,39 @@ class ConsultationTests(BridgeTestCase):
         await self.consult(ref="HEAD")
         names = [Path(line.split(" ", 1)[1]).name for line in self.registered_worktrees()]
         self.assertEqual(names, [self.project.name, "unmounted"])
+
+    async def test_checkout_preparation_shares_one_budget_and_removal_has_its_own(self):
+        git_repository(self.project)
+        real_run_command, clock = bridge.run_command, SimpleNamespace(now=1000.0)
+        preparation, removal = bridge.CHECKOUT_PREPARATION_SECONDS, bridge.CHECKOUT_REMOVAL_SECONDS
+        for step, late, expected in (
+            (10, False, [("rev-parse", preparation), ("rev-parse", preparation - 10), ("worktree", preparation - 20),
+                  ("worktree", preparation - 30), ("config", preparation - 40), ("read-tree", preparation - 50),
+                  ("peer", self.client.timeout), ("worktree", removal)]),
+            # Out of time before the checkout is added: nothing more is started, and the removal still runs.
+            (preparation / 3, True, [("rev-parse", preparation), ("rev-parse", preparation * 2 / 3),
+                               ("worktree", preparation / 3), ("worktree", removal)]),
+        ):
+            calls = []
+
+            async def recording(command, prompt, directory, timeout, **options):
+                name = "peer" if prompt is not None else command[3].removeprefix(f"--work-tree={command[2]}")
+                calls.append((name or command[4], timeout))
+                clock.now += step
+                return await real_run_command(command, prompt, directory, timeout, **options)
+
+            with (
+                self.subTest(step=step),
+                patch.object(bridge, "run_command", recording),
+                patch.object(bridge, "time", SimpleNamespace(monotonic=lambda: clock.now, time=time.time)),
+            ):
+                if late:
+                    with self.assertRaisesRegex(bridge.BridgeError, "git did not finish in time"):
+                        await self.consult(ref="HEAD")
+                else:
+                    await self.consult(ref="HEAD")
+            self.assertEqual(calls, expected)
+            self.assertEqual(len(self.registered_worktrees()), 1)  # only the project's own
 
     async def test_thread_reading_and_seed_thread_are_off_unless_turned_on(self):
         git_repository(self.project)

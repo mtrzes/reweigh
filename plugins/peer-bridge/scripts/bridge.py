@@ -43,7 +43,11 @@ MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 # On macOS, ChatGPT.app bundles the Codex CLI without putting it on PATH.
 MACOS_APPLICATION_DIRECTORIES = ("/Applications", "~/Applications")
 BUNDLED_CODEX_PATH = Path("ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex")
-GIT_TIMEOUT_SECONDS = 120
+# A pinned checkout is prepared within one budget, every git command in it sharing what is left; removing it, after the
+# consultation or when a later one sweeps it up, has an allowance of its own.
+CHECKOUT_PREPARATION_SECONDS = 300
+CHECKOUT_REMOVAL_SECONDS = 120
+GIT_LATE = "git did not finish in time while preparing the pinned ref."
 GIT_REPOSITORY_PROBE_SECONDS = 10
 SIGN_IN_PROBE_SECONDS = 30
 SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
@@ -55,6 +59,16 @@ PIPE_DRAIN_SECONDS = 1
 SEED_MESSAGES = 3
 # How often a caller waiting on a background consultation rereads its state.
 JOB_POLL_SECONDS = 0.5
+
+
+class Budget:
+    """A time allowance shared by successive commands: each may run for what is left of it."""
+
+    def __init__(self, seconds):
+        self.deadline = time.monotonic() + seconds
+
+    def left(self):
+        return self.deadline - time.monotonic()
 
 
 class CommandTimeout(BridgeError):
@@ -415,12 +429,15 @@ async def run_command(command, prompt, working_directory, timeout, environment=N
                     pipe.close()
 
 
-async def git(directory, *arguments, failure, config=(), allowed=(), lock=None, timeout=GIT_TIMEOUT_SECONDS):
+async def git(directory, *arguments, failure, timeout, config=(), allowed=(), lock=None):
     """Run git under the guard, isolated from the repository's hooks, monitor and transports and from inherited GIT_*
-    variables, plus the settings in config; exit statuses in allowed count as success.
+    variables, plus the settings in config; exit statuses in allowed count as success. A command with no time left is
+    not started.
 
     The output keeps git's exact bytes, decoded as file names are, without its one terminating newline.
     """
+    if timeout <= 0:
+        raise BridgeError(GIT_LATE)
     try:
         return_code, output, _ = await run_command(
             ["git", "-C", str(directory), *arguments], None, None, timeout,
@@ -429,7 +446,7 @@ async def git(directory, *arguments, failure, config=(), allowed=(), lock=None, 
     except OSError as exc:
         raise BridgeError("git is unavailable. Install it to pin a consultation to a ref.") from exc
     except CommandTimeout as exc:
-        raise BridgeError("git did not finish in time while preparing the pinned ref.") from exc
+        raise BridgeError(GIT_LATE) from exc
     except BridgeError as exc:
         raise BridgeError(failure) from exc
     if return_code and return_code not in allowed:
@@ -437,24 +454,25 @@ async def git(directory, *arguments, failure, config=(), allowed=(), lock=None, 
     return os.fsdecode(output).removesuffix("\n")
 
 
-async def registered(repository, worktree, lock):
+async def registered(repository, worktree, lock, budget):
     """Whether git records worktree as one of the repository's worktrees, read from its NUL-separated listing."""
     listing = await git(repository, "worktree", "list", "--porcelain", "-z", failure="Cannot list the worktrees.",
-                        lock=lock)
+                        lock=lock, timeout=budget.left())
     target = os.path.realpath(worktree)
     return any(field.startswith("worktree ") and os.path.realpath(field[len("worktree "):]) == target
                for field in listing.split("\0"))
 
 
-async def discard_worktree(repository, worktree, lock):
+async def discard_worktree(repository, worktree, lock, budget):
     """Remove a pinned checkout and git's record of it, also when the folder has already gone, and touch no other
     worktree of the repository. A folder git does not record is deleted; one git records but will not remove, such as
     a locked one, is left alone."""
     try:
         await git(repository, "worktree", "remove", "--force", "--", str(worktree.absolute()),
-                  failure="Cannot remove the worktree.", lock=lock)
+                  failure="Cannot remove the worktree.", lock=lock, timeout=budget.left())
     except BridgeError:
-        if worktree.is_dir() and not worktree.is_symlink() and not await registered(repository, worktree, lock):
+        if (worktree.is_dir() and not worktree.is_symlink()
+                and not await registered(repository, worktree, lock, budget)):
             shutil.rmtree(worktree, ignore_errors=True)
 
 
@@ -473,9 +491,10 @@ async def sweep_worktree(store, identifier):
         if lock is None:
             return
         worktree = store.directory / "worktrees" / identifier
+        removal = Budget(CHECKOUT_REMOVAL_SECONDS)
         try:
             repository = await git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir",
-                                   failure="Not a checkout.", lock=lock)
+                                   failure="Not a checkout.", lock=lock, timeout=removal.left())
         except BridgeError:
             # Without its .git link the folder is no checkout, only what an interrupted pin left; with one, git
             # could not answer now (a repository on an unmounted volume, say), so it is left for a later sweep.
@@ -483,7 +502,7 @@ async def sweep_worktree(store, identifier):
                 shutil.rmtree(worktree, ignore_errors=True)
             return
         # The shared git directory itself, which is right whatever the repository's layout.
-        await discard_worktree(Path(repository), worktree, lock)
+        await discard_worktree(Path(repository), worktree, lock, removal)
 
 
 @asynccontextmanager
@@ -493,17 +512,19 @@ async def pinned_checkout(worktree, directory, ref, lock):
     The worktree path is fixed per conversation, because Claude resumes a session only from the directory it ran in.
     The checkout is registered without files first, so the filter drivers disabled are those configured where the
     files are written, which conditional includes and per-worktree configuration can make differ from the source's.
+    Every git command until the checkout is yielded shares one preparation budget; its removal has its own allowance.
     """
     if ref is None:
         yield directory, None
         return
+    preparation = Budget(CHECKOUT_PREPARATION_SECONDS)
     repository = Path(await git(
         directory, "rev-parse", "--show-toplevel",
-        failure="A ref needs a working_directory inside a git repository.", lock=lock,
+        failure="A ref needs a working_directory inside a git repository.", lock=lock, timeout=preparation.left(),
     )).resolve()
     commit = validate_commit(await git(
         directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
-        failure="The ref does not name a commit in this repository.", lock=lock,
+        failure="The ref does not name a commit in this repository.", lock=lock, timeout=preparation.left(),
     ))
     try:
         ensure_private(worktree.parent)
@@ -511,24 +532,25 @@ async def pinned_checkout(worktree, directory, ref, lock):
         raise BridgeError("Cannot create the bridge's state directory.") from exc
     if worktree.is_symlink():
         raise BridgeError(PRIVATE)
-    await discard_worktree(repository, worktree, lock)
+    await discard_worktree(repository, worktree, lock, preparation)
     try:
         await git(repository, "worktree", "add", "--detach", "--no-checkout", "--force", "--quiet", str(worktree),
-                  commit, failure="Cannot check out the ref in a temporary worktree.", lock=lock)
+                  commit, failure="Cannot check out the ref in a temporary worktree.", lock=lock,
+                  timeout=preparation.left())
         filters = filter_overrides(await git(worktree, "config", "--null", "--get-regexp", r"^filter\.",
                                              failure="Cannot read the repository's git configuration.", allowed=(1,),
-                                             lock=lock))
+                                             lock=lock, timeout=preparation.left()))
         # An explicit work tree, so a configured core.worktree cannot send the files elsewhere.
         await git(worktree, f"--work-tree={worktree}", "read-tree", "--reset", "-u", "--no-sparse-checkout",
                   "--no-recurse-submodules", commit, failure="Cannot check out the ref in a temporary worktree.",
-                  config=filters, lock=lock)
+                  config=filters, lock=lock, timeout=preparation.left())
         consulted = worktree / directory.relative_to(repository)
         # A symlink at the ref could lead the peer out of the checkout.
         if not consulted.is_dir() or not consulted.resolve().is_relative_to(worktree.resolve()):
             raise BridgeError("working_directory does not exist at that ref.")
         yield consulted, commit
     finally:
-        await run_to_completion(discard_worktree(repository, worktree, lock))
+        await run_to_completion(discard_worktree(repository, worktree, lock, Budget(CHECKOUT_REMOVAL_SECONDS)))
 
 
 class Bridge:

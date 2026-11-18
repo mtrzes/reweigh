@@ -60,6 +60,12 @@ flowchart TB
   from the peer's timeout. Each guard holds the conversation's lock, so the conversation and its checkout stay busy
   until the process group has stopped. The bridge's last signal to a group always comes before it reaps the guard,
   which would free the group's ID. A descendant that leaves the group, by starting its own session or group, is not stopped.
+- **A pinned checkout is prepared within one budget.** Every git command that prepares it, from finding the
+  repository to writing the files, including removing a checkout an earlier run left in its place, shares a checkout
+  preparation budget of 300 seconds; a command is not started once the budget is spent. Removing the checkout
+  afterwards has 120 seconds of its own and runs to its end even when the consultation is cancelled. The peer's
+  timeout starts once the checkout is ready. Reading a `seed_thread`, and sweeping up checkouts that runs which died
+  left behind (each with its own 120 seconds), come before both.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
   given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file. Codex
   events are separated by LF, so Unicode line separators inside a reply are preserved.
