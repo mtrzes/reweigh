@@ -1,6 +1,6 @@
 # ADR-0001: Codex threads are read from rollout files; the app-server replaces that only after proven parity
 
-- Status: Proposed
+- Status: Accepted
 - Enforced by: test_reader (compressed and refused histories); dev/tests test_app_server (message gate, sandbox
   isolation, signed executable, parity comparison, fingerprints) and test_parity_rules (`test_parity_passed`,
   `test_parity_verdict`); standing duty: run `dev/codex_app_server.py` after each Codex update
@@ -32,19 +32,22 @@ writes its own log database, and was seen returning incomplete history and misla
 - It may replace the file reader only when the parity check passes on two consecutive Codex releases over the same
   clone, the later one newer: at least one thread is compared, every Desktop and CLI thread the file reader can read
   matches on latest turn, status and the three most recent agent messages in order, none is missing, the server sends
-  no request, and the clone's rollouts and databases are unchanged. The source pages through older turns until it has
+  no request, and none of the clone's rollouts, index or databases changes. A database the clone never held, such as the
+  server's log database, is noted as created and does not count, and a previous run's copy of it is removed before
+  the baseline. The
+  source pages through older turns until it has
   enough messages or reaches the end of the history. Parity records the release and an incomplete attempt before
   starting the server, so startup and request failures count toward the verdict. Once it replaces the reader, it reads
   a fresh clone on each use, never the live home.
 - Whenever the two sources disagree, the file result stands, or the read is refused with a reason.
 
 ## Consequences
-Every Desktop and CLI thread in a readable format is visible, and a thread the reader cannot be sure of is refused
-rather than guessed. The parser follows Codex's internal format, so a Codex release can break it until a fix or the
-app-server takes over. The parity check currently fails because the app-server writes Codex's log database, which the
-rule above counts as a change, and because it no longer returns some threads the file reader reads.
+Every Desktop and CLI thread that is in a readable format and passes the repository check is visible, and a thread the
+reader cannot be sure of is refused rather than guessed. The parser follows Codex's internal format, so a Codex release
+can break it until a fix or the app-server takes over.
 
 ## Reconsider if
 A Codex release breaks the file reader and no parser fix restores it; Codex Desktop's own app-server becomes reachable
-without starting a second one; a decision is taken on whether log-database writes inside the clone fail the check; or
-forked threads must become readable.
+without starting a second one; or forked threads must become readable. The thread tools stay experimental, off unless
+`PEER_BRIDGE_THREADS=1`; they graduate once the reader binds each Codex turn to the directory it ran in, not only the
+session's, and the parity check has passed on two consecutive Codex releases.

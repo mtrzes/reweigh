@@ -5,7 +5,7 @@
 Ask Codex for a second opinion from Claude Code, or ask Claude Code from Codex. The peer only reads: it inspects the
 code and returns advice to the app you asked from. You decide what to change.
 
-Version `1.0.0-beta.2` · [Apache-2.0](LICENSE)
+[Apache-2.0](LICENSE) · [Changelog](CHANGELOG.md)
 
 ## Try it
 
