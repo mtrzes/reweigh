@@ -324,6 +324,14 @@ VIRTUAL_ENV="$PWD/.venv" uv sync --active --locked --script plugins/peer-bridge/
 .venv/bin/python -m unittest discover -s dev/tests -t dev/tests
 ```
 
+For quicker feedback while you work, `dev/run_tests.py` runs a suite in parallel processes. It fails unless every
+discovered test ran exactly once and passed. It is optional: the serial commands above stay the check before each
+commit, and CI runs only those.
+
+```sh
+.venv/bin/python dev/run_tests.py -s plugins/peer-bridge/tests
+```
+
 The tests use simulated peer executables, synthetic thread histories and temporary state; they call no model and read
 no real history or settings. [ADR 0002](https://github.com/mtrzes/peer-bridge/blob/main/docs/adr/0002-test-architecture.md)
 sets the rules a change to the tests follows.
