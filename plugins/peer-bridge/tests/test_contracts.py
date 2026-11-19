@@ -163,35 +163,45 @@ class McpTests(BridgeTestCase):
         async with self.session("both") as session:
             listing = await session.list_tools()
             offered(listing, "both")
-            for tool in listing.tools:
-                # Cancelling stops a running consultation, so only that tool is not read-only.
-                self.assertEqual(tool.annotations.readOnlyHint, tool.name != "cancel_consultation")
-                self.assertFalse(tool.annotations.destructiveHint)
+            # One subtest per tool or tool group, so a broken route does not hide the ones after it.
+            with self.subTest(part="annotations"):
+                for tool in listing.tools:
+                    # Cancelling stops a running consultation, so only that tool is not read-only.
+                    self.assertEqual(tool.annotations.readOnlyHint, tool.name != "cancel_consultation")
+                    self.assertFalse(tool.annotations.destructiveHint)
 
-            response = await session.call_tool("ask_claude", request)
-            self.assertFalse(response.isError)
-            asked = response.structuredContent
-            self.assertEqual((asked["provider"], asked["reply"]), ("claude", "claude consulted: Explain the query."))
-            conversation = {"conversation_id": asked["conversation_id"]}
-            failed, resumed = await self.call(session, "ask_claude", {**request, **conversation})
-            self.assertEqual((failed, resumed["conversation_id"]), (False, asked["conversation_id"]))
-            # Each Codex tool reaches Codex: it refuses the Claude conversation.
-            self.assertEqual(await self.call(session, "ask_codex", {**request, **conversation}),
-                             (True, DIFFERENT_PEER))
-            self.assertEqual(await self.call(session, "ask_claude", {**request, "prompt": " "}),
-                             (True, "A consultation question is required."))
+            conversation = {"conversation_id": "unset"}
+            with self.subTest(tool="ask_claude"):
+                response = await session.call_tool("ask_claude", request)
+                self.assertFalse(response.isError)
+                asked = response.structuredContent
+                self.assertEqual((asked["provider"], asked["reply"]),
+                                 ("claude", "claude consulted: Explain the query."))
+                conversation = {"conversation_id": asked["conversation_id"]}
+                failed, resumed = await self.call(session, "ask_claude", {**request, **conversation})
+                self.assertEqual((failed, resumed["conversation_id"]), (False, asked["conversation_id"]))
+                self.assertEqual(await self.call(session, "ask_claude", {**request, "prompt": " "}),
+                                 (True, "A consultation question is required."))
+            with self.subTest(tool="ask_codex"):
+                # Each Codex tool reaches Codex: it refuses the Claude conversation.
+                self.assertEqual(await self.call(session, "ask_codex", {**request, **conversation}),
+                                 (True, DIFFERENT_PEER))
 
-            _, started = await self.call(session, "start_claude_consultation", request)
-            waiting = {"job_id": started["job_id"], "wait_seconds": DEADLINE_SECONDS}
-            _, done = await self.call(session, "get_consultation", waiting)
-            self.assertEqual((done["state"], done["reply"]), ("completed", "claude consulted: Explain the query."))
-            _, cancelled = await self.call(session, "cancel_consultation", {"job_id": started["job_id"]})
-            self.assertEqual(cancelled["state"], "completed")
-            _, started = await self.call(session, "start_codex_consultation", {**request, **conversation})
-            _, done = await self.call(session, "get_consultation", {**waiting, "job_id": started["job_id"]})
-            self.assertEqual((done["provider"], done["state"], done["error"]), ("codex", "failed", DIFFERENT_PEER))
-            self.assertEqual(await self.call(session, "get_consultation", {"job_id": "not-a-job"}),
-                             (True, "No consultation job with that ID."))
+            waiting = {"wait_seconds": DEADLINE_SECONDS}
+            with self.subTest(tool="start_claude_consultation, get_consultation, cancel_consultation"):
+                _, started = await self.call(session, "start_claude_consultation", request)
+                _, done = await self.call(session, "get_consultation", {**waiting, "job_id": started["job_id"]})
+                self.assertEqual((done["state"], done["reply"]),
+                                 ("completed", "claude consulted: Explain the query."))
+                _, cancelled = await self.call(session, "cancel_consultation", {"job_id": started["job_id"]})
+                self.assertEqual(cancelled["state"], "completed")
+            with self.subTest(tool="start_codex_consultation"):
+                _, started = await self.call(session, "start_codex_consultation", {**request, **conversation})
+                _, done = await self.call(session, "get_consultation", {**waiting, "job_id": started["job_id"]})
+                self.assertEqual((done["provider"], done["state"], done["error"]), ("codex", "failed", DIFFERENT_PEER))
+            with self.subTest(tool="get_consultation"):
+                self.assertEqual(await self.call(session, "get_consultation", {"job_id": "not-a-job"}),
+                                 (True, "No consultation job with that ID."))
 
             for provider, name in (("claude", "Claude review"), ("codex", "Codex review")):
                 with self.subTest(provider=provider):
