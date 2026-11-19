@@ -19,7 +19,7 @@ pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script
 
 Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
 `2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
-On Linux, only the unit tests run, in CI.
+On Linux, only the unit tests run, in CI, with Python 3.11 and 3.15.
 
 On macOS, ChatGPT.app bundles the Codex CLI at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
 without adding it to `PATH`. When `PEER_BRIDGE_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
@@ -304,8 +304,9 @@ the next consultation removes the leftover, and git's record of it, once no cons
 ## Verification
 
 From a checkout of the repository, at its root, install the locked dependencies into a virtual environment, then run
-the bridge's tests and the developer tools' tests, before each commit. CI runs the same commands on macOS and Linux
-with Python 3.11 to 3.13 only for a release: started by hand on the release commit, and again on its `v*` tag
+the bridge's tests and the developer tools' tests, before each commit. CI runs the same commands on Linux with Python
+3.11 for a pull request, and on macOS and Linux with Python 3.11 and 3.15 when started by hand on a release commit
+before it is tagged; the `v*` tag's run checks only that the tag names the plugin's version
 (`.github/workflows/tests.yml`):
 
 ```sh
