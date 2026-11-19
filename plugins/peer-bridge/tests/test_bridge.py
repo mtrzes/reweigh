@@ -378,8 +378,10 @@ class ConsultationTests(BridgeTestCase):
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
         git_repository(self.project)
         # One row per path a fact travels to the message; test_core holds the rules that read them.
-        cases = (  # the sign-in probe, the peer's stderr, the model settings, a real .git lookup
+        cases = (  # the sign-in probe, the peer's stdout and stderr, the model settings, a real .git lookup
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
+            ("claude", {"SIMULATED_PEER_MODE": "api_error", "SIMULATED_API_STATUS": "401"}, {},
+             "Claude Code is not signed in"),
             ("claude", {"SIMULATED_FAILURE_TEXT": '[claude-code:unrecognized_model] {"model":"x"}'}, {},
              "Claude Code rejected the requested model."),
             ("codex", {"PEER_BRIDGE_CODEX_MODEL": "gpt-x"}, {}, "codex consultation failed (exit 1). Check CLI "
@@ -426,15 +428,22 @@ class ConsultationTests(BridgeTestCase):
                 self.assertEqual(looked_up, [True] if expected else [])
 
     async def test_the_git_entry_lookup_gives_up_on_a_volume_that_stops_answering(self):
-        release = threading.Event()
+        started, release = threading.Event(), threading.Event()
         scope = bridge.Conversation(None, None, time.monotonic, None)
         probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(30), None)
+
+        def unanswered(directory, lstat):
+            started.set()
+            return release.wait(DEADLINE_SECONDS)
+
         try:
+            # A nonzero limit lets the lookup reach its thread; the probe then gives up on the lookup, not before it.
             with (
-                patch.object(bridge, "git_entry_found", lambda directory, lstat: release.wait(DEADLINE_SECONDS)),
-                patch.object(bridge, "GIT_ENTRY_PROBE_SECONDS", 0),
+                patch.object(bridge, "git_entry_found", unanswered),
+                patch.object(bridge, "GIT_ENTRY_PROBE_SECONDS", 0.01),
             ):
                 self.assertIsNone(await probe.observe("in_git_repository", None))
+            self.assertTrue(await asyncio.to_thread(started.wait, DEADLINE_SECONDS), "The lookup never started.")
         finally:
             release.set()
 
@@ -733,8 +742,8 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_inherited_git_location_does_not_redirect_the_peer_from_its_checkout(self):
         first, _ = self.pinned_repository()
+        project_head = git(self.project, "rev-parse", "HEAD")
         other = git_repository(self.root / "other-checkout")
-        other_head = git(other, "rev-parse", "HEAD")
         inherited = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
         with patch.dict(os.environ, inherited):
             pinned = await self.consult("codex", ref=first)
@@ -743,7 +752,7 @@ class ConsultationTests(BridgeTestCase):
         pinned_call, plain_call = self.calls()
         self.assertEqual((pinned_call["git_location"], plain_call["git_location"]), ([], []))
         self.assertEqual(pinned_call["head"], pinned["commit"])
-        self.assertNotEqual(plain_call["head"], other_head)
+        self.assertEqual(plain_call["head"], project_head)
 
     async def test_invalid_or_unpinned_refs_do_not_start_a_peer(self):
         first, _ = self.pinned_repository()

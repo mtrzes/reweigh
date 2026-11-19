@@ -82,8 +82,13 @@ class JobTests(BridgeTestCase):
 
         await jobs.run_job(self.client.jobs, job_id, consult)
 
-    @staticmethod
-    async def never(request):
+    async def never(self, request):
+        """A consultation that must not happen. run_job records any exception as `failed`, so a call is also
+        checked after the test, whatever the test asserts."""
+        if not hasattr(self, "consulted"):
+            self.consulted = []
+            self.addCleanup(lambda: self.assertEqual(self.consulted, [], "A job that must not run was consulted."))
+        self.consulted.append(request)
         raise AssertionError("This job must not run.")
 
     # Real runners
@@ -464,8 +469,17 @@ time.sleep({4 * DEADLINE_SECONDS})
         target = self.root / "marker-target"
         target.touch()
 
+        checked, real_cancel_requested = asyncio.Event(), jobs.cancel_requested
+
+        def watched(folder):
+            requested = real_cancel_requested(folder)
+            checked.set()
+            return requested
+
         async def consult(request):
-            await asyncio.sleep(0)  # let the watcher check the marker before the reply
+            # The claim reads the marker too; the reply waits for the watcher's first look, which follows this start.
+            checked.clear()
+            await asyncio.wait_for(checked.wait(), DEADLINE_SECONDS)
             return {"conversation_id": "conv", "reply": "done"}
 
         for marker_type in ("symlink", "fifo"):
@@ -477,7 +491,8 @@ time.sleep({4 * DEADLINE_SECONDS})
                 else:
                     os.mkfifo(marker)
                 before = await self.client.job(job_id, CLAUDE)
-                await jobs.run_job(self.client.jobs, job_id, consult)
+                with patch.object(jobs, "cancel_requested", watched):
+                    await jobs.run_job(self.client.jobs, job_id, consult)
                 after = await self.client.job(job_id, CLAUDE)
                 self.assertEqual((before["state"], after["state"]), ("queued", "completed"))
 

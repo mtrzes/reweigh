@@ -92,11 +92,20 @@ class AppServerTests(unittest.TestCase):
         return [json.loads(line) for line in self.log_path.read_text().splitlines()]
 
     def parity_run(self, version, **kwargs):
+        client, built = self.client(), []
+
+        def recording_client(executable, home, sandbox):
+            built.append((executable, home, sandbox))
+            return client
+
         with patch.dict(os.environ, CODEX_HOME=str(self.home.resolve())), \
                 patch.object(app, "desktop_codex_executable", return_value=(str(self.server), "fake")), \
                 patch.object(app, "codex_version", return_value=version), \
-                patch.object(app, "AppServerClient", return_value=self.client()):
-            return app.run_parity(self.root.resolve() / "state", **kwargs)
+                patch.object(app, "AppServerClient", recording_client):
+            report = app.run_parity(self.root.resolve() / "state", **kwargs)
+        parity = self.root.resolve() / "state" / "parity"
+        self.assertEqual(built, [(str(self.server), parity / "codex-home", parity / "home")])
+        return report
 
     def existing_parity_copy(self):
         root = self.root.resolve() / "state" / "parity"
