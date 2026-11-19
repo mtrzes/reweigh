@@ -20,11 +20,6 @@ line runs.
   worktree of the repository. This assumes the repository's configuration does not change while the checkout is made.
 - **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
   entries only, so a file in the repository named like a command never runs in place of it.
-- **The consulted repository's settings do not configure the bridge.** The shipped MCP launchers, and the commands in
-  the plugin README, run uv with `--no-project --no-config`, so a repository's uv or pyproject settings cannot choose
-  the bridge's packages or index. The process guard uses only the standard library and runs in Python's isolated mode
-  (`-I`), ignoring `PYTHON*` variables and user site-packages. The bridge adds no Claude allow rules, which would let
-  Read reach any path; the user's own permissions and managed policy still apply.
 - **The peer's process group ends with the consultation**, also when the bridge is killed, and so do the sign-in
   probes and git commands it runs during a consultation. Their guards all hold the conversation lock until their
   process groups stop, so no other consultation takes over a checkout that is still in use.
