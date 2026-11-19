@@ -12,6 +12,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 TESTS = Path(__file__).resolve().parent
@@ -79,6 +80,16 @@ async def eventually_async(predicate, message, timeout=DEADLINE_SECONDS):
         if time.monotonic() > deadline:
             raise AssertionError(message)
         await asyncio.sleep(POLL_SECONDS)
+
+
+def module_view(module, **replacements):
+    """A module as one importer sees it: these replacements, and the module for everything else. Patching the
+    importer's name for the module with it, unlike patching the module itself, reaches no other importer, including
+    one that binds a name from the module while the patch is active."""
+    view = ModuleType(module.__name__)
+    view.__getattr__ = lambda name: getattr(module, name)
+    vars(view).update(replacements)
+    return view
 
 
 def running(pid):

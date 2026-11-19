@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from support import DEADLINE_SECONDS, SCRIPTS, eventually, running
+from support import DEADLINE_SECONDS, SCRIPTS, eventually, module_view, running
 import peer_guard  # noqa: E402  (support adds the plugin's scripts to the path)
 
 GUARD = SCRIPTS / "peer_guard.py"
@@ -177,7 +177,7 @@ class GuardWaitTests(unittest.TestCase):
         thread = threading.Thread(target=bridge)
         thread.start()
         self.addCleanup(thread.join, DEADLINE_SECONDS)
-        with patch.object(peer_guard.selectors, "DefaultSelector", UntimedSelector):
+        with patch.object(peer_guard, "selectors", module_view(selectors, DefaultSelector=UntimedSelector)):
             peer_guard.wait_for_lifeline(lifeline, peer, status, self.exits)
         self.assertEqual(reported, [b"7\n"])
 
@@ -193,9 +193,9 @@ class GuardWaitTests(unittest.TestCase):
 
         started = time.monotonic()
         with (
-            patch.object(peer_guard.os, "killpg", lambda group, number: signals.append(number)),
-            patch.object(peer_guard.selectors, "DefaultSelector", Selector),
-            patch.object(peer_guard.time, "sleep", timer),
+            patch.object(peer_guard, "os", module_view(os, killpg=lambda group, number: signals.append(number))),
+            patch.object(peer_guard, "selectors", module_view(selectors, DefaultSelector=Selector)),
+            patch.object(peer_guard, "time", module_view(time, sleep=timer)),
             patch.object(peer_guard, "GRACE_SECONDS", DEADLINE_SECONDS),
         ):
             peer_guard.stop_group(peer, self.exits)

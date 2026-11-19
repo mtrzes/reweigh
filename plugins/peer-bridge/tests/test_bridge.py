@@ -25,7 +25,7 @@ import anyio
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, RecordingProbe, bridge, codex_thread, codex_turn,
-    consultation, eventually_async, git, git_repository, read_pid, running,
+    consultation, eventually_async, git, git_repository, module_view, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
 from thread_parsing import HistoryLookup  # noqa: E402
@@ -646,7 +646,7 @@ class ConsultationTests(BridgeTestCase):
         async def timer(delay, result=None):
             raise AssertionError("A wait on the guard slept on a timer.")
 
-        with patch.object(bridge.asyncio, "sleep", timer):
+        with patch.object(bridge, "asyncio", module_view(asyncio, sleep=timer)):
             result = await bridge.run_command([sys.executable, "-c", "pass"], None, self.project, DEADLINE_SECONDS)
         self.assertEqual(result, (0, b"", b""))
 
