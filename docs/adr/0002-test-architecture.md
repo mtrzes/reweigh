@@ -17,6 +17,7 @@ spent waiting.
 - Rules live in pure modules and are tested there, table-driven, with no process, file or environment.
 - An integration test proves only what needs a process, a file or a lock, one behaviour per test.
 - An interleaving is produced with hooks or locks, never with timing; every wait has a deadline.
+- A wait that must wake on an event is proved with its timers made to fail the test, never with a time bound.
 - Tests run on temporary homes, isolated git config and fakes, never the user's CLIs, history or network.
 - Shared fixtures and fakes live in `tests/support.py`; test files never import each other.
 - A test that repeats what another proves, at the same or a lower level, is deleted.

@@ -1,19 +1,25 @@
 """Exercise peer_guard.py directly: status reporting, lifeline shutdown and its failure paths."""
 
 import os
+import select
 import selectors
 import resource
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import DEADLINE_SECONDS, SCRIPTS, eventually, running
+import peer_guard  # noqa: E402  (support adds the plugin's scripts to the path)
 
 GUARD = SCRIPTS / "peer_guard.py"
 # A peer that starts a SIGTERM-ignoring descendant, records both PIDs, then behaves as MODE says.
@@ -123,6 +129,78 @@ class GuardTests(unittest.TestCase):
         os.close(lifeline)
         process.wait(timeout=10)
 
+
+
+def timer(*arguments):
+    raise AssertionError("The guard waited on a timer.")
+
+
+class UntimedSelector(selectors.DefaultSelector):
+    """A selector whose wait may not time out: a guard that checked the peer on a timer fails with it."""
+
+    def select(self, timeout=None):
+        if timeout is not None:
+            timer()
+        return super().select()
+
+
+class GuardWaitTests(unittest.TestCase):
+    """The guard's waits, run in this process, wake on the peer's exit: a timer between checks would add its interval
+    to every command the bridge runs."""
+
+    def setUp(self):
+        self.addCleanup(signal.signal, signal.SIGCHLD, signal.getsignal(signal.SIGCHLD))
+        previous = signal.set_wakeup_fd(-1)
+        self.exits = peer_guard.child_exits()
+        # Restoring the previous wakeup descriptor returns the guard's, which is closed with the one it wakes.
+        self.addCleanup(lambda: GuardTests.close_quietly(self.exits, signal.set_wakeup_fd(previous)))
+
+    def peer(self, source):
+        peer = subprocess.Popen([sys.executable, "-c", source])
+        self.addCleanup(lambda: peer.poll() is None and (peer.kill(), peer.wait()))
+        return peer
+
+    def test_the_peer_exit_is_reported_without_a_timer(self):
+        peer = self.peer("raise SystemExit(7)")
+        lifeline, lifeline_write = os.pipe()
+        status_read, status = os.pipe()
+        self.addCleanup(GuardTests.close_quietly, lifeline, status_read, status)
+        reported = []
+
+        def bridge():
+            # Reads the status as the bridge does, then closes the lifeline, its only owner; at the deadline it closes
+            # it anyway.
+            if select.select([status_read], [], [], DEADLINE_SECONDS)[0]:
+                reported.append(os.read(status_read, 64))
+            os.close(lifeline_write)
+
+        thread = threading.Thread(target=bridge)
+        thread.start()
+        self.addCleanup(thread.join, DEADLINE_SECONDS)
+        with patch.object(peer_guard.selectors, "DefaultSelector", UntimedSelector):
+            peer_guard.wait_for_lifeline(lifeline, peer, status, self.exits)
+        self.assertEqual(reported, [b"7\n"])
+
+    def test_the_group_is_killed_as_soon_as_the_peer_stops(self):
+        peer = self.peer("import time; time.sleep(60)")
+        signals = []
+
+        class Selector(selectors.DefaultSelector):
+            def select(self, timeout=None):
+                # The peer stops only once the guard waits, so only its exit can end the wait before the grace period.
+                peer.terminate()
+                return super().select(timeout)
+
+        started = time.monotonic()
+        with (
+            patch.object(peer_guard.os, "killpg", lambda group, number: signals.append(number)),
+            patch.object(peer_guard.selectors, "DefaultSelector", Selector),
+            patch.object(peer_guard.time, "sleep", timer),
+            patch.object(peer_guard, "GRACE_SECONDS", DEADLINE_SECONDS),
+        ):
+            peer_guard.stop_group(peer, self.exits)
+        self.assertLess(time.monotonic() - started, DEADLINE_SECONDS)  # it did not wait out the grace period
+        self.assertEqual((signals, peer.returncode), ([signal.SIGTERM, signal.SIGKILL], -signal.SIGTERM))
 
 if __name__ == "__main__":
     unittest.main()
