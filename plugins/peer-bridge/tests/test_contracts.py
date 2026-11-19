@@ -14,6 +14,7 @@ import sys
 import tomllib
 import unittest
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -99,7 +100,10 @@ class McpTests(BridgeTestCase):
     async def session(self, peer):
         parameters = StdioServerParameters(command=sys.executable, args=[str(BRIDGE_PATH), "--peer", peer],
                                            env=dict(os.environ))
-        async with stdio_client(parameters) as (read, write), ClientSession(read, write) as session:
+        async with (
+            stdio_client(parameters) as (read, write),
+            ClientSession(read, write, read_timeout_seconds=timedelta(seconds=2 * DEADLINE_SECONDS)) as session,
+        ):
             session.started = await session.initialize()
             yield session
 

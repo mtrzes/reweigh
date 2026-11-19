@@ -4,6 +4,7 @@ and waits bounded by a deadline. It needs no dependency beyond the standard libr
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,9 @@ PRIVATE_MARKERS = ("SUBAGENT TRAFFIC", "TOOL OUTPUT", "PRIVATE REASONING", "USER
 # Inherited settings that would change what a test exercises.
 UNSET = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "XDG_STATE_HOME", bridge.ACTIVE_ENV,
          "PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT", "PEER_BRIDGE_TIMEOUT_SECONDS",
-         "PEER_BRIDGE_THREADS")
+         "PEER_BRIDGE_THREADS", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR")
+# Families of the same: git's numbered config pairs and traces, and every switch of the stand-in peer.
+UNSET_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE", "SIMULATED_")
 GIT_ISOLATION = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 GIT_IDENTITY = ("-c", "user.name=Bridge Tests", "-c", "user.email=tests@example.invalid", "-c", "commit.gpgsign=false",
                 "-c", "init.defaultBranch=main")
@@ -43,7 +46,8 @@ def isolate(test, root, **variables):
     patcher = patch.dict(os.environ, environment)
     patcher.start()
     test.addCleanup(patcher.stop)
-    for name in set(UNSET) - set(environment):
+    inherited = {name for name in os.environ if name.startswith(UNSET_PREFIXES)}
+    for name in (set(UNSET) | inherited) - set(environment):
         os.environ.pop(name, None)
     system_config = patch.object(consultation, "CODEX_SYSTEM_CONFIG", root / "system-codex-config.toml")
     system_config.start()
@@ -52,7 +56,7 @@ def isolate(test, root, **variables):
 
 def git(directory, *arguments):
     return subprocess.run(["git", "-C", str(directory), *GIT_IDENTITY, *arguments], check=True, capture_output=True,
-                          text=True, env={**os.environ, **GIT_ISOLATION}).stdout.strip()
+                          text=True, env={**os.environ, **GIT_ISOLATION}, timeout=DEADLINE_SECONDS).stdout.strip()
 
 
 def git_repository(path):
@@ -87,7 +91,8 @@ def running(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                           timeout=DEADLINE_SECONDS).stdout.strip()
     return bool(state) and not state.startswith("Z")
 
 
@@ -124,6 +129,10 @@ PEER_SOURCE = textwrap.dedent('''\
         sys.exit(0 if signed_in else 1)
     provider = "claude" if "--print" in arguments else "codex"
     mode = os.environ.get("SIMULATED_PEER_MODE", "success")
+    if mode not in {"success", "early_exit", "failure", "known_failure", "api_error", "error_result", "hang",
+                    "spawn_hang", "flood", "lingering_descendant", "changed_session"}:
+        print(f"unknown SIMULATED_PEER_MODE: {mode}", file=sys.stderr)  # a mistyped mode must not pass as success
+        sys.exit(97)
     pids = Path(os.environ["SIMULATED_PEER_PID_DIR"])
     if mode == "early_exit":
         print("PRIVATE BACKEND CONTEXT 401 Unauthorized", file=sys.stderr)
@@ -134,10 +143,12 @@ PEER_SOURCE = textwrap.dedent('''\
         if flag in arguments:
             resumed = arguments[arguments.index(flag) + 1]
     session = resumed or str(uuid.uuid4())
-    try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    except OSError:  # no git on a PATH a test emptied
-        head = None
+    head = None
+    if os.environ.get("SIMULATED_CAPTURE_HEAD") == "1":
+        try:
+            head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30).stdout.strip()
+        except OSError:  # no git on a PATH a test emptied
+            pass
     with open(os.environ["SIMULATED_PEER_LOG"], "a", encoding="utf-8") as log:
         log.write(json.dumps({
             "provider": provider, "executable": sys.argv[0], "arguments": arguments, "prompt": prompt,
@@ -247,8 +258,23 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
             "SIMULATED_PEER_LOG": str(self.log), "SIMULATED_PEER_PID_DIR": str(self.root),
             "CLAUDECODE": "test-parent-marker", "PEER_BRIDGE_THREADS": "1",
         })
+        self.addCleanup(self.kill_recorded_processes)
         self.store = bridge.SessionStore(self.state)
         self.client = bridge.Bridge(store=self.store, timeout=DEADLINE_SECONDS)
+
+    def kill_recorded_processes(self):
+        """The fixture's own cleanup: kill every stand-in peer process that recorded its PID, even if the test failed
+        before checking that it stopped."""
+        for path in self.root.glob("*.pid"):
+            pid = read_pid(path)
+            if pid is not None and running(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    async def reap_on_exit(self, process):
+        """Kill and reap an asyncio child the test started, unless it has already exited."""
+        if process.returncode is None:
+            process.kill()
+            await asyncio.wait_for(process.wait(), DEADLINE_SECONDS)
 
     def calls(self):
         if not self.log.exists():
@@ -265,13 +291,8 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
     async def assert_processes_stopped(self, names=("parent.pid", "child.pid")):
         pids = [read_pid(self.root / name) for name in names]
         self.assertNotIn(None, pids)
-        try:
-            await eventually_async(lambda: not any(running(pid) for pid in pids),
-                                   "A peer process or its descendant outlived the consultation.")
-        finally:
-            for pid in pids:
-                if running(pid):
-                    os.kill(pid, 9)
+        await eventually_async(lambda: not any(running(pid) for pid in pids),
+                               "A peer process or its descendant outlived the consultation.")
 
 
 # Synthetic thread histories

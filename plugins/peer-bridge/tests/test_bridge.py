@@ -591,6 +591,7 @@ class ConsultationTests(BridgeTestCase):
                 str(self.project), "--ref", first,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
+            self.addAsyncCleanup(self.reap_on_exit, process)
             process.stdin.write(b"Explain the query.")
             await process.stdin.drain()
             process.stdin.close()
@@ -669,7 +670,7 @@ class ConsultationTests(BridgeTestCase):
             await self.wait_for_child()
             peer = read_pid(self.root / "parent.pid")
             guard = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(peer)], capture_output=True,
-                                       text=True).stdout)
+                                       text=True, timeout=DEADLINE_SECONDS).stdout)
             os.kill(guard, signal.SIGSTOP)
             self.addCleanup(lambda: running(guard) and os.kill(guard, signal.SIGKILL))
             task.cancel()
@@ -684,7 +685,7 @@ class ConsultationTests(BridgeTestCase):
             await self.wait_for_child()
             peer = read_pid(self.root / "parent.pid")
             guard = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(peer)], capture_output=True,
-                                       text=True).stdout)
+                                       text=True, timeout=DEADLINE_SECONDS).stdout)
             os.kill(guard, signal.SIGKILL)
             with self.assertRaisesRegex(bridge.BridgeError, "stopped unexpectedly"):
                 await task
@@ -745,7 +746,7 @@ class ConsultationTests(BridgeTestCase):
         project_head = git(self.project, "rev-parse", "HEAD")
         other = git_repository(self.root / "other-checkout")
         inherited = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
-        with patch.dict(os.environ, inherited):
+        with patch.dict(os.environ, {"SIMULATED_CAPTURE_HEAD": "1"}), patch.dict(os.environ, inherited):
             pinned = await self.consult("codex", ref=first)
             await self.consult("claude")
             self.assertEqual({name: os.environ[name] for name in inherited}, inherited)
