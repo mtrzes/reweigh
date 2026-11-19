@@ -264,7 +264,7 @@ class ConsultationTests(BridgeTestCase):
         return [line for line in listing.splitlines() if line.startswith("worktree ")]
 
     async def test_a_relative_store_directory_still_places_checkouts_in_it(self):
-        first, _ = self.pinned_repository()
+        first, _ = await asyncio.to_thread(self.pinned_repository)
         self.addCleanup(os.chdir, os.getcwd())
         os.chdir(self.root)
         self.client.store = bridge.SessionStore(self.state.name)
@@ -362,7 +362,7 @@ class ConsultationTests(BridgeTestCase):
         return message
 
     async def test_cli_text_alone_never_names_a_cause(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         misleading = ("thread already has an active writer; 401 Unauthorized; Not logged in; Please run /login; "
                       "model is not supported; No conversation found with session ID; Not inside a trusted directory; "
                       "note: [claude-code:unrecognized_model]")
@@ -376,7 +376,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(list(self.state.glob("*.json")), [])
 
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         # One row per path a fact travels to the message; test_core holds the rules that read them.
         cases = (  # the sign-in probe, the peer's stdout and stderr, the model settings, a real .git lookup
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
@@ -398,7 +398,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(list(self.state.glob("*.json")), [])
 
     async def test_diagnosis_asks_the_probes_its_provider_and_resume_state_need(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         for provider in ("claude", "codex"):
             conversation = (await self.consult(provider))["conversation_id"]
             session = json.loads((self.state / f"{conversation}.json").read_text())["backend_session_id"]
@@ -448,7 +448,7 @@ class ConsultationTests(BridgeTestCase):
             release.set()
 
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         self.client.timeout = 5
         sign_in = str(self.peer), 2
         for peer_seconds, sign_in_seconds, expected in (
@@ -487,7 +487,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertFalse(running(read_pid(self.root / "probe-child.pid")))
 
     async def test_resumed_consultation_failures_check_the_peer_history_and_writer_lock(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         for provider in ("claude", "codex"):
             with self.subTest(provider=provider):
                 conversation = (await self.consult(provider))["conversation_id"]
@@ -512,7 +512,7 @@ class ConsultationTests(BridgeTestCase):
                 self.assertEqual(json.loads((self.state / f"{conversation}.json").read_text()), record)
 
     async def test_failure_before_the_peer_reads_its_input_is_still_diagnosed(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         large_context = "x" * (2 * 1024 * 1024)
         for exit_status, signed_in, expected in (("1", "0", "Codex is not signed in"),
                                                  ("1", "1", "closed its input"), ("0", "1", "closed its input")):
@@ -566,7 +566,7 @@ class ConsultationTests(BridgeTestCase):
         await self.assert_processes_stopped()
 
     async def test_repeated_cancellation_still_kills_the_peer_and_removes_its_checkout(self):
-        first, _ = self.pinned_repository()
+        first, _ = await asyncio.to_thread(self.pinned_repository)
 
         async def cancel_when_the_child_starts(scope):
             await self.wait_for_child()
@@ -584,7 +584,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(list((self.state / "worktrees").iterdir()), [])
 
     async def test_cli_repeated_termination_still_kills_the_peer_and_removes_its_checkout(self):
-        first, _ = self.pinned_repository()
+        first, _ = await asyncio.to_thread(self.pinned_repository)
         with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang", "SIMULATED_PEER_IGNORES_SIGTERM": "1"}):
             process = await asyncio.create_subprocess_exec(
                 sys.executable, str(BRIDGE_PATH), "ask", "--provider", "claude", "--working-directory",
@@ -713,7 +713,7 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_pinned_ref_consults_a_detached_checkout_and_follow_ups_keep_its_directory(self):
         # Claude resumes a session only from the directory it ran in, so the checkout's path is fixed per conversation.
-        first, second = self.pinned_repository()
+        first, second = await asyncio.to_thread(self.pinned_repository)
         package = self.project / "pkg"
         pinned = await self.consult(working_directory=str(package), ref=first[:12])
         identifier = pinned["conversation_id"]
@@ -731,7 +731,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual((package / "marker.txt").read_text(encoding="utf-8"), "uncommitted edit")
 
     async def test_pinned_consultation_tells_the_peer_where_its_checkout_root_is(self):
-        first, _ = self.pinned_repository()
+        first, _ = await asyncio.to_thread(self.pinned_repository)
         await self.consult(ref=first)
         await self.consult(working_directory=str(self.project / "pkg"), ref=first)
         await self.consult()
@@ -742,9 +742,9 @@ class ConsultationTests(BridgeTestCase):
         self.assertNotIn("temporary checkout", unpinned)
 
     async def test_inherited_git_location_does_not_redirect_the_peer_from_its_checkout(self):
-        first, _ = self.pinned_repository()
-        project_head = git(self.project, "rev-parse", "HEAD")
-        other = git_repository(self.root / "other-checkout")
+        first, _ = await asyncio.to_thread(self.pinned_repository)
+        project_head = await asyncio.to_thread(git, self.project, "rev-parse", "HEAD")
+        other = await asyncio.to_thread(git_repository, self.root / "other-checkout")
         inherited = {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
         with patch.dict(os.environ, {"SIMULATED_CAPTURE_HEAD": "1"}), patch.dict(os.environ, inherited):
             pinned = await self.consult("codex", ref=first)
@@ -756,7 +756,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(plain_call["head"], project_head)
 
     async def test_invalid_or_unpinned_refs_do_not_start_a_peer(self):
-        first, _ = self.pinned_repository()
+        first, _ = await asyncio.to_thread(self.pinned_repository)
         unpinned = await self.consult()
         (self.root / "not-a-repository").mkdir()
         injected = self.root / "injected"
@@ -774,7 +774,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertFalse(injected.exists())
 
     async def test_a_missing_directory_or_a_leftover_checkout_leaves_no_worktree_behind(self):
-        first, _ = self.pinned_repository()
+        first, _ = await asyncio.to_thread(self.pinned_repository)
         (self.project / "later").mkdir()
         with self.assertRaisesRegex(bridge.BridgeError, "does not exist at that ref"):
             await self.consult(working_directory=str(self.project / "later"), ref=first)
@@ -792,7 +792,7 @@ class ConsultationTests(BridgeTestCase):
         # whose conversation is running stays.
         dead, running = (self.state / "worktrees" / str(uuid.uuid4()) for _ in range(2))
         for folder in (dead, running):
-            git(self.project, "worktree", "add", "--detach", "--quiet", str(folder), first)
+            await asyncio.to_thread(git, self.project, "worktree", "add", "--detach", "--quiet", str(folder), first)
         with self.client.store.holding(running.name) as held:
             self.assertTrue(held)
             await self.consult()
@@ -801,7 +801,7 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_pinning_runs_none_of_the_repository_code(self):
         # Preparing a checkout must not run a hook, a filter or a symlink of the repository's: none is sandboxed.
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         ran = self.root / "ran"
         hooks = self.project / "hooks"
         hooks.mkdir()
@@ -809,21 +809,21 @@ class ConsultationTests(BridgeTestCase):
         (hooks / "post-checkout").chmod(0o755)
         # A driver name with "=" in it, which `-c filter.<name>.smudge=` would split at the wrong place.
         (self.project / ".gitattributes").write_text("*.txt filter=x=y\n", encoding="utf-8")
-        git(self.project, "config", "filter.x=y.clean", "cat")
+        await asyncio.to_thread(git, self.project, "config", "filter.x=y.clean", "cat")
         (self.project / "notes.txt").write_text("notes\n", encoding="utf-8")
         package = self.project / "pkg"
         package.symlink_to(self.root)
-        git(self.project, "add", ".")
-        git(self.project, "commit", "--quiet", "-m", "linked")
-        linked = git(self.project, "rev-parse", "HEAD")
+        await asyncio.to_thread(git, self.project, "add", ".")
+        await asyncio.to_thread(git, self.project, "commit", "--quiet", "-m", "linked")
+        linked = await asyncio.to_thread(git, self.project, "rev-parse", "HEAD")
         package.unlink()
         package.mkdir()
         (package / "marker.txt").write_text("real", encoding="utf-8")
-        git(self.project, "add", "-A")
-        git(self.project, "commit", "--quiet", "-m", "real")
+        await asyncio.to_thread(git, self.project, "add", "-A")
+        await asyncio.to_thread(git, self.project, "commit", "--quiet", "-m", "real")
         for setting, value in (("core.hooksPath", "hooks"), ("filter.x=y.smudge", f"touch {ran}-smudge; cat"),
                                ("filter.x=y.process", f"touch {ran}-process"), ("filter.x=y.required", "true")):
-            git(self.project, "config", setting, value)
+            await asyncio.to_thread(git, self.project, "config", setting, value)
         pinned = await self.consult(ref="HEAD")
         self.assertEqual(pinned["commit"], git(self.project, "rev-parse", "HEAD"))
         with self.assertRaisesRegex(bridge.BridgeError, "does not exist at that ref"):
@@ -836,15 +836,16 @@ class ConsultationTests(BridgeTestCase):
         # partial clone's lazy fetch each would run repository code or check out other content than the commit named.
         ran = self.root / "ran"
         with self.subTest("filter configured only for linked worktrees, with an inherited GIT_CONFIG"):
-            git_repository(self.project)
+            await asyncio.to_thread(git_repository, self.project)
             (self.project / ".gitattributes").write_text("*.txt filter=late\n", encoding="utf-8")
             (self.project / "marker.txt").write_text("stored\n", encoding="utf-8")
-            git(self.project, "add", ".")
-            git(self.project, "commit", "--quiet", "-m", "filtered")
+            await asyncio.to_thread(git, self.project, "add", ".")
+            await asyncio.to_thread(git, self.project, "commit", "--quiet", "-m", "filtered")
             linked_only = self.root / "linked-only.config"
             linked_only.write_text(f'[filter "late"]\n\tsmudge = "touch {ran}-late; cat"\n\trequired = true\n',
                                    encoding="utf-8")
-            git(self.project, "config", "includeIf.gitdir:**/worktrees/**.path", str(linked_only))
+            await asyncio.to_thread(git, self.project, "config", "includeIf.gitdir:**/worktrees/**.path",
+                                    str(linked_only))
             empty = self.root / "empty.config"
             empty.write_text("", encoding="utf-8")
             with patch.dict(os.environ, {"GIT_CONFIG": str(empty)}):
@@ -854,20 +855,20 @@ class ConsultationTests(BridgeTestCase):
         with self.subTest("replacement object"):
             original = pinned["commit"]
             (self.project / "marker.txt").write_text("replaced\n", encoding="utf-8")
-            git(self.project, "commit", "--quiet", "-am", "replacement")
-            git(self.project, "replace", original, git(self.project, "rev-parse", "HEAD"))
+            await asyncio.to_thread(git, self.project, "commit", "--quiet", "-am", "replacement")
+            await asyncio.to_thread(git, self.project, "replace", original, git(self.project, "rev-parse", "HEAD"))
             replaced = await self.consult(ref=original)
             self.assertEqual((replaced["commit"], self.calls()[-1]["marker"]), (original, "stored\n"))
         with self.subTest("partial clone with a promisor remote"):
-            git(self.project, "config", "uploadpack.allowFilter", "true")
+            await asyncio.to_thread(git, self.project, "config", "uploadpack.allowFilter", "true")
             clone = self.root / "partial"
-            git(self.root, "clone", "--quiet", "--filter=blob:none", "--no-checkout", f"file://{self.project}",
-                str(clone))
+            await asyncio.to_thread(git, self.root, "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+                                    f"file://{self.project}", str(clone))
             transport = self.root / "transport.sh"
             transport.write_text(f"#!/bin/sh\ntouch {ran}-transport\nexit 1\n", encoding="utf-8")
             transport.chmod(0o755)
-            git(clone, "config", "remote.origin.url", f"ext::{transport}")
-            git(clone, "config", "protocol.ext.allow", "always")
+            await asyncio.to_thread(git, clone, "config", "remote.origin.url", f"ext::{transport}")
+            await asyncio.to_thread(git, clone, "config", "protocol.ext.allow", "always")
             calls = len(self.calls())
             with self.assertRaisesRegex(bridge.BridgeError, "Cannot check out the ref"):
                 await self.consult(working_directory=str(clone), ref="HEAD")
@@ -876,16 +877,16 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_removing_a_pinned_checkout_leaves_other_worktrees_registered(self):
         # A worktree on a drive that is not mounted looks just like a deleted one; only the bridge's own record goes.
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         unmounted = self.root / "unmounted"
-        git(self.project, "worktree", "add", "--detach", "--quiet", str(unmounted))
+        await asyncio.to_thread(git, self.project, "worktree", "add", "--detach", "--quiet", str(unmounted))
         shutil.rmtree(unmounted)
         await self.consult(ref="HEAD")
         names = [Path(line.split(" ", 1)[1]).name for line in self.registered_worktrees()]
         self.assertEqual(names, [self.project.name, "unmounted"])
 
     async def test_checkout_preparation_shares_one_budget_and_removal_has_its_own(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         clock, calls, step = SimpleNamespace(now=1000.0), [], 0
         prepare, remove = bridge.CHECKOUT_PREPARATION_SECONDS, bridge.CHECKOUT_REMOVAL_SECONDS
 
@@ -928,7 +929,7 @@ class ConsultationTests(BridgeTestCase):
                 self.assertEqual(len(self.registered_worktrees()), 1)  # only the project's own
 
     async def test_a_checkout_that_cannot_be_removed_keeps_the_reply_and_is_swept_later(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         consulted = []
 
         async def failing_removal(command, prompt, directory, timeout, **options):
@@ -961,7 +962,7 @@ class ConsultationTests(BridgeTestCase):
             self.assertIsNotNone(other)
 
     async def test_thread_reading_and_seed_thread_are_off_unless_turned_on(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         codex_thread(self.codex_home, self.project, codex_turn("t1", "Verdict: ship it."), name="Desktop review")
         spawned = []
         self.client.spawn = spawned.append
@@ -979,7 +980,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual((self.calls(), spawned, list((self.state / "jobs").glob("*"))), ([], [], []))
 
     async def test_seed_thread_carries_recent_agent_messages_into_a_fresh_consultation(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         codex_thread(self.codex_home, self.project, codex_turn("t1", "Looking at it.", "Verdict: ship it."),
                      name="Desktop review")
         await self.consult("codex", context="Lead context.", seed_thread="Desktop review")

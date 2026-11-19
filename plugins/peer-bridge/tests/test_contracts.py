@@ -7,6 +7,7 @@ machine's /etc/codex/config.toml.
 """
 
 import ast
+import asyncio
 import json
 import os
 import subprocess
@@ -154,7 +155,7 @@ class McpTests(BridgeTestCase):
                 offered(listing, peer)
                 for part in instructions[peer]:
                     self.assertIn(part, given)
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         codex_thread(self.codex_home, self.project, codex_turn("t1", "Codex answer."), name="Codex review")
         claude_session(self.claude_home, self.project, claude_prompt(), claude_reply("Claude answer."),
                        title="Claude review")
@@ -206,7 +207,12 @@ class CommandLineTests(BridgeTestCase):
     def run_cli(self, *arguments, prompt=b""):
         completed = subprocess.run([sys.executable, str(BRIDGE_PATH), *arguments], input=prompt,
                                    capture_output=True, timeout=DEADLINE_SECONDS)
-        return completed.returncode, json.loads(completed.stdout)
+        try:
+            return completed.returncode, json.loads(completed.stdout)
+        except ValueError:  # a crash before the result: its traceback is on stderr
+            pass
+        self.fail(f"The CLI printed no JSON result (exit {completed.returncode}). Its stderr:\n"
+                  + completed.stderr.decode("utf-8", errors="replace"))
 
     def test_ask_prints_the_tool_result_resumes_and_reports_errors_as_json(self):
         target = ("ask", "--provider", "claude", "--working-directory", str(self.project))

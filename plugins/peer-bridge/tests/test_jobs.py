@@ -131,7 +131,7 @@ class JobTests(BridgeTestCase):
         self.assertFalse(folder.exists())
 
     async def test_a_killed_runners_conversation_stays_locked_until_its_guard_has_stopped_the_peer(self):
-        git_repository(self.project)
+        await asyncio.to_thread(git_repository, self.project)
         real_git = shutil.which("git")
         command = self.root / "blocking-peer"
         command.write_text(f"""#!{sys.executable}
