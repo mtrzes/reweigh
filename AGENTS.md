@@ -4,7 +4,7 @@
 
 | Area | Read first | Enforced by |
 |---|---|---|
-| a tool, argument or job state | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md) tables, the [plugin README](plugins/peer-bridge/README.md) section, `plugins/peer-bridge/tests/fixtures/mcp_input_schemas.json` | `test_repository` |
+| a tool, argument or job state | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md) tables, the [plugin README](plugins/peer-bridge/README.md) section, `plugins/peer-bridge/tests/fixtures/mcp_input_schemas.json` | `test_repository`, `test_contracts` |
 | a peer's command line, environment or sandbox | [SECURITY](SECURITY.md), [ADR 0003](docs/adr/0003-peers-only-read.md) | `test_core` |
 | failure diagnosis or any probe | [ADR 0004](docs/adr/0004-causes-from-exact-facts.md) | `test_core`, `test_bridge` |
 | which module holds a rule | [ADR 0005](docs/adr/0005-module-boundaries.md) | `test_repository` |
