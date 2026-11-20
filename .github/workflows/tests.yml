@@ -56,7 +56,7 @@ jobs:
         run: .venv/bin/python -m unittest discover -s dev/tests -t dev/tests
 
   # The suites already passed on this commit in the run started by hand; the tag only has to name the version they
-  # tested. test_contracts ties the Codex manifest and the changelog to the same version.
+  # tested. test_repository ties the Codex manifest and the changelog to the same version.
   tag-version:
     if: ${{ github.event_name == 'push' }}
     name: Tag names the plugin version

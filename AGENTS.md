@@ -4,13 +4,13 @@
 
 | Area | Read first | Enforced by |
 |---|---|---|
-| a tool, argument or job state | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md) tables, the [plugin README](plugins/peer-bridge/README.md) section, `plugins/peer-bridge/tests/fixtures/mcp_input_schemas.json` | `test_contracts` |
+| a tool, argument or job state | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md) tables, the [plugin README](plugins/peer-bridge/README.md) section, `plugins/peer-bridge/tests/fixtures/mcp_input_schemas.json` | `test_repository` |
 | a peer's command line, environment or sandbox | [SECURITY](SECURITY.md), [ADR 0003](docs/adr/0003-peers-only-read.md) | `test_core` |
 | failure diagnosis or any probe | [ADR 0004](docs/adr/0004-causes-from-exact-facts.md) | `test_core`, `test_bridge` |
-| which module holds a rule | [ADR 0005](docs/adr/0005-module-boundaries.md) | `test_contracts` |
+| which module holds a rule | [ADR 0005](docs/adr/0005-module-boundaries.md) | `test_repository` |
 | thread reading | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md#thread-reading), [ADR 0001](docs/adr/0001-codex-thread-reader-source.md) | `test_reader` |
 | tests or CI | [ADR 0002](docs/adr/0002-test-architecture.md) | review |
-| a release or stored state | [ADR 0006](docs/adr/0006-releases-and-stored-state.md), [CHANGELOG](CHANGELOG.md) | `test_contracts`, `test_jobs`, `test_core`, CI by hand |
+| a release or stored state | [ADR 0006](docs/adr/0006-releases-and-stored-state.md), [CHANGELOG](CHANGELOG.md) | `test_repository`, `test_jobs`, `test_core`, CI by hand |
 
 Run both suites before each commit: [Verification](plugins/peer-bridge/README.md#verification).
 
@@ -18,8 +18,8 @@ Run both suites before each commit: [Verification](plugins/peer-bridge/README.md
 
 - Each fact has one home: behaviour in `plugins/peer-bridge/HOW-IT-WORKS.md`, arguments and setup in the plugin README,
   trust and retention in `SECURITY.md`; other files link to it. A change to the tools, job states, components or
-  boundaries updates HOW-IT-WORKS in the same commit; `test_contracts` fails when a tool or job state is missing from
-  it.
+  boundaries updates HOW-IT-WORKS in the same commit; `test_repository` fails when its Tools or job-state table differs
+  from the tools and states the code has.
 - Tests follow [ADR 0002](docs/adr/0002-test-architecture.md): each critical path proved once, at the lowest level.
   CI runs them for a pull request and, started by hand, on the release commit before it is tagged; the `v*` tag's run
   only checks that the tag names the version in `plugin.json`.

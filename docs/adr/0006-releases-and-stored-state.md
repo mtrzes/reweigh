@@ -1,7 +1,7 @@
 # ADR-0006: A release has one version in three places; stored state stays readable or is refused
 
 - Status: Accepted
-- Enforced by: test_contracts `test_both_manifests_and_the_newest_release_in_the_changelog_name_one_version`; test_jobs
+- Enforced by: test_repository `test_both_manifests_and_the_newest_release_in_the_changelog_name_one_version`; test_jobs
   `test_job_request_round_trips_and_reads_requests_written_before_model_choices`; test_core
   `test_stored_records_and_outcomes_are_validated` and `test_resumed_record`; `.github/workflows/tests.yml` (the tag
   names the version, per ADR 0002); standing duty: a release runs the steps below in order

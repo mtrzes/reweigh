@@ -1,7 +1,7 @@
 # ADR-0005: Rules live in pure modules; adapters depend on them, and nothing depends on bridge.py
 
 - Status: Accepted
-- Enforced by: test_contracts `test_imports_point_from_the_adapters_to_the_rules`
+- Enforced by: test_repository `test_imports_point_from_the_adapters_to_the_rules`
 
 ## Context
 Much of the bridge is decisions: which flags a peer gets, which facts name a cause, which job state follows. ADR 0002
