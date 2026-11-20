@@ -22,19 +22,38 @@ flowchart TB
     reader --> history["Session files<br/>the other app's history"]
 ```
 
-Each app reaches the bridge through its own plugin; the shell uses the same script. The bridge does three things:
+Each app reaches the bridge through its own plugin; the shell uses the same script.
 
-- **Consultations**: `ask_codex` and `ask_claude` ask the other agent a scoped question, in a conversation the caller
-  can continue with `conversation_id`.
-- **Background jobs**: `start_codex_consultation` and `start_claude_consultation` run a consultation in a detached
-  runner, `get_consultation` reads it and `cancel_consultation` stops it.
-- **Thread reading**: `list_codex_threads`, `read_codex_thread`, `list_claude_threads` and `read_claude_thread` read
-  what the other app's agent last said in this repository.
+## Tools
 
-All rules (request checks, the peer's command line, environment cleanup, the handoff text, failure diagnosis, job
-states) live in two pure modules, `consultation.py` and `thread_parsing.py`; the rest only starts processes and
-touches files. Failure diagnosis, for example, decides there which facts a failed run needs for its provider and
-whether it resumed; a probe in `bridge.py` observes each one as true, false or unknown.
+| Tool | Does |
+|---|---|
+| `ask_codex` | asks Codex a scoped question, in a conversation continued with `conversation_id` |
+| `ask_claude` | asks Claude Code a scoped question, in a conversation continued with `conversation_id` |
+| `start_codex_consultation` | runs an `ask_codex` consultation as a background job and returns its job ID |
+| `start_claude_consultation` | runs an `ask_claude` consultation as a background job and returns its job ID |
+| `get_consultation` | reads a background job's state and, once completed, its reply |
+| `cancel_consultation` | asks a background job's runner to stop |
+| `list_codex_models` | lists the models and reasoning efforts this Codex account offers |
+| `list_codex_threads` | lists Codex threads in this repository |
+| `read_codex_thread` | reads a Codex thread's latest agent messages and turn state |
+| `list_claude_threads` | lists Claude Code sessions in this repository |
+| `read_claude_thread` | reads a Claude Code session's latest agent messages and turn state |
+
+## Components
+
+| Component | Owns | Code |
+|---|---|---|
+| Rules | request checks, the peer's command line, environment cleanup, the handoff text, failure diagnosis, job states | `scripts/consultation.py`, `scripts/thread_parsing.py` |
+| Bridge | the MCP server, the CLI, consultations, probes, pinned checkouts | `scripts/bridge.py` |
+| Jobs | the job store, its locks and request file, the detached runner | `scripts/jobs.py` |
+| Thread reader | finding history files, the repository check made on the bytes it returns, read budgets | `scripts/thread_reader.py`, `scripts/history_capture.py` |
+| Guard | the peer's process group | `scripts/peer_guard.py` |
+| State files | private files and folders under the state directory | `scripts/state_files.py`, `scripts/cleanup.py` |
+
+The rules take every fact as an argument and touch no process, file or environment; the other components keep only
+the rules bound to their own I/O. Failure diagnosis, for example, decides in the rules which facts a failed run needs;
+a probe in `bridge.py` observes each one as true, false or unknown.
 
 ## One consultation
 
@@ -42,49 +61,37 @@ whether it resumed; a probe in `bridge.py` observes each one as true, false or u
 flowchart TB
     check["Check the request<br/>no nesting, real directory, valid IDs"] --> record
     record["Lock the conversation record<br/>bound to peer and project; resumes"] --> pin
-    pin["Pinned checkout, if a ref is given<br/>detached worktree, removed afterwards"] --> run
+    pin["Pinned checkout, if a ref is given or resumed<br/>detached worktree, removed afterwards"] --> run
     run["Peer runs under the guard<br/>read-only tools, scrubbed environment"] --> outcome
     outcome["Reply, or a fixed error<br/>cause named only from exact facts"]
 ```
 
-- **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep, only the user's own settings, no MCP
-  servers or slash commands, and ordinary hooks disabled; it reads only inside the consulted directory, Claude Code's
-  temporary folder, and wherever the user's own settings add a directory or allow a read. Codex runs as `codex exec` in
-  its read-only sandbox, without the user's "always allow" rules, with MCP servers, plugins and web search off and only
-  the core environment for its commands; it can read any file the user can. Neither can start another consultation. See
-  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/main/SECURITY.md) for what this does not cover.
-- **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`;
-  `list_codex_models` shows what Codex offers, and a value it does not list is refused before Codex starts.
-- **The peer's process group never outlives the consultation.** `peer_guard.py` leads the peer's process group and
-  stops all of it when the consultation ends, times out or is cancelled, and when the bridge's own process dies, even
-  by SIGKILL. Sign-in probes and git commands run under a guard too. After a failure, the sign-in probe and the
-  lookup of the peer's history use the time left from the peer's timeout, and neither starts once it is spent. Each
-  guard holds the conversation's lock, so the conversation and its checkout stay busy until the process group has
-  stopped. Opening a conversation gives one scope that holds its lock, its record and its checkout's fixed location;
-  the peer, the sign-in probe and the pinned checkout's git commands start through that scope, and it saves the record
-  only once the peer's result has been checked against it. Reading a `seed_thread` comes before the conversation is
-  opened, and the git command its repository check runs is not guarded. The sweep of leftover checkouts takes another
-  conversation's lock the same way, without opening its record. The bridge's last signal to a group always comes
-  before it reaps the guard, which would free the group's ID. A descendant that leaves the group, by starting its own
-  session or group, is not stopped.
-- **A pinned checkout is prepared within one budget.** Every git command that prepares it, from finding the
-  repository to writing the files, including removing a checkout an earlier run left in its place, shares a checkout
-  preparation budget of 300 seconds; a command is not started once the budget is spent. Removing the checkout
-  afterwards, whether the consultation succeeded, failed or was cancelled, has 120 seconds of its own and runs to its
-  end; a checkout it cannot remove is left for a later consultation's sweep, and the consultation's own outcome
-  stands. The peer's
-  timeout starts once the checkout is ready. Reading a `seed_thread`, and sweeping up checkouts that runs which died
-  left behind (each with its own 120 seconds), come before both.
+- **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep; Codex as `codex exec` in its read-only
+  sandbox. Neither can start another consultation.
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read
+  and what the bridge does not cover.
+- **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`. When
+  Codex's catalogue is readable, a value it does not list is refused before Codex starts; the
+  [README](README.md#consultation-requests) says when the choice goes unchecked.
+- **The peer's process group never outlives the consultation.** `peer_guard.py` leads the group and stops all of it
+  when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL; sign-in probes and
+  git commands run under a guard too. Each guard holds the conversation's lock until its group has stopped. The git
+  command that checks a `seed_thread`'s repository runs before the conversation opens, unguarded. A descendant that
+  starts its own session or group is not stopped.
+- **A pinned checkout is prepared within one budget.** The git commands that prepare it, including removing a checkout
+  an earlier run left in its place, share 300 seconds. Removing it afterwards has 120 seconds; a checkout it cannot
+  remove is left for a later sweep, and the consultation's outcome stands. The peer's timeout starts once the checkout
+  is ready. Reading a `seed_thread`, and sweeping checkouts left by runs that died (120 seconds each), come first.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
-  given a cause only when an exact signal establishes it, such as `loggedIn: false` or a writer-lock file. Codex
-  events are separated by LF, so Unicode line separators inside a reply are preserved.
+  given a cause only when an exact fact establishes it, such as `loggedIn: false` or a writer-lock file. Codex events
+  are separated by LF, so Unicode line separators inside a reply are preserved.
 
 ## Background jobs
 
 ```mermaid
 flowchart LR
     queued["queued<br/>job ID returned"] --> running["running<br/>runner holds lock"]
-    running --> completed["completed<br/>reply kept, pruned after 7 days"]
+    running --> completed["completed<br/>reply kept"]
     running --> failed["failed<br/>fixed error message"]
     running -- runner gets SIGTERM or SIGHUP --> cancelled["cancelled<br/>fixed error message"]
     queued -- cancel within 2 minutes, no runner --> cancelled
@@ -97,75 +104,61 @@ flowchart LR
     cancelling -. runner dies .-> lost
 ```
 
-A job lives in its own folder under the state directory. Its runner holds a lock for as long as it lives, so whether a
-runner is alive is read from that lock, never from a process ID. Jobs survive an MCP server restart. A job whose runner
-dies, or has yet to claim it after two minutes, is stored as `lost` when it is read, cancelled or claimed. Before that
-deadline, cancellation of a queued job with no runner takes effect immediately. While a cancel waits for the runner,
-`cancel_consultation` reports `cancelling`. Only a regular file counts as a cancellation marker. The job module writes
-the request file and reads it back; the runner deletes it after reading it. If it cannot read the request for a valid
-job, or the request lacks a field the bridge writes, it deletes the file and records `failed` with a fixed error. A
-request written before `model` and `reasoning_effort` existed asks for neither. SIGTERM or SIGHUP during a CLI `start`
-cancels the pending start and cleans up any job it published during creation. A start that cannot read its job once
-the runner is launched, for a reason other than the job being busy, cancels the job, since the caller never learns
-its ID; if that cancellation fails too, the error names the job's ID. An interrupted start ends as cancelled even when
-that cleanup fails. A start that finds the runner already claiming the job reports it `queued`. The job module,
-`jobs.py`, owns a start from publishing the job to returning its ID; the bridge checks the request first.
+| State | Meaning |
+|---|---|
+| `queued` | the job is published and its ID returned; no runner has claimed it |
+| `running` | a runner has claimed the job and holds its lock |
+| `cancelling` | a cancellation marker is set; the runner has yet to stop |
+| `completed` | the consultation finished and its reply is kept |
+| `failed` | the consultation or its request failed, with a fixed error message |
+| `cancelled` | the job stopped before an outcome, by a cancellation or a signal to its runner |
+| `lost` | the runner died, or never claimed the job within two minutes |
 
-Each status read or cancellation waits at most one second for the lock on the job's state, then reports that the job
-is busy. Cancelling the job of a failed or cancelled start waits as long as the lock's holder needs. The runner can
-respond to `SIGTERM` or `SIGHUP` while waiting for the lock, and job cleanup skips a job whose lock is held.
-
-Job cleanup removes only folders named with a canonical job UUID, optionally preceded by `.staging-` or `.deleting-`.
+A job lives in its own folder under the state directory and survives an MCP server restart. Whether a runner is alive
+is read from the lock it holds, never from a process ID. A job is stored as `lost` when a read, a cancellation or a
+claim finds its runner gone; a stored outcome, `lost` included, is final. Cancelling settles a job no runner has
+claimed, marks a running one, and leaves an existing outcome as it is. The runner deletes the request once read; a
+request it cannot read is deleted and the job `failed`. A start whose first status read finds the lock busy reports
+the job `queued`. A CLI `start` that is interrupted, or cannot read its job once the runner is launched, tries to
+cancel the job, since the caller never learns its ID; if that fails, the error names the ID. A status read or
+cancellation waits at most one second for the job's state lock, then reports the job busy; the runner still answers
+SIGTERM and SIGHUP while it waits, and cleanup skips a job whose lock is held. The locking model is in
+`scripts/jobs.py`; how long a finished job is kept, in
+[SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md#what-is-kept-and-for-how-long).
 
 ## Thread reading
 
 The reader opens the other app's session files read-only: Claude Code's `projects/*/*.jsonl`, and Codex's rollouts,
-plain or zstd-compressed. It opens regular files without following symlinks below the configured app home and
-checks the recorded session ID against the filename. The listing takes Codex recency from the open rollout so
-an archive move cannot interrupt the listing. One lookup per app finds the history files for listing, reading and
-failure diagnosis; it counts each history folder it cannot list instead of taking it as empty. The listing reports that
-count, and diagnosis never says a conversation's history is gone while a folder could not be listed. The reader
-returns agent messages and the latest turn's state for threads in the same git repository. `seed_thread` carries a
-thread's recent messages into a new consultation, so a review left in Codex Desktop can be followed up without
-touching it.
+plain or zstd-compressed. It opens regular files without following symlinks below the configured app home and checks
+the recorded session ID against the filename. One lookup per app finds the history files for listing, reading and
+failure diagnosis; it counts each history folder it cannot list instead of taking it as empty, and diagnosis never
+says a history is gone while a folder could not be listed. `seed_thread` carries a thread's recent messages into a new
+consultation, so a review left in Codex Desktop can be followed up without touching it.
 
-The listing only picks a thread. The read opens the thread's file once and decides again, from the same bytes it
-returns messages from, whether the thread is in this repository: for Codex from the rollout's `session_meta` (main
+The listing only picks a thread. Each read attempt opens the thread's file once and decides again, from the same bytes
+it returns messages from, whether the thread is in this repository: for Codex from the rollout's `session_meta` (main
 thread, working directory, not forked), for Claude Code from the latest working directory the main session records.
-Claude sidechains never set that directory. Each read attempt checks the recorded directories against the repository
-resolved at the start of the request. Each attempt reads the extent captured when the file was opened, including
-for compressed rollouts. A file that changes while it is read is retried once, even if parsing the first attempt fails.
-The Claude reader searches up to 32 MiB of recent history and refuses a session whose main working directory is missing
-there. Only the current stay in the repository contributes replies and a title, including the title shown in the listing
-and used for exact-name selection. A read searches as far back for the title as the listing does, in the same bytes as
-its replies: for a session unchanged since it was selected, that is the title it was selected by. A session that has
-just moved in shows an unfinished turn and no messages. Claude replies and titles follow the active branch's parent
-links after a rewind, so an abandoned branch cannot bring a session into the repository. If a gap between those links
-cannot be resolved within the recent history window, a read that needs the records beyond it is refused, and no title is
-shown; a session whose links are malformed is listed without a title and its read is refused.
+A file that changes while it is read is retried once. Only a Claude session's current stay in the repository
+contributes replies and a title, following the active branch after a rewind; a session that has just moved in shows an
+unfinished turn and no messages. A session whose branch links are malformed is listed without a title and its read is
+refused; a gap that cannot be resolved within the recent history leaves no title and refuses a read that needs the
+records beyond it. A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a
+stop reason of the wrong type; any other failure inside the reader is a reader fault, not a damaged file. Message
+phases are the recorded `commentary` or `final_answer` tokens, or null. The reader refuses windows of more than
+131,072 complete lines, uses up to 8 MiB for a Claude session's start, the Codex name index or a compressed rollout's
+header, and allows a compressed rollout 256 MiB stored and 2 GiB decoded.
 
-A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a reply's stop
-reason of the wrong type. Message phases are the recorded `commentary` or `final_answer` tokens, or null when the
-phase is absent. Any other failure inside the reader is reported as a reader fault, not as a damaged file.
-
-The reader parses tail records one at a time and refuses windows with more than 131,072 complete lines. It uses up
-to 8 MiB for the start of a Claude session, the latest part of the Codex name index, or the stored bytes needed to
-find a compressed rollout header. Reading a compressed rollout allows up to 256 MiB of stored input and 2 GiB of
-decoded content.
-
-The bridge never writes into the other app's sessions. To hand work to an existing session, an agent puts the handoff
-in its own reply, and that session reads it with `read_codex_thread` or `read_claude_thread`. Neither agent may reach
-the other by operating its desktop app; the bridge's tool descriptions and skill say so.
-
-To split work, the operator starts the other app in a worktree of its own (`claude --worktree` or
-`codex --worktree`) with the handoff. The lead follows that session with `read_*_thread` and reviews its branch with
-`ask_codex` or `ask_claude` and `ref`. No peer the bridge starts ever edits;
-[ADR 0003](https://github.com/mtrzes/peer-bridge/blob/main/docs/adr/0003-peers-only-read.md) records why.
+The bridge never writes into the other app's sessions. An agent never reaches the other app by operating its desktop
+app; it puts a handoff in its own reply, which the other session reads with `read_codex_thread` or
+`read_claude_thread`. To split work, the operator
+starts the other app in its own worktree (`claude --worktree`, `codex --worktree`), and the lead follows it with
+`read_*_thread` and reviews its branch with `ref`. No peer ever edits;
+[ADR 0003](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/docs/adr/0003-peers-only-read.md) records why.
 
 Codex's session files are an internal format. A developer tool outside the plugin, `dev/codex_app_server.py`, tests
 whether Codex's app-server API could replace reading them;
-[ADR 0001](https://github.com/mtrzes/peer-bridge/blob/main/docs/adr/0001-codex-thread-reader-source.md) sets when it may
-take over.
+[ADR 0001](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/docs/adr/0001-codex-thread-reader-source.md) sets
+when it may take over.
 
 ## Scope
 

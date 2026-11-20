@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
+  when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version.
+
 ## 1.0.0-beta.2
 
 Hardening from architecture, security and implementation reviews of 1.0.0-beta.1.
