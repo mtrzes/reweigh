@@ -1,18 +1,16 @@
 """Exercise the bridge as its clients see it: the MCP server's tools and envelopes, and the command line's JSON and exit
 statuses. Each test starts real bridge processes; what they do inside is tested in test_bridge.py and test_jobs.py.
-The release and import checks read files only.
+Checks that read the repository's files only are in test_repository.py.
 
 Codex consultations here are refused before the bridge reads Codex configuration, so no bridge process reads the
 machine's /etc/codex/config.toml.
 """
 
-import ast
 import asyncio
 import json
 import os
 import subprocess
 import sys
-import tomllib
 import unittest
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -24,76 +22,16 @@ from mcp.client.stdio import stdio_client
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
-    BRIDGE_PATH, DEADLINE_SECONDS, SCRIPTS, TESTS, BridgeTestCase, bridge, claude_prompt, claude_reply, claude_session,
-    codex_thread, codex_turn, consultation, git_repository,
+    BRIDGE_PATH, DEADLINE_SECONDS, TESTS, BridgeTestCase, bridge, claude_prompt, claude_reply, claude_session,
+    codex_thread, codex_turn, git_repository,
 )
 
 DIFFERENT_PEER = "This conversation belongs to a different provider or working directory."
-# The modules that hold every rule, and so never import the modules that start processes or touch files.
-PURE_MODULES = {"consultation", "thread_parsing"}
 
 
 def canonical_json(value):
     """JSON text with sorted keys: equal only when the JSON is, so false and 0 differ, and a diff reads line by line."""
     return json.dumps(value, indent=2, sort_keys=True)
-
-
-def imported_modules(path):
-    """The top-level names of every absolute import in a script, including those inside functions."""
-    names = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
-        if isinstance(node, ast.Import):
-            names.update(alias.name.partition(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0:
-            names.add(node.module.partition(".")[0])
-    return names
-
-
-class ReleaseTests(unittest.TestCase):
-    def test_both_manifests_and_the_newest_release_in_the_changelog_name_one_version(self):
-        root = BRIDGE_PATH.parents[1]
-        versions = {json.loads((root / folder / "plugin.json").read_text(encoding="utf-8"))["version"]
-                    for folder in (".claude-plugin", ".codex-plugin")}
-        headings = [line for line in (root.parents[1] / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
-                    if line.startswith("## ")]
-        # Changes waiting for a release sit under "## Unreleased" above it; the release renames that heading.
-        if headings[:1] == ["## Unreleased"]:
-            headings = headings[1:]
-        self.assertTrue(headings, "CHANGELOG.md has no release heading.")
-        self.assertEqual(versions, {headings[0].split()[1]})
-
-
-class ScriptImportTests(unittest.TestCase):
-    """What the shipped scripts import, read from their source: the packages they declare and the way they depend."""
-
-    def setUp(self):
-        self.imports = {path.stem: imported_modules(path) for path in SCRIPTS.glob("*.py")}
-
-    def test_the_scripts_declare_every_package_they_import(self):
-        # A package installed only because another one needs it can vanish with that package's next release.
-        lock = tomllib.loads((SCRIPTS / "bridge.py.lock").read_text(encoding="utf-8"))
-        declared = {requirement["name"] for requirement in lock["manifest"]["requirements"]}
-        external = set().union(*self.imports.values()) - set(sys.stdlib_module_names) - set(self.imports)
-        self.assertEqual(external, declared)
-
-    def test_imports_point_from_the_adapters_to_the_rules(self):
-        def reached(start):
-            seen, todo = set(), [start]
-            while todo:
-                for name in (self.imports[todo.pop()] & set(self.imports)) - seen:
-                    seen.add(name)
-                    todo.append(name)
-            return seen
-
-        self.assertLessEqual(PURE_MODULES, set(self.imports))
-        for module in PURE_MODULES:
-            with self.subTest(module=module):
-                self.assertLessEqual(reached(module), PURE_MODULES)
-        # Jobs and thread reading, which reads history files through history_capture, share only the rules.
-        self.assertEqual(reached("jobs") & {"thread_reader", "history_capture"}, set())
-        self.assertNotIn("jobs", reached("thread_reader") | reached("history_capture"))
-        # bridge.py is the entry point: jobs reaches it only by starting `bridge.py run-job` as a separate process.
-        self.assertEqual({name for name, imports in self.imports.items() if "bridge" in imports}, set())
 
 
 class McpTests(BridgeTestCase):
@@ -116,17 +54,6 @@ class McpTests(BridgeTestCase):
         if response.isError:
             return True, text.removeprefix(f"Error executing tool {tool}: ")
         return False, json.loads(text)
-
-    async def test_the_user_guide_names_every_tool_and_job_state(self):
-        # HOW-IT-WORKS.md is the users' map of the bridge; a tool or state it does not name is drift.
-        guide = (BRIDGE_PATH.parents[1] / "HOW-IT-WORKS.md").read_text(encoding="utf-8")
-        async with self.session("both") as session:
-            listing = await session.list_tools()
-        states = {*consultation.FINISHED_JOB_STATES, *consultation.UNFINISHED_JOB_STATES, "cancelling"}
-        # A tool counts only as a whole code span; a state also as a node of the job diagram.
-        named = {name for name in {tool.name for tool in listing.tools} | states
-                 if f"`{name}`" in guide or (name in states and f' {name}["' in guide)}
-        self.assertEqual(({tool.name for tool in listing.tools} | states) - named, set())
 
     async def test_tools_their_annotations_and_envelopes(self):
         def tools(provider):
