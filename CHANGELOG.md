@@ -30,9 +30,9 @@
 - A folder whose `.git` points at a git directory that does not point back, as an unpacked archive's can, no longer
   counts as that repository: thread reads refuse it and leave out threads recorded there, and pinning refuses it, as
   it does a repository whose `worktrees/` registry, under its common git directory, exists but is not a real folder
-  inside it.
-  A repository whose working tree or git directory path holds a newline is not read: thread reads and pinning treat
-  it as outside a repository.
+  inside it. This also refuses a repository made with `git init --separate-git-dir` and one whose `.git` is a
+  symlink. A repository whose working tree or git directory path holds a newline is not read: thread reads and
+  pinning treat it as outside a repository.
 
 ## 1.0.0-beta.2
 

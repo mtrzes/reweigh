@@ -50,7 +50,9 @@ line runs.
   repository. Replies and titles come from the main session's current stay there, including titles used to list and
   select sessions. A read scoped to this repository answers alike for another repository's thread, a history that cannot
   be placed in a repository, and a missing one; only the listing's two machine-wide counts span all histories. A folder
-  whose `.git` points at a git directory that does not point back belongs to no repository.
+  whose `.git` points at a git directory that does not point back belongs to no repository. So do a repository made
+  with `git init --separate-git-dir`, whose git directory records no working tree, and one whose `.git` is a symlink:
+  thread reads and pinning refuse both.
 - **History filenames are checked against the app's records.** The bridge opens only regular files and follows
   no symlinks below the configured app home. A history's recorded session ID must match the filename.
 - **The tools' read-only hint.** Only the list, read and get tools are annotated read-only. `ask_*` and `start_*` are

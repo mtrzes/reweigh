@@ -36,7 +36,7 @@ from thread_parsing import (
 __all__ = [
     "GIT_LOCATION_ENV", "ClaudeSessionsSource", "CodexFilesSource", "ThreadReader", "ThreadSource",
     "RepositoryRedirected", "ThreadUnavailable", "git_common_dir", "repository_layout",
-    "layout_paths", "worktrees_inside", "LAYOUT_ARGUMENTS",
+    "layout_paths", "nearest_git_entry", "worktrees_inside", "LAYOUT_ARGUMENTS",
 ]
 
 # Each search starts at 256 KiB of a history's tail and doubles its window up to the most a capture keeps.
@@ -338,7 +338,14 @@ def repository_layout(directory, top, git_dir, common_dir, worktree):
         dot_git = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else None
     except OSError:
         dot_git = None
-    return RepositoryLayout(nearest_git_entry(Path(directory).resolve()), top, git_dir, common_dir, dot_git,
+    nearest = nearest_git_entry(Path(directory).resolve())
+    try:
+        # The same folder, spelled as typed, on a disk that ignores case or Unicode form: git prints the disk's spelling.
+        if nearest is not None and os.path.samefile(nearest, top):
+            nearest = top
+    except OSError:
+        pass  # could not tell: the spellings stay unequal, so the layout is refused
+    return RepositoryLayout(nearest, top, git_dir, common_dir, dot_git,
                             back_reference(git_dir, "gitdir"), resolved(git_dir, worktree) if worktree else None,
                             back_reference(git_dir, "commondir"))
 

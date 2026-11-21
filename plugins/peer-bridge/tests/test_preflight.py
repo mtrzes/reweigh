@@ -50,10 +50,11 @@ def fake_codex(arguments, settings):
 
 
 def runner_for(settings, seen=None):
-    """The check's runner, answering from fake_codex; seen collects each call's environment and home entries."""
+    """The check's runner, answering from fake_codex; seen collects each call's command, environment and home
+    entries."""
     async def run(command, stdin, directory, timeout, environment):
         if seen is not None:
-            seen.append((environment, sorted(directory.iterdir())))
+            seen.append((command, environment, sorted(directory.iterdir())))
         if command[0] == "missing":
             raise FileNotFoundError(command[0])
         code, output = fake_codex(command[1:], settings)
@@ -124,11 +125,18 @@ class PreflightTests(unittest.TestCase):
         with unittest.mock.patch.dict("os.environ", {"OPENAI_API_KEY": "secret", "PATH": "relative:/usr/bin:/bin"}):
             asyncio.run(preflight.preflight("codex", self.command(), runner_for({}, seen)))
         self.assertTrue(seen)
-        for environment, entries in seen:
+        for _, environment, entries in seen:
             self.assertEqual(sorted(environment), ["CODEX_HOME", "HOME", "PATH"])
             self.assertEqual(environment["PATH"], "/usr/bin:/bin")
             self.assertEqual(environment["HOME"], environment["CODEX_HOME"])
             self.assertEqual(entries, [])
+
+    def test_the_first_probe_carries_every_option_before_exec_even_a_model_named_exec(self):
+        seen = []
+        command = c.build_command("codex", "codex", "conv", None, model="exec", reasoning_effort="high")
+        self.assertEqual(asyncio.run(preflight.preflight("codex", command, runner_for({}, seen))), [])
+        self.assertEqual(seen[0][0], [*command[:command.index("exec", command.index("--model") + 2)],
+                                      "features", "list"])
 
     def test_a_check_without_a_verdict_warns_and_leaves_the_command_alone(self):
         unread = ("Codex's restrictions could not be checked before the start (", "); the peer ran unchecked.")

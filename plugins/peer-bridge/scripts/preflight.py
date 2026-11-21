@@ -46,7 +46,8 @@ async def codex_check(runner, command, home):
             raise Inconclusive(f"a check ended with status {code}")
         return code == 0, output.decode("utf-8", errors="replace")
 
-    flags = command[1:command.index("exec")]
+    # The last "exec": a top-level value, such as a model named exec, comes before it; nothing after it is "exec".
+    flags = command[1:len(command) - 1 - command[::-1].index("exec")]
     ok, listing = await accepted(*flags, "features", "list")
     if not ok:
         if (await accepted("features", "list"))[0]:
@@ -74,7 +75,7 @@ async def preflight(provider, command, runner):
     if provider != "codex":
         return []
     try:
-        with tempfile.TemporaryDirectory(prefix="peer-bridge-check-") as home:
+        with tempfile.TemporaryDirectory(prefix="peer-bridge-check-", ignore_cleanup_errors=True) as home:
             await codex_check(runner, command, home)
     except (Inconclusive, OSError, ValueError, UnicodeError) as exc:
         reason = str(exc) if isinstance(exc, Inconclusive) else "the check failed"

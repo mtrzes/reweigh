@@ -83,6 +83,13 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(thread_reader.git_common_dir(bare), bare)
         self.assertEqual(thread_reader.git_common_dir(bare / "hooks"), bare)
 
+    def test_a_folder_typed_in_another_case_is_the_same_repository(self):
+        main = git_repository(self.root / "main")
+        mistyped = self.root / "MAIN"
+        if not mistyped.is_dir():
+            self.skipTest("This volume tells file names apart by case.")
+        self.assertEqual(thread_reader.git_common_dir(mistyped), main / ".git")
+
     def test_a_git_pointer_counts_only_when_its_git_directory_points_back(self):
         main, outer = self.layouts()
         # A .git folder whose commondir names another repository.

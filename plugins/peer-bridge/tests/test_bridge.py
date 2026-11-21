@@ -830,6 +830,15 @@ class ConsultationTests(BridgeTestCase):
             self.assertIn(f"Read files only inside this checkout, whose root is {root},", prompt)
         self.assertNotIn("temporary checkout", unpinned)
 
+    async def test_a_pinned_folder_typed_in_another_case_is_consulted_in_its_checkout(self):
+        first, _ = await asyncio.to_thread(self.pinned_repository)
+        mistyped = self.root / self.project.name.upper() / "pkg"
+        if not mistyped.is_dir():
+            self.skipTest("This volume tells file names apart by case.")
+        reply = await self.consult(working_directory=str(mistyped), ref=first)
+        self.assertEqual(reply["commit"], first)
+        self.assertIn("Read files only inside this checkout, whose root is `..`,", self.calls()[-1]["prompt"])
+
     async def test_inherited_git_location_does_not_redirect_the_peer_from_its_checkout(self):
         first, _ = await asyncio.to_thread(self.pinned_repository)
         project_head = await asyncio.to_thread(git, self.project, "rev-parse", "HEAD")

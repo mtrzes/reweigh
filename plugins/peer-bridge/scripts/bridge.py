@@ -45,7 +45,7 @@ from thread_parsing import (
 )
 from thread_reader import (
     LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, layout_paths,
-    repository_layout, worktrees_inside,
+    nearest_git_entry, repository_layout, worktrees_inside,
 )
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
@@ -666,7 +666,8 @@ async def pinned_checkout(scope, directory, ref):
         await scope.git(worktree, f"--work-tree={worktree}", "read-tree", "--reset", "-u", "--no-sparse-checkout",
                         "--no-recurse-submodules", commit, failure="Cannot check out the ref in a temporary worktree.",
                         config=filters, timeout=preparation.left())
-        consulted = worktree / directory.relative_to(repository)
+        # Relative to the folder as the request spells it, which can differ from git's spelling of the same folder.
+        consulted = worktree / directory.relative_to(nearest_git_entry(directory))
         # A symlink at the ref could lead the peer out of the checkout.
         if not consulted.is_dir() or not consulted.resolve().is_relative_to(worktree.resolve()):
             raise BridgeError("working_directory does not exist at that ref.")
