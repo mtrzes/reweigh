@@ -56,31 +56,31 @@ class SettingsTests(unittest.TestCase):
     def test_state_directory(self):
         home = Path("/home/someone")
         cases = (
-            ({}, home / ".local/state/peer-bridge"),
-            ({"XDG_STATE_HOME": "/xdg"}, Path("/xdg/peer-bridge")),
-            ({"XDG_STATE_HOME": "relative"}, home / ".local/state/peer-bridge"),
-            ({"PEER_BRIDGE_STATE_DIR": "/private/state", "XDG_STATE_HOME": "/xdg"}, Path("/private/state")),
+            ({}, home / ".local/state/reweigh"),
+            ({"XDG_STATE_HOME": "/xdg"}, Path("/xdg/reweigh")),
+            ({"XDG_STATE_HOME": "relative"}, home / ".local/state/reweigh"),
+            ({"REWEIGH_STATE_DIR": "/private/state", "XDG_STATE_HOME": "/xdg"}, Path("/private/state")),
         )
         for environ, expected in cases:
             with self.subTest(environ=environ):
                 self.assertEqual(c.state_directory(environ, home), expected)
         with self.assertRaisesRegex(c.BridgeError, "must be an absolute path"):
-            c.state_directory({"PEER_BRIDGE_STATE_DIR": "relative"}, home)
+            c.state_directory({"REWEIGH_STATE_DIR": "relative"}, home)
 
     def test_consultation_timeout(self):
-        cases = (({}, None, 600), ({"PEER_BRIDGE_TIMEOUT_SECONDS": "30"}, None, 30),
-                 ({"PEER_BRIDGE_TIMEOUT_SECONDS": "30"}, 10, 10), ({}, 3600, 3600))
+        cases = (({}, None, 600), ({"REWEIGH_TIMEOUT_SECONDS": "30"}, None, 30),
+                 ({"REWEIGH_TIMEOUT_SECONDS": "30"}, 10, 10), ({}, 3600, 3600))
         for environ, timeout, expected in cases:
             with self.subTest(environ=environ, timeout=timeout):
                 self.assertEqual(c.consultation_timeout(environ, timeout), expected)
-        for environ, timeout in (({"PEER_BRIDGE_TIMEOUT_SECONDS": "soon"}, None), ({}, 0), ({}, 3601)):
+        for environ, timeout in (({"REWEIGH_TIMEOUT_SECONDS": "soon"}, None), ({}, 0), ({}, 3601)):
             with self.subTest(environ=environ, timeout=timeout):
                 with self.assertRaises(c.BridgeError):
                     c.consultation_timeout(environ, timeout)
 
     def test_executable_variable(self):
-        self.assertEqual(c.executable_variable("claude"), "PEER_BRIDGE_CLAUDE_BIN")
-        self.assertEqual(c.executable_variable("codex"), "PEER_BRIDGE_CODEX_BIN")
+        self.assertEqual(c.executable_variable("claude"), "REWEIGH_CLAUDE_BIN")
+        self.assertEqual(c.executable_variable("codex"), "REWEIGH_CODEX_BIN")
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -96,7 +96,7 @@ class EnvironmentTests(unittest.TestCase):
         result = c.peer_environment(environ)
         # Empty and relative PATH entries would search the consulted repository.
         self.assertEqual(result, {"PATH": "/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept",
-                                  "ANTHROPIC_API_KEY": "kept", "PEER_BRIDGE_ACTIVE": "1",
+                                  "ANTHROPIC_API_KEY": "kept", "REWEIGH_ACTIVE": "1",
                                   "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"})
         self.assertEqual(environ, original)
         self.assertEqual(c.peer_environment(environ, pinned=True)["GIT_NO_REPLACE_OBJECTS"], "1")
@@ -146,15 +146,15 @@ class ChoiceTests(unittest.TestCase):
                     c.check_choices(provider, model, effort)
 
     def test_a_call_overrides_the_environment_of_its_provider(self):
-        environ = {"PEER_BRIDGE_CODEX_MODEL": "env-model", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "low",
-                   "PEER_BRIDGE_CLAUDE_MODEL": "sonnet", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT": "high"}
+        environ = {"REWEIGH_CODEX_MODEL": "env-model", "REWEIGH_CODEX_REASONING_EFFORT": "low",
+                   "REWEIGH_CLAUDE_MODEL": "sonnet", "REWEIGH_CLAUDE_REASONING_EFFORT": "high"}
         cases = (("codex", {}, None, None, (None, None)), ("codex", environ, None, None, ("env-model", "low")),
                  ("codex", environ, "gpt-6-astra", None, ("gpt-6-astra", "low")),
                  ("codex", environ, None, "xhigh", ("env-model", "xhigh")),
-                 ("codex", {"PEER_BRIDGE_CODEX_MODEL": ""}, None, None, (None, None)),
+                 ("codex", {"REWEIGH_CODEX_MODEL": ""}, None, None, (None, None)),
                  ("claude", environ, None, None, ("sonnet", "high")),
                  ("claude", environ, "opus", None, ("opus", "high")),
-                 ("claude", {"PEER_BRIDGE_CODEX_MODEL": "env-model"}, None, None, (None, None)))
+                 ("claude", {"REWEIGH_CODEX_MODEL": "env-model"}, None, None, (None, None)))
         for provider, environment, model, effort, expected in cases:
             with self.subTest(provider=provider, environment=environment, model=model, effort=effort):
                 self.assertEqual(c.peer_choices(provider, environment, model, effort), expected)
@@ -220,7 +220,7 @@ class CommandTests(unittest.TestCase):
 
     def test_claude_command(self):
         policy = [
-            "/bin/claude", "--print", "--output-format", "json", "--name", "peer-bridge conv",
+            "/bin/claude", "--print", "--output-format", "json", "--name", "reweigh conv",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--tools", "Read,Glob,Grep,WebSearch,Skill,Agent", "--disallowed-tools", "mcp__*",
             "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-chrome",
@@ -246,7 +246,7 @@ class CommandTests(unittest.TestCase):
         extra = ["-c", "features.skill_mcp_dependency_install=false"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv"), [
             *sandbox, *disabled, "-c", 'web_search="cached"', "-c", 'shell_environment_policy.inherit="core"',
-            "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', *extra, "exec", "--json",
+            "-c", 'shell_environment_policy.set.REWEIGH_ACTIVE="1"', *extra, "exec", "--json",
             "--ignore-user-config", "--ignore-rules", "-",
         ])
         # The effort is quoted as one TOML string, so a crafted value cannot add another setting.
@@ -254,7 +254,7 @@ class CommandTests(unittest.TestCase):
                                   reasoning_effort='xhigh"\nsandbox_mode="danger', pinned=True)
         self.assertEqual(command, [
             *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="cached"',
-            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
+            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.REWEIGH_ACTIVE="1"',
             *extra, "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
             "-c", 'model_reasoning_effort="xhigh\\"\\nsandbox_mode=\\"danger"',
             "-c", 'mcp_servers."a\\"q".enabled=false', "-c", 'mcp_servers."b".enabled=false',
@@ -264,14 +264,14 @@ class CommandTests(unittest.TestCase):
         no_subagents = ["--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv", subagents=False), [
             *sandbox, *disabled, *no_subagents, "-c", 'web_search="cached"',
-            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
+            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.REWEIGH_ACTIVE="1"',
             *extra, "exec", "--json", "--ignore-user-config", "--ignore-rules", "-",
         ])
 
     def test_subagents_are_off_only_for_the_exact_value_0(self):
         for value, enabled in ((None, True), ("0", False), ("1", True), ("", True), ("false", True), (" 0", True)):
             with self.subTest(value=value):
-                environ = {} if value is None else {"PEER_BRIDGE_SUBAGENTS": value}
+                environ = {} if value is None else {"REWEIGH_SUBAGENTS": value}
                 self.assertEqual(c.subagents_enabled(environ), enabled)
 
 
@@ -472,7 +472,7 @@ class OutcomeTests(unittest.TestCase):
             ("claude", F(resuming=False, history_present=False), "GENERIC"),
             ("claude", F(resuming=True, history_present=None), "GENERIC"),
             ("claude", F(unrecognized_model=True),
-             "Check the model requested, PEER_BRIDGE_CLAUDE_MODEL, or the model in Claude Code's settings"),
+             "Check the model requested, REWEIGH_CLAUDE_MODEL, or the model in Claude Code's settings"),
             ("codex", F(in_git_repository=False, model_setting=True), "not inside a git repository"),
             ("claude", F(in_git_repository=False), "GENERIC"),
             ("codex", F(model_setting=True), "GENERIC" + c.MODEL_HINT),

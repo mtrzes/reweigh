@@ -6,4 +6,4 @@ __pycache__/
 .claude/worktrees/
 .claude/settings.local.json
 # The backlog is kept locally only.
-plugins/peer-bridge/TODO.md
+plugins/reweigh/TODO.md

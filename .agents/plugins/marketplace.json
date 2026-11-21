@@ -1,11 +1,11 @@
 {
-  "name": "peer-bridge",
+  "name": "reweigh",
   "plugins": [
     {
-      "name": "peer-bridge",
+      "name": "reweigh",
       "source": {
         "source": "local",
-        "path": "./plugins/peer-bridge"
+        "path": "./plugins/reweigh"
       },
       "policy": {
         "installation": "AVAILABLE",

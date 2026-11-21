@@ -1,4 +1,4 @@
-# peer-bridge
+# reweigh
 
 Consult Codex from Claude Code or Claude Code from Codex through local MCP tools. Each consultation starts a dedicated
 CLI conversation; a bridge conversation ID lets follow-ups reuse its history. The bridge uses existing CLI authentication
@@ -23,7 +23,7 @@ On Linux, only the test suites run, in CI, with Python 3.11 and 3.15; the releas
 Code.
 
 On macOS, ChatGPT.app bundles the Codex CLI at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
-without adding it to `PATH`. When `PEER_BRIDGE_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
+without adding it to `PATH`. When `REWEIGH_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
 bundled CLI, or the same path under `~/Applications`.
 
 ### Claude Code to Codex
@@ -31,14 +31,14 @@ bundled CLI, or the same path under `~/Applications`.
 Install the plugin in Claude Code 2.1.275 or later:
 
 ```text
-/plugin install peer-bridge --marketplace mtrzes/peer-bridge
+/plugin install reweigh --marketplace mtrzes/reweigh
 ```
 
 On earlier versions, add the marketplace first:
 
 ```text
-/plugin marketplace add mtrzes/peer-bridge
-/plugin install peer-bridge@peer-bridge
+/plugin marketplace add mtrzes/reweigh
+/plugin install reweigh@reweigh
 ```
 
 The plugin launches the bridge with `--peer codex`. Restart Claude Code if the new server does not appear in `/mcp`.
@@ -48,16 +48,16 @@ The plugin launches the bridge with `--peer codex`. Restart Claude Code if the n
 The repository is also a Codex plugin marketplace. Add it and install the plugin:
 
 ```sh
-codex plugin marketplace add mtrzes/peer-bridge
-codex plugin add peer-bridge@peer-bridge
+codex plugin marketplace add mtrzes/reweigh
+codex plugin add reweigh@reweigh
 ```
 
 The plugin launches the bridge with `--peer claude` and brings the same `consult-peer` skill as the Claude Code plugin.
-Codex installs a copy of the plugin; after updating the repository, run `codex plugin marketplace upgrade peer-bridge`
+Codex installs a copy of the plugin; after updating the repository, run `codex plugin marketplace upgrade reweigh`
 and add the plugin again. Restart Codex to load it.
 
 Without the plugin, register the script directly and give it the same timeouts in the generated
-`[mcp_servers.peer-bridge]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`),
+`[mcp_servers.reweigh]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`),
 and the `env_vars` list from the plugin's `codex-mcp.json`: Codex passes an MCP server only the environment variables
 it names. Settings Claude Code needs from the environment, such as a Bedrock or Vertex backend, go in the `env` of
 `~/.claude/settings.json`, which the Claude peer loads. `--directory` points `uv` at the plugin, so it never runs a
@@ -65,7 +65,7 @@ Python environment from the folder Codex starts in, and `--locked` refuses a loc
 script; both were checked with uv 0.13.8.
 
 ```sh
-codex mcp add peer-bridge -- uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py --peer claude
+codex mcp add reweigh -- uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-config --script /absolute/path/plugins/reweigh/scripts/bridge.py --peer claude
 ```
 
 The startup allowance covers the first `uv` dependency installation. For Claude Code versions that support
@@ -86,8 +86,8 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `conversation_id` | Optional bridge UUID returned by an earlier request for this peer and directory. |
 | `ref` | Optional commit, branch or tag to consult instead of the working tree; see [Pinned refs](#pinned-refs). |
 | `seed_thread` | Optional ID or name of a thread in the peer's app (a Codex thread when asking Codex, a Claude Code session when asking Claude Code) whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
-| `model` | Optional: the model for this call, such as `gpt-6-astra` for Codex or `opus` for Claude; overrides `PEER_BRIDGE_CODEX_MODEL` or `PEER_BRIDGE_CLAUDE_MODEL`. |
-| `reasoning_effort` | Optional: the reasoning effort for this call, such as `high` or `xhigh` (Codex) or `high` or `max` (Claude); overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT` or `PEER_BRIDGE_CLAUDE_REASONING_EFFORT`. |
+| `model` | Optional: the model for this call, such as `gpt-6-astra` for Codex or `opus` for Claude; overrides `REWEIGH_CODEX_MODEL` or `REWEIGH_CLAUDE_MODEL`. |
+| `reasoning_effort` | Optional: the reasoning effort for this call, such as `high` or `xhigh` (Codex) or `high` or `max` (Claude); overrides `REWEIGH_CODEX_REASONING_EFFORT` or `REWEIGH_CLAUDE_REASONING_EFFORT`. |
 | `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`; a `CLAUDE.md` in one of them is loaded as instructions too. Refused for a pinned consultation, whether `ref` is given or the conversation is already pinned. A Codex peer already reads any file you can. |
 
 `list_codex_models` (and the `codex-models` command) lists the models this Codex account offers, with each model's
@@ -174,7 +174,7 @@ reads its result. The runner deletes the request holding the prompt and context 
 The `ask` command runs a consultation from a shell and prints its result when it finishes:
 
 ```sh
-uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py ask \
+uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-config --script /absolute/path/plugins/reweigh/scripts/bridge.py ask \
   --provider codex --working-directory /absolute/path/to/project --context-file "$PWD/review-context.md" < question.md
 ```
 
@@ -191,9 +191,9 @@ start and deletes the job's prompt and context. `job --job-id ID [--wait SECONDS
 `cancel --job-id ID` match `get_consultation` and `cancel_consultation`:
 
 ```sh
-uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py start \
+uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-config --script /absolute/path/plugins/reweigh/scripts/bridge.py start \
   --provider codex --working-directory /absolute/path/to/project < question.md
-uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py job --job-id JOB_ID --wait 60
+uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-config --script /absolute/path/plugins/reweigh/scripts/bridge.py job --job-id JOB_ID --wait 60
 ```
 
 Use the peer's response as advice. The calling agent assesses it and applies the project's permission and review rules
@@ -201,7 +201,7 @@ before making changes or posting replies.
 
 ## Reading desktop threads
 
-These tools are experimental and off unless `PEER_BRIDGE_THREADS=1` is set for the MCP server: they parse each app's
+These tools are experimental and off unless `REWEIGH_THREADS=1` is set for the MCP server: they parse each app's
 internal history files, which can change in any release, and refuse a file they cannot be sure of rather than guess.
 `seed_thread` is off with them. In Claude Code, set the variable in the environment Claude Code starts from; the Codex
 plugin forwards it from the environment Codex starts from.
@@ -240,9 +240,9 @@ bridge reads its three latest agent messages and adds them to the new consultati
 material. The CLI has the same reads:
 
 ```sh
-uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py threads \
+uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-config --script /absolute/path/plugins/reweigh/scripts/bridge.py threads \
   --provider codex --working-directory /absolute/path/to/project
-uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py read-thread \
+uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-config --script /absolute/path/plugins/reweigh/scripts/bridge.py read-thread \
   --provider codex --working-directory /absolute/path/to/project --thread "Review payment retries"
 ```
 
@@ -256,7 +256,7 @@ uncounted. A history folder the reader cannot list may hold threads of this repo
 
 ## Runtime boundaries
 
-Claude runs as `claude -p` with `Read`, `Glob`, `Grep`, `WebSearch` and, unless `PEER_BRIDGE_SUBAGENTS=0`, `Skill`
+Claude runs as `claude -p` with `Read`, `Glob`, `Grep`, `WebSearch` and, unless `REWEIGH_SUBAGENTS=0`, `Skill`
 and `Agent`, in `dontAsk` mode, and loads only the user's own settings (`--setting-sources user`), so a consulted
 repository's `.claude/settings.json` cannot run commands; its `CLAUDE.md` loads through `--add-dir`. It reads inside the
 consulted directory, any `extra_directories`, Claude Code's own temporary folder, and wherever the user's own settings
@@ -266,14 +266,14 @@ to Anthropic.
 Codex runs as `codex exec` in its read-only sandbox, without the user's config or "always allow" rules, and its
 commands see only the core environment, so tokens in the user's environment do not reach them. It can read any file the
 user can read. Saved Codex authentication and project instructions still load; user-level integrations and model
-preferences do not, so choose a model per call with `model`, or set `PEER_BRIDGE_CODEX_MODEL`. Managed requirements
+preferences do not, so choose a model per call with `model`, or set `REWEIGH_CODEX_MODEL`. Managed requirements
 still apply and may refuse the consultation configuration.
 
 Whatever a peer reads goes to its model provider, and each peer CLI keeps its own authentication, logs and transcript
 outside the project. The full list of what the bridge enforces, and what it does not, is in
-[SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md).
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/SECURITY.md).
 
-Claude consultations are saved as CLI sessions for the supplied project and named `peer-bridge <conversation_id>`.
+Claude consultations are saved as CLI sessions for the supplied project and named `reweigh <conversation_id>`.
 They remain resumable by their Claude session ID. The [Claude session documentation][claude-sessions] excludes print-mode
 sessions from the normal resume picker and `claude --continue`; transcript files alone do not establish picker
 visibility. Bridge follow-ups should use the bridge conversation ID so the consultation restrictions are applied again.
@@ -284,17 +284,17 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 
 | Environment variable | Default or purpose |
 |----------------------|--------------------|
-| `PEER_BRIDGE_TIMEOUT_SECONDS` | Consultation timeout in seconds, more than 0 and at most `3600`; defaults to `600`. |
-| `PEER_BRIDGE_STATE_DIR` | Overrides the private state directory (conversation records and locks, `jobs/`, `worktrees/`); must be an absolute path. |
-| `XDG_STATE_HOME` | When set to an absolute path, bridge state lives at `$XDG_STATE_HOME/peer-bridge`; otherwise at `~/.local/state/peer-bridge`. |
-| `PEER_BRIDGE_CLAUDE_BIN` | Claude Code executable; defaults to `claude` on `PATH`. |
-| `PEER_BRIDGE_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI bundled with ChatGPT.app. A set value that does not resolve is an error, not a fallback. |
-| `PEER_BRIDGE_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
-| `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The catalogue check is described under [Consultation requests](#consultation-requests). |
-| `PEER_BRIDGE_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
-| `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` | Optional Claude effort, such as `high` or `max`, passed as `--effort`; a per-call `reasoning_effort` overrides it. |
-| `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
-| `PEER_BRIDGE_SUBAGENTS` | `0` stops a peer from starting sub-agents (for Claude, it removes Agent and Skill); any other value, or none, lets it start them. Each one adds to the consultation's cost and time; SECURITY.md says what is known about their restrictions. |
+| `REWEIGH_TIMEOUT_SECONDS` | Consultation timeout in seconds, more than 0 and at most `3600`; defaults to `600`. |
+| `REWEIGH_STATE_DIR` | Overrides the private state directory (conversation records and locks, `jobs/`, `worktrees/`); must be an absolute path. |
+| `XDG_STATE_HOME` | When set to an absolute path, bridge state lives at `$XDG_STATE_HOME/reweigh`; otherwise at `~/.local/state/reweigh`. |
+| `REWEIGH_CLAUDE_BIN` | Claude Code executable; defaults to `claude` on `PATH`. |
+| `REWEIGH_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI bundled with ChatGPT.app. A set value that does not resolve is an error, not a fallback. |
+| `REWEIGH_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
+| `REWEIGH_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The catalogue check is described under [Consultation requests](#consultation-requests). |
+| `REWEIGH_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
+| `REWEIGH_CLAUDE_REASONING_EFFORT` | Optional Claude effort, such as `high` or `max`, passed as `--effort`; a per-call `reasoning_effort` overrides it. |
+| `REWEIGH_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
+| `REWEIGH_SUBAGENTS` | `0` stops a peer from starting sub-agents (for Claude, it removes Agent and Skill); any other value, or none, lets it start them. Each one adds to the consultation's cost and time; SECURITY.md says what is known about their restrictions. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 
@@ -304,7 +304,7 @@ After increasing the bridge timeout, increase the host's MCP tool timeout to lea
 
 The state directory must be dedicated to the bridge and deny group and other access. New state directories are created
 with mode `0700`; an existing directory with broader mode permissions is rejected without changing its permissions. When
-setting `PEER_BRIDGE_STATE_DIR`, choose a private directory rather than a shared folder.
+setting `REWEIGH_STATE_DIR`, choose a private directory rather than a shared folder.
 
 Bridge records are retained until explicitly removed. A successful consultation creates a `.json` record and a `.lock`
 file with the same bridge UUID. A new failed consultation can leave only the lock file. There is no automatic expiry,
@@ -333,11 +333,11 @@ uv venv --managed-python --python 3.11 .venv
 ```
 
 ```sh
-VIRTUAL_ENV="$PWD/.venv" uv sync --active --locked --script plugins/peer-bridge/scripts/bridge.py
+VIRTUAL_ENV="$PWD/.venv" uv sync --active --locked --script plugins/reweigh/scripts/bridge.py
 ```
 
 ```sh
-.venv/bin/python -m unittest discover -s plugins/peer-bridge/tests
+.venv/bin/python -m unittest discover -s plugins/reweigh/tests
 ```
 
 ```sh
@@ -349,13 +349,13 @@ discovered test ran exactly once and passed. It is optional: the serial commands
 commit, and CI runs only those.
 
 ```sh
-.venv/bin/python dev/run_tests.py -s plugins/peer-bridge/tests
+.venv/bin/python dev/run_tests.py -s plugins/reweigh/tests
 ```
 
 The tests use simulated peer executables, synthetic thread histories and temporary state; they call no model and read
 no real history or user settings. The contract tests also run the installed Codex and Claude Code, each in a temporary
 home, so machine-wide configuration such as `/etc/codex/config.toml` still applies to them.
-[ADR 0002](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/docs/adr/0002-test-architecture.md) sets the rules
+[ADR 0002](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/docs/adr/0002-test-architecture.md) sets the rules
 a change to the tests follows.
 
 The adapters follow the official [Claude headless interface](https://code.claude.com/docs/en/headless) and

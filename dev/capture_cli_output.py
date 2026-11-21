@@ -34,14 +34,14 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURES = ROOT / "plugins" / "peer-bridge" / "tests" / "fixtures" / "cli"
-sys.path.insert(0, str(ROOT / "plugins" / "peer-bridge" / "scripts"))
+FIXTURES = ROOT / "plugins" / "reweigh" / "tests" / "fixtures" / "cli"
+sys.path.insert(0, str(ROOT / "plugins" / "reweigh" / "scripts"))
 import consultation as c  # noqa: E402
 
 REPLY = "PEER-BRIDGE-CAPTURE-OK"
 PROMPT = f"Reply with exactly {REPLY} and nothing else. Do not read files or run commands."
 FOLLOW_UP = f"Reply with exactly {REPLY} again, and nothing else."
-UNKNOWN_MODEL = "peer-bridge-no-such-model"
+UNKNOWN_MODEL = "reweigh-no-such-model"
 # bridge.py's SIGN_IN_PROBES; bridge.py needs the MCP package, which this tool does without.
 SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 KEPT = {"type", "subtype", "status", "stop_reason", "visibility", "slug", "effort", "default_reasoning_level"}
@@ -250,7 +250,7 @@ def raw_captures(parent):
 def main():
     versions = {name: run([executable(name), "--version"], ROOT, os.environ)[1].strip() for name in ("codex", "claude")}
     scrub = Scrubber()
-    with tempfile.TemporaryDirectory(prefix="peer-bridge-capture-") as parent:
+    with tempfile.TemporaryDirectory(prefix="reweigh-capture-") as parent:
         raw = raw_captures(parent)
     signed_in = raw.get("claude-auth-status-signed-in", (None, None, "", ""))[2]
     try:

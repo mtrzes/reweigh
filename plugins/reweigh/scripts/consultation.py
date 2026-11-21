@@ -14,7 +14,7 @@ from pathlib import Path
 
 from thread_parsing import GIT_LOCATION_ENV
 
-ACTIVE_ENV = "PEER_BRIDGE_ACTIVE"
+ACTIVE_ENV = "REWEIGH_ACTIVE"
 CLAUDE_HOST_SESSION_ENV = (
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -48,14 +48,14 @@ CODEX_EXTRA_DISABLED_FEATURES = ("skill_mcp_dependency_install",)
 # A peer may start sub-agents, which keep its restrictions, unless this is set to exactly 0. Neither
 # --disable multi_agent nor --disable multi_agent_v2 stops them; removing v2's native tools does, and Codex refuses
 # to start when it no longer knows that key, so the switch never fails open.
-SUBAGENTS_ENV = "PEER_BRIDGE_SUBAGENTS"
+SUBAGENTS_ENV = "REWEIGH_SUBAGENTS"
 CODEX_NO_SUBAGENTS = ("--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true")
 PROVIDER_NAMES = {"claude": "Claude Code", "codex": "Codex"}
-MODEL_SETTINGS = {"claude": "the model requested, PEER_BRIDGE_CLAUDE_MODEL, or the model in Claude Code's settings",
-                  "codex": "PEER_BRIDGE_CODEX_MODEL"}
+MODEL_SETTINGS = {"claude": "the model requested, REWEIGH_CLAUDE_MODEL, or the model in Claude Code's settings",
+                  "codex": "REWEIGH_CODEX_MODEL"}
 # The environment defaults for a consultation's model and reasoning effort, per provider.
-CHOICE_ENV = {"claude": ("PEER_BRIDGE_CLAUDE_MODEL", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT"),
-              "codex": ("PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT")}
+CHOICE_ENV = {"claude": ("REWEIGH_CLAUDE_MODEL", "REWEIGH_CLAUDE_REASONING_EFFORT"),
+              "codex": ("REWEIGH_CODEX_MODEL", "REWEIGH_CODEX_REASONING_EFFORT")}
 # Claude Code loads CLAUDE.md from a directory given with --add-dir only when this is set; the consulted directory is
 # passed that way, so its CLAUDE.md loads while its .claude settings, which can run commands, do not.
 CLAUDE_MD_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
@@ -251,26 +251,26 @@ def check_thread_request(thread, max_messages):
 
 
 def state_directory(environ, home):
-    """The bridge's state directory, from PEER_BRIDGE_STATE_DIR, else XDG_STATE_HOME, else ~/.local/state."""
+    """The bridge's state directory, from REWEIGH_STATE_DIR, else XDG_STATE_HOME, else ~/.local/state."""
     # A relative path would resolve against whichever directory each process starts in, git's included.
-    override = environ.get("PEER_BRIDGE_STATE_DIR")
+    override = environ.get("REWEIGH_STATE_DIR")
     if override:
         directory = Path(override).expanduser()
         if not directory.is_absolute():
-            raise BridgeError("PEER_BRIDGE_STATE_DIR must be an absolute path.")
+            raise BridgeError("REWEIGH_STATE_DIR must be an absolute path.")
         return directory
     # The XDG Base Directory specification says to ignore a relative XDG_STATE_HOME.
     root = Path(environ.get("XDG_STATE_HOME") or "")
     if not root.is_absolute():
         root = Path(home) / ".local" / "state"
-    return root / "peer-bridge"
+    return root / "reweigh"
 
 
 def consultation_timeout(environ, timeout=None):
-    """The consultation timeout in seconds: the given one, else PEER_BRIDGE_TIMEOUT_SECONDS, else the default."""
+    """The consultation timeout in seconds: the given one, else REWEIGH_TIMEOUT_SECONDS, else the default."""
     if timeout is None:
         try:
-            timeout = int(environ.get("PEER_BRIDGE_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
+            timeout = int(environ.get("REWEIGH_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
         except ValueError as exc:
             raise BridgeError("Consultation timeout must be an integer number of seconds.") from exc
     if not 0 < timeout <= MAX_TIMEOUT_SECONDS:
@@ -280,7 +280,7 @@ def consultation_timeout(environ, timeout=None):
 
 def executable_variable(provider):
     """The environment variable that names the provider's CLI."""
-    return f"PEER_BRIDGE_{provider.upper()}_BIN"
+    return f"REWEIGH_{provider.upper()}_BIN"
 
 
 # Environments
@@ -330,7 +330,7 @@ def filter_overrides(listing):
             for setting, value in (("smudge", ""), ("process", ""), ("required", "false"))]
 
 
-THREADS_ENV = "PEER_BRIDGE_THREADS"
+THREADS_ENV = "REWEIGH_THREADS"
 THREADS_OFF = (f"Reading the other app's threads is off. It is experimental; set {THREADS_ENV}=1 for the MCP server "
                "to turn it on, with seed_thread.")
 
@@ -377,7 +377,7 @@ def peer_environment(environ, pinned=False):
 # The command is never changed. The checks read exit statuses and exact tokens only.
 
 RESTRICTION_LOST = ("{name} no longer accepts {setting}, which the bridge passes to {purpose}. The consultation was "
-                    "not started; update peer-bridge or check {name}'s release notes.")
+                    "not started; update reweigh or check {name}'s release notes.")
 UNVERIFIED = "{name}'s restrictions could not be checked before the start ({reason}); the peer ran unchecked."
 CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
 # Codex keys whose wrong-type value Codex refuses while it knows the key, and accepts silently once it does not.
@@ -445,7 +445,7 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
         tools = [*CLAUDE_TOOLS, *CLAUDE_SUBAGENT_TOOLS] if subagents else list(CLAUDE_TOOLS)
         command = [
             executable, "--print", "--output-format", "json",
-            "--name", f"peer-bridge {conversation_id}",
+            "--name", f"reweigh {conversation_id}",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
             # No --allowed-tools: the user's own allow rules decide what else Read may reach, as in their sessions.
             "--tools", ",".join(tools), "--disallowed-tools", "mcp__*", "--strict-mcp-config",

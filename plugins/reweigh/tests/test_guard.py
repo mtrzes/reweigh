@@ -59,7 +59,7 @@ class OwnedDescriptors:
 
 class GuardTests(OwnedDescriptors, unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-guard-")
+        temporary = tempfile.TemporaryDirectory(prefix="reweigh-guard-")
         self.addCleanup(temporary.cleanup)
         self.folder = Path(temporary.name)
         self.peer = self.folder / "peer.py"

@@ -174,7 +174,7 @@ time.sleep({4 * DEADLINE_SECONDS})
         ready = self.root / "command.pid"
 
         for name, settings in (
-            ("peer", {"PEER_BRIDGE_CLAUDE_BIN": str(command)}),
+            ("peer", {"REWEIGH_CLAUDE_BIN": str(command)}),
             ("read-tree", {"PATH": os.pathsep.join((str(bin_dir), os.environ["PATH"]))}),
         ):
             with self.subTest(command=name):

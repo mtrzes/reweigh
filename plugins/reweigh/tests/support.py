@@ -28,9 +28,9 @@ POLL_SECONDS = 0.01
 PRIVATE_MARKERS = ("SUBAGENT TRAFFIC", "TOOL OUTPUT", "PRIVATE REASONING", "USER PROMPT")
 # Inherited settings that would change what a test exercises.
 UNSET = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "XDG_STATE_HOME", bridge.ACTIVE_ENV,
-         "PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT", "PEER_BRIDGE_TIMEOUT_SECONDS",
-         "PEER_BRIDGE_THREADS", "PEER_BRIDGE_CLAUDE_MODEL", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT",
-         "PEER_BRIDGE_SUBAGENTS", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR")
+         "REWEIGH_CODEX_MODEL", "REWEIGH_CODEX_REASONING_EFFORT", "REWEIGH_TIMEOUT_SECONDS",
+         "REWEIGH_THREADS", "REWEIGH_CLAUDE_MODEL", "REWEIGH_CLAUDE_REASONING_EFFORT",
+         "REWEIGH_SUBAGENTS", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR")
 # Families of the same: git's numbered config pairs and traces, and every switch of the stand-in peer.
 UNSET_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE", "SIMULATED_")
 GIT_ISOLATION = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -42,7 +42,7 @@ def isolate(test, root, **variables):
     """Point every home, state and configuration lookup of this process and its children inside root."""
     environment = {
         "HOME": str(root / "home"), "CODEX_HOME": str(root / "codex-home"),
-        "CLAUDE_CONFIG_DIR": str(root / "claude-home"), "PEER_BRIDGE_STATE_DIR": str(root / "state"),
+        "CLAUDE_CONFIG_DIR": str(root / "claude-home"), "REWEIGH_STATE_DIR": str(root / "state"),
         **GIT_ISOLATION, **variables,
     }
     patcher = patch.dict(os.environ, environment)
@@ -164,7 +164,7 @@ PEER_SOURCE = textwrap.dedent('''\
     with open(os.environ["SIMULATED_PEER_LOG"], "a", encoding="utf-8") as log:
         log.write(json.dumps({
             "provider": provider, "executable": sys.argv[0], "arguments": arguments, "prompt": prompt,
-            "cwd": os.getcwd(), "session": session, "active": os.environ.get("PEER_BRIDGE_ACTIVE"),
+            "cwd": os.getcwd(), "session": session, "active": os.environ.get("REWEIGH_ACTIVE"),
             "claudecode_present": "CLAUDECODE" in os.environ,
             "marker": Path("marker.txt").read_text() if Path("marker.txt").exists() else None,
             "git_location": sorted(name for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
@@ -257,7 +257,7 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
     """A bridge whose peers are the stand-in CLI, with every home, state and git setting inside a temporary root."""
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-tests-")
+        temporary = tempfile.TemporaryDirectory(prefix="reweigh-tests-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         self.project, self.other_project = self.root / "project", self.root / "other-project"
@@ -269,10 +269,10 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
         self.peer.write_text(f"#!{sys.executable}\n{PEER_SOURCE}", encoding="utf-8")
         self.peer.chmod(0o700)
         isolate(self, self.root, **{
-            "PEER_BRIDGE_CLAUDE_BIN": str(self.peer), "PEER_BRIDGE_CODEX_BIN": str(self.peer),
-            "PEER_BRIDGE_TIMEOUT_SECONDS": str(DEADLINE_SECONDS), "SIMULATED_PEER_MODE": "success",
+            "REWEIGH_CLAUDE_BIN": str(self.peer), "REWEIGH_CODEX_BIN": str(self.peer),
+            "REWEIGH_TIMEOUT_SECONDS": str(DEADLINE_SECONDS), "SIMULATED_PEER_MODE": "success",
             "SIMULATED_PEER_LOG": str(self.log), "SIMULATED_PEER_PID_DIR": str(self.root),
-            "CLAUDECODE": "test-parent-marker", "PEER_BRIDGE_THREADS": "1",
+            "CLAUDECODE": "test-parent-marker", "REWEIGH_THREADS": "1",
         })
         self.addCleanup(self.kill_recorded_processes)
         self.store = bridge.SessionStore(self.state)

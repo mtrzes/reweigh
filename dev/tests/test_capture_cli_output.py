@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT / "dev"), str(ROOT / "plugins" / "peer-bridge" / "scripts")]
+sys.path[:0] = [str(ROOT / "dev"), str(ROOT / "plugins" / "reweigh" / "scripts")]
 import capture_cli_output as capture  # noqa: E402
 
 THREAD = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"

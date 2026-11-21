@@ -5,7 +5,7 @@ and what CI runs; this one gives the same verdict sooner. It discovers the suite
 to worker processes, and fails unless every discovered test ran exactly once and passed. Tests share no process, so
 a test that leaks state into the next one in its process still shows, in the order its worker runs them.
 
-    .venv/bin/python dev/run_tests.py -s plugins/peer-bridge/tests
+    .venv/bin/python dev/run_tests.py -s plugins/reweigh/tests
     .venv/bin/python dev/run_tests.py -s dev/tests -t dev/tests
 
 A green run prints one line. A red one prints each failing worker's tracebacks and names any test that did not run,

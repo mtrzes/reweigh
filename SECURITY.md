@@ -1,13 +1,13 @@
 # Security
 
-peer-bridge lets one coding agent ask another a question. It is built so that the peer it starts cannot change
+reweigh lets one coding agent ask another a question. It is built so that the peer it starts cannot change
 anything: it does not make what the peer reads, or what the agents do with the reply, safe. This page says where that
 line runs.
 
 ## What the bridge enforces
 
 - **The peer cannot write.** Claude runs with the read and search tools the
-  [README](plugins/peer-bridge/README.md#runtime-boundaries) lists, in `dontAsk` mode, with no MCP servers or project
+  [README](plugins/reweigh/README.md#runtime-boundaries) lists, in `dontAsk` mode, with no MCP servers or project
   settings, and ordinary hooks disabled; administrator-managed hooks follow Claude Code's managed policy. Codex runs in
   its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers, skills' MCP installs or apps,
   and with web search limited to cached results from OpenAI's index. A peer that tries to edit, run a command that
@@ -15,7 +15,7 @@ line runs.
   chooses those restrictions and checks the exact command line in its tests. The one known write, a Claude agent type
   with worktree isolation, is under Sub-agents below.
 - **The restrictions are checked against the installed CLIs.** Before each Codex consultation, a lost restriction
-  refuses the call; [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md#one-consultation) says how it is checked. When
+  refuses the call; [HOW-IT-WORKS](plugins/reweigh/HOW-IT-WORKS.md#one-consultation) says how it is checked. When
   the check cannot tell, the peer starts if time remains and a successful result carries a warning. Claude Code's
   restrictions are checked only by the contract tests, not before each start.
 - **What a consulted repository can and cannot do.** It cannot make the bridge run its code (a Codex peer may run it
@@ -69,15 +69,15 @@ line runs.
   seeded threads can steer the peer. Its reply is advice from a model that may have read hostile text; check it before
   acting on it. Opening a link, loading a remote image, or running a command from a reply can send private data to a
   third party.
-- **Sub-agents.** A peer may start sub-agents unless `PEER_BRIDGE_SUBAGENTS=0`. Each reads the repository's
+- **Sub-agents.** A peer may start sub-agents unless `REWEIGH_SUBAGENTS=0`. Each reads the repository's
   instructions too, and each adds to the consultation's cost and time. That they keep the peer's restrictions is an
   observation, not a tested guarantee: a Codex sub-agent was seen with the read-only sandbox, and, from reading
   Claude Code's code, `--tools` also bounds its sub-agents. One of your own Claude agent types that sets
   `isolation: worktree` creates a git worktree in the consulted repository when the peer starts it: a write, which
-  `PEER_BRIDGE_SUBAGENTS=0` avoids, as it also removes Skill, since a skill can fork a sub-agent.
+  `REWEIGH_SUBAGENTS=0` avoids, as it also removes Skill, since a skill can fork a sub-agent.
 - **Codex threads continued elsewhere.** A Codex thread is placed in a repository by the working directory its session
   started in. Turns it later ran in another directory, for example after resuming it elsewhere, are returned with it.
-  This is one reason the thread tools are off unless `PEER_BRIDGE_THREADS=1`.
+  This is one reason the thread tools are off unless `REWEIGH_THREADS=1`.
 - **The lead agent.** A lead agent can route any question it likes through a peer, including one that reads files its
   own rules would deny it, and can list another repository's threads by naming its directory.
 - **Tokens in the environment.** Commands Codex runs see only the core environment, but both peer CLIs inherit the

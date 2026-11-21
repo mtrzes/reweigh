@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "peer-bridge": {
+    "reweigh": {
       "command": "uv",
       "args": [
         "--directory",
