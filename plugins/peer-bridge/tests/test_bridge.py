@@ -32,6 +32,67 @@ from thread_parsing import HistoryLookup  # noqa: E402
 
 
 class ConsultationTests(BridgeTestCase):
+    async def test_the_pre_launch_check_decides_what_starts_within_the_peer_s_budget(self):
+        # It sees the provider and the command that then runs, and its warnings reach the caller.
+        checked = []
+
+        async def warning(provider, command, runner):
+            checked.append((provider, command))
+            return ["Lost a capability."]
+
+        self.client.preflight = warning
+        self.assertEqual((await self.consult("codex"))["warnings"], ["Lost a capability."])
+        [(provider, command)] = checked
+        self.assertEqual((provider, command[1:]), ("codex", self.calls()[-1]["arguments"]))
+
+        # A refusal starts no peer.
+        async def refusal(provider, command, runner):
+            raise bridge.BridgeError("Codex no longer accepts --disable hooks.")
+
+        self.client.preflight, calls = refusal, len(self.calls())
+        with self.assertRaisesRegex(bridge.BridgeError, "no longer accepts --disable hooks"):
+            await self.consult("codex")
+        self.assertEqual(len(self.calls()), calls)
+
+        # The check and the peer share one timeout: the peer gets what the check left, and nothing starts once it is
+        # spent, the check's own commands included.
+        clock, peer_timeouts, check_timeouts, runs = SimpleNamespace(now=100.0), [], [], []
+
+        async def recording(command, prompt, directory, timeout, **options):
+            (peer_timeouts if prompt is not None else runs).append(timeout)
+            return await bridge.run_command(command, prompt, directory, timeout, **options)
+
+        half = self.client.timeout / 2
+        for spent, expected in ((half, [self.client.timeout - half]), (self.client.timeout + 1, [])):
+            async def slow(provider, command, runner):
+                clock.now += spent
+                if spent > self.client.timeout:
+                    with self.assertRaises(bridge.CommandTimeout):
+                        await runner([command[0], "--version"], None, self.project, 5, {})
+                else:  # a check command that asks for the whole timeout gets only what is left
+                    await runner([sys.executable, "-c", ""], None, self.project, self.client.timeout, {})
+                    check_timeouts.append(self.client.timeout - spent)
+                return []
+
+            self.client.preflight, peer_timeouts[:] = slow, []
+            self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
+            with self.subTest(spent=spent):
+                if expected:
+                    await self.consult("codex")
+                else:
+                    with self.assertRaisesRegex(bridge.BridgeError, "timed out"):
+                        await self.consult("codex")
+                self.assertEqual(peer_timeouts, expected)
+        self.assertEqual(runs, check_timeouts)  # the check's own command was held to what was left
+
+    def test_the_sub_agent_switch_reaches_both_commands(self):
+        with patch.dict(os.environ, {"PEER_BRIDGE_SUBAGENTS": "0"}):
+            claude = bridge.command_for("claude", self.project, None, "conv")
+            codex = bridge.command_for("codex", self.project, None, "conv")
+        self.assertEqual(claude[claude.index("--tools") + 1], "Read,Glob,Grep,WebSearch")
+        self.assertIn("features.multi_agent_v2.disable_native_tools=true", codex)
+        self.assertIn("multi_agent", codex[codex.index("--disable"):codex.index("exec")])
+
     async def test_both_peers_resume_their_own_conversation_with_context(self):
         for provider in ("claude", "codex"):
             with self.subTest(provider=provider):
@@ -74,8 +135,8 @@ class ConsultationTests(BridgeTestCase):
         self.assertIn('model_reasoning_effort="xhigh"', arguments)
         self.assertEqual((answer["model"], answer["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
         calls = len(self.calls())
-        with self.assertRaisesRegex(bridge.BridgeError, "Codex consultations only"):
-            await self.consult("claude", model="opus")
+        with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
+            await self.consult("codex", extra_directories=[str(self.root)])
         # With Codex's catalogue readable, a value it does not list is refused before Codex starts.
         self.codex_home.mkdir(parents=True, exist_ok=True)
         (self.codex_home / "models_cache.json").write_text(json.dumps({"models": [
@@ -456,7 +517,7 @@ class ConsultationTests(BridgeTestCase):
             (5, 0, []),
         ):
             with self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds):
-                clock, guarded = SimpleNamespace(now=100.0), []
+                clock, guarded, probe_folders = SimpleNamespace(now=100.0), [], []
 
                 async def recording(command, prompt, directory, timeout, environment=None, lock=None):
                     guarded.append((command[0], timeout, lock))
@@ -464,6 +525,9 @@ class ConsultationTests(BridgeTestCase):
                         clock.now += peer_seconds
                         return 7, b"", b""
                     if command[1:] == ["login", "status"]:
+                        # The probe runs in an empty folder of its own, never the consulted one, whose settings
+                        # `claude auth status` would apply.
+                        probe_folders.append((Path(directory), sorted(Path(directory).iterdir())))
                         clock.now += sign_in_seconds
                     return 0, b"/project/.git\n", b""
 
@@ -474,6 +538,10 @@ class ConsultationTests(BridgeTestCase):
                 (_, _, lock), *probes = guarded
                 self.assertIsInstance(lock, int)
                 self.assertEqual(probes, [(executable, timeout, lock) for executable, timeout in expected])
+                for folder, entries in probe_folders:
+                    self.assertEqual(entries, [])
+                    self.assertNotIn(self.project.resolve(), [folder.resolve(), *folder.resolve().parents])
+                    self.assertFalse(folder.exists())
 
     async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
         # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any
@@ -731,6 +799,17 @@ class ConsultationTests(BridgeTestCase):
         same = await self.consult(working_directory=str(package), conversation_id=identifier)
         moved = await self.consult(working_directory=str(package), conversation_id=identifier, ref="HEAD")
         self.assertEqual((same["commit"], moved["commit"]), (first, second))
+        # A follow-up keeps the pin, so extra folders are refused for it too, before a peer starts.
+        with self.assertRaisesRegex(bridge.BridgeError, "cannot be combined with a pinned ref"):
+            await self.consult(working_directory=str(package), conversation_id=identifier,
+                               extra_directories=[str(self.root)])
+        # A background start with both is refused at once, before any job exists.
+        self.client.spawn = spawned = []
+        self.client.spawn = spawned.append
+        with self.assertRaisesRegex(bridge.BridgeError, "cannot be combined with a pinned ref"):
+            await self.client.start("claude", "Explain.", str(package), ref="HEAD", extra_directories=[str(self.root)])
+        self.assertEqual((spawned, list((self.state / "jobs").glob("*"))
+                          if (self.state / "jobs").exists() else []), ([], []))
         calls = self.calls()
         self.assertEqual([call["marker"] for call in calls], ["first", "first", "second"])
         checkout = self.state / "worktrees" / identifier / "pkg"
@@ -751,6 +830,15 @@ class ConsultationTests(BridgeTestCase):
             self.assertIn(f"Read files only inside this checkout, whose root is {root},", prompt)
         self.assertNotIn("temporary checkout", unpinned)
 
+    async def test_a_pinned_folder_typed_in_another_case_is_consulted_in_its_checkout(self):
+        first, _ = await asyncio.to_thread(self.pinned_repository)
+        mistyped = self.root / self.project.name.upper() / "pkg"
+        if not mistyped.is_dir():
+            self.skipTest("This volume tells file names apart by case.")
+        reply = await self.consult(working_directory=str(mistyped), ref=first)
+        self.assertEqual(reply["commit"], first)
+        self.assertIn("Read files only inside this checkout, whose root is `..`,", self.calls()[-1]["prompt"])
+
     async def test_inherited_git_location_does_not_redirect_the_peer_from_its_checkout(self):
         first, _ = await asyncio.to_thread(self.pinned_repository)
         project_head = await asyncio.to_thread(git, self.project, "rev-parse", "HEAD")
@@ -770,10 +858,22 @@ class ConsultationTests(BridgeTestCase):
         unpinned = await self.consult()
         (self.root / "not-a-repository").mkdir()
         injected = self.root / "injected"
+        # What a folder unpacked from an archive can carry: a .git file aimed at this repository, and a clone that
+        # borrows its objects from it.
+        planted = self.root / "planted"
+        planted.mkdir()
+        (planted / ".git").write_text(f"gitdir: {self.project / '.git'}\n")
+        # A worktrees registry that is a link would receive the checkout's record outside the repository.
+        foreign = git_repository(self.root / "foreign-registry")
+        (self.root / "elsewhere-registry").mkdir()
+        (foreign / ".git" / "worktrees").symlink_to(self.root / "elsewhere-registry")
         cases = (
             ({"ref": "no-such-ref"}, "does not name a commit"),
             ({"ref": f"--output={injected}"}, "does not name a commit"),
             ({"ref": first, "working_directory": str(self.root / "not-a-repository")}, "inside a git repository"),
+            ({"ref": first, "working_directory": str(planted)}, "does not record this folder"),
+            ({"ref": first, "working_directory": str(foreign)}, "worktrees is not a folder inside it"),
+            ({"ref": first, "extra_directories": [str(self.root)]}, "cannot be combined with a pinned ref"),
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )
         for arguments, expected in cases:
@@ -906,18 +1006,19 @@ class ConsultationTests(BridgeTestCase):
             clock.now += step
             return await bridge.run_command(command, prompt, directory, timeout, **options)
 
-        third = prepare / 3
+        quarter = prepare / 4
         for step, leftover, expected in (
-            (10, False, [("rev-parse", prepare), ("rev-parse", prepare - 10), ("worktree", prepare - 20),
-                         ("worktree", prepare - 30), ("config", prepare - 40), ("read-tree", prepare - 50),
-                         ("peer", self.client.timeout), ("worktree", remove)]),
+            (10, False, [("rev-parse", prepare), ("config", prepare - 10), ("rev-parse", prepare - 20),
+                         ("worktree", prepare - 30), ("worktree", prepare - 40), ("config", prepare - 50),
+                         ("read-tree", prepare - 60), ("peer", self.client.timeout), ("worktree", remove)]),
             # Out of time before the checkout is added: nothing more starts, and the removal still runs.
-            (third, False, [("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
-                            ("worktree", remove)]),
+            (quarter, False, [("rev-parse", prepare), ("config", 3 * quarter), ("rev-parse", 2 * quarter),
+                              ("worktree", quarter), ("worktree", remove)]),
             # Out of time while removing a checkout left in place, after the sweep's own call: the final removal, with
             # its own allowance, removes it.
-            (third, True, [("rev-parse", remove), ("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
-                           ("worktree", remove), ("worktree", remove - third)]),
+            (quarter, True, [("rev-parse", remove), ("rev-parse", prepare), ("config", 3 * quarter),
+                             ("rev-parse", 2 * quarter), ("worktree", quarter), ("worktree", remove),
+                             ("worktree", remove - quarter)]),
         ):
             arguments = {"ref": "HEAD"}
             if leftover:

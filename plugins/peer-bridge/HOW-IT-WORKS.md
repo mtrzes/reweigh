@@ -48,6 +48,7 @@ Each app reaches the bridge through its own plugin; the shell uses the same scri
 | Bridge | the MCP server, the CLI, consultations, probes, pinned checkouts | `scripts/bridge.py` |
 | Jobs | the job store, its locks and request file, the detached runner | `scripts/jobs.py` |
 | Thread reader | finding history files, the repository check made on the bytes it returns, read budgets | `scripts/thread_reader.py`, `scripts/history_capture.py` |
+| Pre-launch check | whether the installed Codex still honours the names the command depends on | `scripts/preflight.py` |
 | Guard | the peer's process group | `scripts/peer_guard.py` |
 | State files | private files and folders under the state directory | `scripts/state_files.py`, `scripts/cleanup.py` |
 
@@ -66,13 +67,26 @@ flowchart TB
     outcome["Reply, or a fixed error<br/>cause named only from exact facts"]
 ```
 
-- **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep; Codex as `codex exec` in its read-only
-  sandbox. Neither can start another consultation.
-  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read
-  and what the bridge does not cover.
-- **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`. When
-  Codex's catalogue is readable, a value it does not list is refused before Codex starts; the
+- **The peer only reads.** Claude runs as `claude -p` with the read and search tools the
+  [README](README.md#runtime-boundaries) lists, and the repository's CLAUDE.md; Codex as `codex exec` in its read-only
+  sandbox. Neither peer can start another consultation.
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read,
+  the one known write a sub-agent can make, and what the bridge does not cover.
+- **Where the two peers differ.** Claude applies the user's Claude settings and allow rules; Codex ignores the user's
+  config.toml and command rules, since an allowed command runs outside its sandbox. Codex loads the repository's skills
+  and can run read-only commands; Claude loads the user's own skills and the repository's CLAUDE.md, not its skills,
+  and has no shell, since Claude Code's sandbox cannot keep a command from writing. Codex's plugins stay off. Where
+  each reads is in
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md#what-it-does-not-protect-against).
+- **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
+  readable, a Codex model it does not list, or an effort its model does not list, is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
+- **A lost restriction refuses the call before the peer starts.** `preflight.py` runs Codex in an empty home with only
+  `PATH` and `HOME`, under the consultation's guard and within its timeout. Each disabled feature must be listed and
+  off; each restricting `-c` key must refuse a wrong-type value, as Codex does for a key it knows; and Codex must
+  accept the command's top-level options. A lost name refuses the call. A check that cannot tell adds `warnings` to a
+  successful result. The command is never changed. The `exec` options are not checked: Codex refuses one it does not
+  know, so the consultation fails. Claude Code is checked only by the contract tests.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the group and stops all of it
   when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL; sign-in probes and
   git commands run under a guard too. Each guard holds the conversation's lock until its group has stopped. The git
@@ -162,10 +176,11 @@ when it may take over.
 
 ## Scope
 
-- **In:** asking the other agent a scoped question with read-only access, continuing that conversation, pinning it to
-  a commit, choosing Codex's model and effort, running it in the background, and reading what the other app's agent
-  last said in this repository.
-- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write, push or use
-  tools beyond reading, nesting consultations, network access of its own, and Windows.
+- **In:** asking the other agent a scoped question with read-only access (SECURITY.md names one exception),
+  continuing that conversation, pinning it to a commit, choosing either peer's model and effort, running it in the
+  background, and reading what the other app's agent last said in this repository.
+- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write or push,
+  tools beyond reading, search and, unless switched off, sub-agents, nesting consultations, other network access of its
+  own, and Windows.
 - **Experimental:** the thread tools, `seed_thread` and `list_codex_models` read the apps' internal files, which can
   change in any release. The thread tools and `seed_thread` are off unless `PEER_BRIDGE_THREADS=1` is set.

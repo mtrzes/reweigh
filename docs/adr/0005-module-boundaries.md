@@ -19,6 +19,8 @@ the job runner, and adapters around it for jobs, thread reading, state files, cl
   takes the consultation as a callback, and a job's runner is started as `bridge.py run-job`.
 - `peer_guard.py` uses only the standard library and runs under `python -I`, since it outlives the bridge's failures
   and stops the peer's process group.
+- `preflight.py` runs the Codex pre-launch check through the guarded runner `bridge.py` passes in, and reads Codex's
+  exit statuses; which names a command uses and what a feature row says are rules in `consultation.py`.
 - Adapters share `state_files.py` and `cleanup.py` as they need.
 
 ## Consequences

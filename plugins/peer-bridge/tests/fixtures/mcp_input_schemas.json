@@ -18,9 +18,48 @@
         "default": null,
         "title": "Conversation Id"
       },
+      "extra_directories": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Extra Directories"
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Model"
+      },
       "prompt": {
         "title": "Prompt",
         "type": "string"
+      },
+      "reasoning_effort": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reasoning Effort"
       },
       "ref": {
         "anyOf": [
@@ -278,9 +317,48 @@
         "default": null,
         "title": "Conversation Id"
       },
+      "extra_directories": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Extra Directories"
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Model"
+      },
       "prompt": {
         "title": "Prompt",
         "type": "string"
+      },
+      "reasoning_effort": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Reasoning Effort"
       },
       "ref": {
         "anyOf": [

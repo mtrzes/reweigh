@@ -96,7 +96,8 @@ class EnvironmentTests(unittest.TestCase):
         result = c.peer_environment(environ)
         # Empty and relative PATH entries would search the consulted repository.
         self.assertEqual(result, {"PATH": "/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept",
-                                  "ANTHROPIC_API_KEY": "kept", c.ACTIVE_ENV: "1"})
+                                  "ANTHROPIC_API_KEY": "kept", "PEER_BRIDGE_ACTIVE": "1",
+                                  "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"})
         self.assertEqual(environ, original)
         self.assertEqual(c.peer_environment(environ, pinned=True)["GIT_NO_REPLACE_OBJECTS"], "1")
         defaults = [entry for entry in os.defpath.split(os.pathsep) if entry.startswith("/")]
@@ -125,38 +126,56 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(c.filter_overrides(""), [])
 
 
-class CodexChoiceTests(unittest.TestCase):
-    def test_choices_are_one_token_and_codex_only(self):
-        accepted = ((("codex", "gpt-6-astra", "xhigh")), ("gpt-6-astra", "xhigh")), \
-                   ((("codex", " gpt-5.1 ", "")), ("gpt-5.1", None)), \
-                   ((("claude", None, "")), (None, None))
+class ChoiceTests(unittest.TestCase):
+    def test_choices_are_one_token(self):
+        accepted = ((("codex", "gpt-6-astra", "xhigh")), ("gpt-6-astra", "xhigh")),\
+                   ((("claude", "opus", "max")), ("opus", "max")),\
+                   ((("claude", "sonnet[1m]", None)), ("sonnet[1m]", None)),\
+                   ((("claude", "us.anthropic.claude-sonnet-4-20250514-v1:0", None)),
+                    ("us.anthropic.claude-sonnet-4-20250514-v1:0", None)),\
+                   ((("claude", "claude-sonnet-4-5@20250929", None)), ("claude-sonnet-4-5@20250929", None)),\
+                   ((("codex", " gpt-5.1 ", "")), ("gpt-5.1", None)), ((("codex", None, "")), (None, None))
         for arguments, expected in accepted:
             with self.subTest(arguments=arguments):
-                self.assertEqual(c.check_codex_choices(*arguments), expected)
-        refused = (("claude", "opus", None, "Codex consultations only"),
-                   ("claude", None, "high", "Codex consultations only"),
-                   ("codex", "gpt x", None, "one word"), ("codex", None, 'high"\nsandbox_mode="x', "one word"),
-                   ("codex", "a" * 65, None, "one word"), ("codex", None, 3, "one word"))
-        for provider, model, effort, reason in refused:
+                self.assertEqual(c.check_choices(*arguments), expected)
+        refused = (("codex", "gpt x", None), ("codex", None, 'high"\nsandbox_mode="x'), ("codex", "a" * 65, None),
+                   ("codex", None, 3), ("codex", "gpt[1m]", None), ("claude", None, "max[1]"))
+        for provider, model, effort in refused:
             with self.subTest(provider=provider, model=model, effort=effort):
-                with self.assertRaisesRegex(c.BridgeError, reason):
-                    c.check_codex_choices(provider, model, effort)
+                with self.assertRaisesRegex(c.BridgeError, "one word"):
+                    c.check_choices(provider, model, effort)
 
-    def test_a_call_overrides_the_environment(self):
-        environ = {"PEER_BRIDGE_CODEX_MODEL": "env-model", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "low"}
-        cases = (({}, None, None, (None, None)), (environ, None, None, ("env-model", "low")),
-                 (environ, "gpt-6-astra", None, ("gpt-6-astra", "low")),
-                 (environ, None, "xhigh", ("env-model", "xhigh")),
-                 ({"PEER_BRIDGE_CODEX_MODEL": ""}, None, None, (None, None)))
-        for environment, model, effort, expected in cases:
-            with self.subTest(environment=environment, model=model, effort=effort):
-                self.assertEqual(c.codex_choices(environment, model, effort), expected)
+    def test_a_call_overrides_the_environment_of_its_provider(self):
+        environ = {"PEER_BRIDGE_CODEX_MODEL": "env-model", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "low",
+                   "PEER_BRIDGE_CLAUDE_MODEL": "sonnet", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT": "high"}
+        cases = (("codex", {}, None, None, (None, None)), ("codex", environ, None, None, ("env-model", "low")),
+                 ("codex", environ, "gpt-6-astra", None, ("gpt-6-astra", "low")),
+                 ("codex", environ, None, "xhigh", ("env-model", "xhigh")),
+                 ("codex", {"PEER_BRIDGE_CODEX_MODEL": ""}, None, None, (None, None)),
+                 ("claude", environ, None, None, ("sonnet", "high")),
+                 ("claude", environ, "opus", None, ("opus", "high")),
+                 ("claude", {"PEER_BRIDGE_CODEX_MODEL": "env-model"}, None, None, (None, None)))
+        for provider, environment, model, effort, expected in cases:
+            with self.subTest(provider=provider, environment=environment, model=model, effort=effort):
+                self.assertEqual(c.peer_choices(provider, environment, model, effort), expected)
+
+    def test_extra_directories_are_absolute_and_for_claude_only(self):
+        self.assertEqual(c.check_extra_directories("claude", None), ())
+        self.assertEqual(c.check_extra_directories("claude", ["/a", "/b"]), ("/a", "/b"))
+        for provider, directories, reason in (("codex", ["/a"], "Claude consultations only"),
+                                              ("claude", ["relative"], "absolute path"),
+                                              ("claude", "/a", "a list"), ("claude", ["/a"] * 21, "a list")):
+            with self.subTest(provider=provider, directories=directories):
+                with self.assertRaisesRegex(c.BridgeError, reason):
+                    c.check_extra_directories(provider, directories)
 
     def test_the_result_names_what_ran(self):
         self.assertEqual(c.consultation_result("codex", "conv", "hi", None, "gpt-6-astra", "xhigh"),
                          {"provider": "codex", "conversation_id": "conv", "reply": "hi", "model": "gpt-6-astra",
                           "reasoning_effort": "xhigh"})
         self.assertNotIn("model", c.consultation_result("claude", "conv", "hi", None))
+        self.assertEqual(c.consultation_result("claude", "conv", "hi", None, warnings=["w"])["warnings"], ["w"])
+        self.assertNotIn("warnings", c.consultation_result("claude", "conv", "hi", None, warnings=[]))
 
 
 class CatalogueTests(unittest.TestCase):
@@ -203,36 +222,57 @@ class CommandTests(unittest.TestCase):
         policy = [
             "/bin/claude", "--print", "--output-format", "json", "--name", "peer-bridge conv",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            "--tools", "Read,Glob,Grep", "--disallowed-tools", "mcp__*",
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-chrome",
+            "--tools", "Read,Glob,Grep,WebSearch,Skill,Agent", "--disallowed-tools", "mcp__*",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-chrome",
             "--setting-sources", "user", "--settings", '{"disableAllHooks":true}',
             "--append-system-prompt", c.CONSULTATION_INSTRUCTIONS,
         ]
-        fresh = c.build_command("claude", "/bin/claude", "conv", model="ignored", mcp_servers={"ignored"},
-                                reasoning_effort="ignored")
+        fresh = c.build_command("claude", "/bin/claude", "conv", mcp_servers={"ignored"}, pinned=True)
         self.assertEqual(fresh, policy)
-        self.assertEqual(c.build_command("claude", "/bin/claude", "conv", SESSION), [*policy, "--resume", SESSION])
+        # The consulted directory comes in with --add-dir, so its CLAUDE.md loads without its .claude settings.
+        chosen = c.build_command("claude", "/bin/claude", "conv", SESSION, model="opus", reasoning_effort="max",
+                                 directories=("/repo", "/other"))
+        self.assertEqual(chosen, [*policy, "--add-dir", "/repo", "--add-dir", "/other", "--model", "opus",
+                                  "--effort", "max", "--resume", SESSION])
+        # Without sub-agents, Agent goes, and Skill with it, since a skill can fork a sub-agent.
+        without = c.build_command("claude", "/bin/claude", "conv", subagents=False)
+        self.assertEqual(without[without.index("--tools") + 1], "Read,Glob,Grep,WebSearch")
 
     def test_codex_command(self):
         sandbox = ["/bin/codex", "--no-daemon", "--sandbox", "read-only", "--ask-for-approval", "never"]
-        disabled = ["--disable", "apps", "--disable", "plugins", "--disable", "hooks", "--disable", "multi_agent",
-                    "--disable", "computer_use", "--disable", "browser_use", "--disable", "browser_use_external"]
+        disabled = ["--disable", "apps", "--disable", "plugins", "--disable", "hooks", "--disable", "computer_use",
+                    "--disable", "browser_use", "--disable", "browser_use_external"]
+        # A second layer only, so set as configuration, which a Codex that no longer knows the name ignores.
+        extra = ["-c", "features.skill_mcp_dependency_install=false"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv"), [
-            *sandbox, *disabled, "-c", 'web_search="disabled"', "-c", 'shell_environment_policy.inherit="core"',
-            "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', "exec", "--json",
+            *sandbox, *disabled, "-c", 'web_search="cached"', "-c", 'shell_environment_policy.inherit="core"',
+            "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', *extra, "exec", "--json",
             "--ignore-user-config", "--ignore-rules", "-",
         ])
         # The effort is quoted as one TOML string, so a crafted value cannot add another setting.
         command = c.build_command("codex", "/bin/codex", "conv", SESSION, model="gpt-x", mcp_servers={"b", "a\"q"},
                                   reasoning_effort='xhigh"\nsandbox_mode="danger', pinned=True)
         self.assertEqual(command, [
-            *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="disabled"',
+            *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="cached"',
             "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
-            "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
+            *extra, "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
             "-c", 'model_reasoning_effort="xhigh\\"\\nsandbox_mode=\\"danger"',
             "-c", 'mcp_servers."a\\"q".enabled=false', "-c", 'mcp_servers."b".enabled=false',
             "exec", "--json", "resume", SESSION, "--ignore-user-config", "--ignore-rules", "-",
         ])
+        # Sub-agents are on unless the operator turns them off; then both multi-agent tool sets go.
+        no_subagents = ["--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true"]
+        self.assertEqual(c.build_command("codex", "/bin/codex", "conv", subagents=False), [
+            *sandbox, *disabled, *no_subagents, "-c", 'web_search="cached"',
+            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
+            *extra, "exec", "--json", "--ignore-user-config", "--ignore-rules", "-",
+        ])
+
+    def test_subagents_are_off_only_for_the_exact_value_0(self):
+        for value, enabled in ((None, True), ("0", False), ("1", True), ("", True), ("false", True), (" 0", True)):
+            with self.subTest(value=value):
+                environ = {} if value is None else {"PEER_BRIDGE_SUBAGENTS": value}
+                self.assertEqual(c.subagents_enabled(environ), enabled)
 
 
 class RecordTests(unittest.TestCase):
@@ -431,7 +471,8 @@ class OutcomeTests(unittest.TestCase):
             ("claude", F(resuming=True, history_present=False), "no longer has this conversation's history"),
             ("claude", F(resuming=False, history_present=False), "GENERIC"),
             ("claude", F(resuming=True, history_present=None), "GENERIC"),
-            ("claude", F(unrecognized_model=True), "Check the model in Claude Code's settings"),
+            ("claude", F(unrecognized_model=True),
+             "Check the model requested, PEER_BRIDGE_CLAUDE_MODEL, or the model in Claude Code's settings"),
             ("codex", F(in_git_repository=False, model_setting=True), "not inside a git repository"),
             ("claude", F(in_git_repository=False), "GENERIC"),
             ("codex", F(model_setting=True), "GENERIC" + c.MODEL_HINT),
@@ -481,6 +522,8 @@ class JobRuleTests(unittest.TestCase):
         self.assertEqual(c.job_view("j", self.RECORD, done, "completed"),
                          {"job_id": "j", "provider": "codex", "state": "completed", "conversation_id": "conv",
                           "reply": "hi"})
+        warned = c.job_outcome("completed", 1.0, result={"conversation_id": "conv", "reply": "hi", "warnings": ["w"]})
+        self.assertEqual(c.job_view("j", self.RECORD, warned, "completed")["warnings"], ["w"])
         failed = c.job_outcome("failed", 1.0, error="Nope.")
         self.assertEqual(c.job_view("j", self.RECORD, failed, "failed")["error"], "Nope.")
         lost = c.job_outcome("lost", 1.0, error=c.LOST_JOB)
@@ -508,12 +551,15 @@ class JobRuleTests(unittest.TestCase):
         done = {"conversation_id": "conv", "reply": "x"}
         outcomes_valid = (c.job_outcome("completed", 1.0, result=done),
                           c.job_outcome("completed", 1.0, result=done | {"commit": "a" * 40}),
+                          c.job_outcome("completed", 1.0, result=done | {"warnings": ["w"]}),
                           c.job_outcome("lost", 2, error="e"), c.job_outcome("failed", 2, error="e"))
         outcomes_invalid = ({}, {"state": "completed"}, {"state": "queued", "finished_at": 1},
                             {"state": "failed", "finished_at": 1, "error": 3}, {"state": "failed", "finished_at": 1},
                             {"state": "completed", "finished_at": 1, "result": "x"},
                             c.job_outcome("completed", 1, result={"reply": "x"}),
                             c.job_outcome("completed", 1, result=done | {"commit": 4}),
+                            c.job_outcome("completed", 1, result=done | {"warnings": "w"}),
+                            c.job_outcome("completed", 1, result=done | {"warnings": [3]}),
                             c.job_outcome("completed", 1, result=done, error="e"),
                             c.job_outcome("failed", 1, result=done, error="e"))
         for outcome in outcomes_valid:
@@ -966,6 +1012,44 @@ class ResultTests(unittest.TestCase):
         empty = t.listing_result("claude", t.ThreadListing([]), 20)
         self.assertNotIn("unsupported_threads_machine_wide", empty)
         self.assertNotIn("unreadable_history_directories_machine_wide", empty)
+
+
+
+class RepositoryLayoutTests(unittest.TestCase):
+    """Whether a working tree and its git directory point at each other, as git sets up a clone, a linked worktree or
+    a submodule, and as a folder unpacked from an archive need not."""
+
+    def layout(self, **changes):
+        top = Path("/work/repo")
+        fields = {"nearest": top, "top": top, "git_dir": top / ".git", "common_dir": top / ".git",
+                  "dot_git": "directory", "gitdir_back": None, "worktree_back": None, "commondir": None}
+        return t.RepositoryLayout(**(fields | changes))
+
+    def test_only_git_s_own_layouts_are_reciprocal(self):
+        main = Path("/work/main/.git")
+        linked = {"dot_git": "file", "git_dir": main / "worktrees" / "wt", "common_dir": main,
+                  "gitdir_back": Path("/work/repo/.git"), "commondir": main}
+        module = {"dot_git": "file", "git_dir": main / "modules" / "sub", "common_dir": main / "modules" / "sub",
+                  "worktree_back": Path("/work/repo")}
+        cases = (
+            ("clone", {}, True),
+            ("linked worktree", linked, True),
+            ("submodule", module, True),
+            ("clone with a planted commondir", {"commondir": main}, False),
+            ("gitfile into another clone", {"dot_git": "file", "git_dir": main, "common_dir": main}, False),
+            ("worktree registered for another folder", linked | {"gitdir_back": Path("/work/other/.git")}, False),
+            ("worktree outside worktrees/", linked | {"git_dir": main / "elsewhere" / "wt"}, False),
+            ("worktree whose commondir differs", linked | {"commondir": Path("/work/other/.git")}, False),
+            ("submodule for another folder", module | {"worktree_back": Path("/work/other")}, False),
+            ("submodule with a commondir", module | {"commondir": main}, False),
+            ("no .git entry", {"dot_git": None}, False),
+            # A planted .git whose submodule git directory names a real checkout elsewhere through core.worktree: git
+            # reports that checkout, which is not where the requested folder's .git is.
+            ("core.worktree elsewhere", module | {"nearest": Path("/work/planted")}, False),
+        )
+        for name, changes, expected in cases:
+            with self.subTest(layout=name):
+                self.assertIs(t.reciprocal(self.layout(**changes)), expected)
 
 
 if __name__ == "__main__":

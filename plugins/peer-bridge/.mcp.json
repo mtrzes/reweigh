@@ -3,15 +3,17 @@
     "peer-bridge": {
       "command": "uv",
       "args": [
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}",
         "run",
+        "--locked",
         "--no-project",
         "--no-config",
         "--script",
         "${CLAUDE_PLUGIN_ROOT}/scripts/bridge.py",
         "--peer",
         "codex"
-      ],
-      "cwd": "${CLAUDE_PROJECT_DIR}"
+      ]
     }
   }
 }

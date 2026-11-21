@@ -25,9 +25,9 @@ CLAUDE_HOST_SESSION_ENV = (
 )
 PROVIDERS = ("claude", "codex")
 CONSULTATION_INSTRUCTIONS = (
-    "This is a peer consultation. Follow the project's instructions. "
+    "This is a peer consultation. "
     "Inspect relevant files if needed and answer the specific question with evidence. "
-    "Do not edit files, run tests, commit, push, contact people, or delegate to another agent. "
+    "Do not edit files, run tests, commit, push or contact people. "
     "The lead agent will decide how to use your advice."
 )
 # A peer can read outside its pinned checkout, and was seen answering from the live working tree when a file was
@@ -38,11 +38,32 @@ PINNED_INSTRUCTIONS = (
     "copy of the repository, which shows other content. When something the question needs is absent at this commit, "
     "say so instead of looking for it elsewhere."
 )
-CODEX_DISABLED_FEATURES = (
-    "apps", "plugins", "hooks", "multi_agent", "computer_use", "browser_use", "browser_use_external",
-)
+# The features a consultation's restrictions depend on, disabled with --disable: Codex refuses to start when it no
+# longer knows one, so a consultation never runs without them.
+CODEX_DISABLED_FEATURES = ("apps", "plugins", "hooks", "computer_use", "browser_use", "browser_use_external")
+# Features disabled as a second layer, set as configuration, which Codex itself ignores when it no longer knows the
+# name; the pre-launch check refuses the consultation then, as for any restriction. A skill's MCP dependency cannot
+# install in `codex exec`, which cannot ask the user, and would otherwise change the user's Codex configuration.
+CODEX_EXTRA_DISABLED_FEATURES = ("skill_mcp_dependency_install",)
+# A peer may start sub-agents, which keep its restrictions, unless this is set to exactly 0. Neither
+# --disable multi_agent nor --disable multi_agent_v2 stops them; removing v2's native tools does, and Codex refuses
+# to start when it no longer knows that key, so the switch never fails open.
+SUBAGENTS_ENV = "PEER_BRIDGE_SUBAGENTS"
+CODEX_NO_SUBAGENTS = ("--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true")
 PROVIDER_NAMES = {"claude": "Claude Code", "codex": "Codex"}
-MODEL_SETTINGS = {"claude": "the model in Claude Code's settings", "codex": "PEER_BRIDGE_CODEX_MODEL"}
+MODEL_SETTINGS = {"claude": "the model requested, PEER_BRIDGE_CLAUDE_MODEL, or the model in Claude Code's settings",
+                  "codex": "PEER_BRIDGE_CODEX_MODEL"}
+# The environment defaults for a consultation's model and reasoning effort, per provider.
+CHOICE_ENV = {"claude": ("PEER_BRIDGE_CLAUDE_MODEL", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT"),
+              "codex": ("PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT")}
+# Claude Code loads CLAUDE.md from a directory given with --add-dir only when this is set; the consulted directory is
+# passed that way, so its CLAUDE.md loads while its .claude settings, which can run commands, do not.
+CLAUDE_MD_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+MAX_EXTRA_DIRECTORIES = 20
+# The Claude peer's tools: reading, Anthropic's web search, and, unless sub-agents are switched off, skills and
+# sub-agents. A skill can fork a sub-agent of its own, so Skill goes with Agent.
+CLAUDE_TOOLS = ("Read", "Glob", "Grep", "WebSearch")
+CLAUDE_SUBAGENT_TOOLS = ("Skill", "Agent")
 # Failure messages. Only these fixed messages reach the caller, never the CLI's own output.
 WRITER_HELD = (
     "{name} has this conversation open elsewhere, such as in Codex Desktop, which allows one writer. Start a new "
@@ -58,14 +79,19 @@ OUTSIDE_GIT = (
 MODEL_HINT = " A Codex model or reasoning effort was chosen; if Codex rejected it, change it or leave it unset."
 # Characters a Codex model name or reasoning effort may contain. Codex itself decides which values it accepts.
 CODEX_CHOICE_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+# Claude Code's model names may also carry a bracketed variant, such as sonnet[1m], or be a provider's model ID or ARN.
+CHOICE_CHARACTERS = {"codex": CODEX_CHOICE_CHARACTERS, "claude": CODEX_CHOICE_CHARACTERS | frozenset("[]:/@")}
 CODEX_CHOICE_MAX_LENGTH = 64
+# A Claude model may be a provider's inference-profile ARN.
+CHOICE_MAX_LENGTH = {"codex": CODEX_CHOICE_MAX_LENGTH, "claude": 256}
 CLOSED_INPUT = "The peer CLI closed its input. Check its installation and authentication."
 # Claude Code writes this fixed tag at the start of a stderr line when it does not know the requested model.
 CLAUDE_UNRECOGNIZED_MODEL_TAG = "[claude-code:unrecognized_model]"
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_TIMEOUT_SECONDS = 3600
-# The only Codex configuration a consultation loads besides the command line: --ignore-user-config skips the
-# user's, and Codex loads no project configuration without the user's trust list.
+# The only Codex configuration file a consultation loads besides the command line: --ignore-user-config skips the
+# user's, and Codex reads a project's .codex/config.toml only for a directory on the user's trust list. It still
+# loads the project's AGENTS.md and skills.
 CODEX_SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 MAX_CONFIG_BYTES = 1024 * 1024
 THREAD_LIMITS = (1, 100)
@@ -131,10 +157,11 @@ def check_prompt(prompt):
     return prompt
 
 
-def check_codex_choices(provider, model=None, reasoning_effort=None):
-    """Return the requested Codex model and reasoning effort, each None when not chosen.
+def check_choices(provider, model=None, reasoning_effort=None):
+    """Return the requested model and reasoning effort, each None when not chosen.
 
-    Each must be one token of letters, digits, dots, dashes or underscores; Codex decides which values it accepts.
+    Each must be one token of letters, digits, dots, dashes or underscores, and a Claude model may carry brackets; the
+    peer CLI decides which values it accepts.
     """
     choices = []
     for name, value in (("model", model), ("reasoning_effort", reasoning_effort)):
@@ -142,10 +169,9 @@ def check_codex_choices(provider, model=None, reasoning_effort=None):
         if value in (None, ""):
             choices.append(None)
             continue
-        if provider != "codex":
-            raise BridgeError(f"{name} applies to Codex consultations only.")
-        if (not isinstance(value, str) or len(value) > CODEX_CHOICE_MAX_LENGTH
-                or not set(value) <= CODEX_CHOICE_CHARACTERS):
+        allowed = CHOICE_CHARACTERS[provider] if name == "model" else CODEX_CHOICE_CHARACTERS
+        longest = CHOICE_MAX_LENGTH[provider] if name == "model" else CODEX_CHOICE_MAX_LENGTH
+        if not isinstance(value, str) or len(value) > longest or not set(value) <= allowed:
             raise BridgeError(f"{name} must be one word of letters, digits, dots, dashes or underscores.")
         choices.append(value)
     return tuple(choices)
@@ -184,10 +210,26 @@ def check_against_catalogue(models, model=None, reasoning_effort=None):
         raise BridgeError(f"{model} takes reasoning_effort {', '.join(efforts)}, not {reasoning_effort}.")
 
 
-def codex_choices(environ, model=None, reasoning_effort=None):
-    """The model and reasoning effort a Codex consultation runs with: the request's, else the environment's."""
-    return (model or environ.get("PEER_BRIDGE_CODEX_MODEL") or None,
-            reasoning_effort or environ.get("PEER_BRIDGE_CODEX_REASONING_EFFORT") or None)
+def peer_choices(provider, environ, model=None, reasoning_effort=None):
+    """The model and reasoning effort a consultation runs with: the request's, else the environment's."""
+    model_env, effort_env = CHOICE_ENV[provider]
+    return model or environ.get(model_env) or None, reasoning_effort or environ.get(effort_env) or None
+
+
+def check_extra_directories(provider, directories):
+    """The extra directories a Claude peer may read, as given: absolute paths, at most MAX_EXTRA_DIRECTORIES.
+
+    A Codex peer already reads any file the user can, so it takes none."""
+    if not directories:
+        return ()
+    if provider != "claude":
+        raise BridgeError("extra_directories applies to Claude consultations only; Codex reads any file you can.")
+    if not isinstance(directories, (list, tuple)) or len(directories) > MAX_EXTRA_DIRECTORIES:
+        raise BridgeError(f"extra_directories must be a list of at most {MAX_EXTRA_DIRECTORIES} absolute paths.")
+    if any(not isinstance(directory, str) or "\0" in directory or not os.path.isabs(directory)
+           for directory in directories):
+        raise BridgeError("Each of extra_directories must be an absolute path.")
+    return tuple(directories)
 
 
 def check_limit(limit):
@@ -293,6 +335,11 @@ THREADS_OFF = (f"Reading the other app's threads is off. It is experimental; set
                "to turn it on, with seed_thread.")
 
 
+def subagents_enabled(environ):
+    """Whether a Codex peer may start sub-agents: only the exact value 0 turns them off."""
+    return environ.get(SUBAGENTS_ENV) != "0"
+
+
 def threads_enabled(environ):
     """Whether the experimental thread tools and seed_thread are on: only the exact value 1 turns them on."""
     return environ.get(THREADS_ENV) == "1"
@@ -315,12 +362,66 @@ def peer_environment(environ, pinned=False):
 
     Git location variables would point the peer's git commands at another checkout than the one consulted.
     """
-    environment = {**environ, ACTIVE_ENV: "1", "PATH": safe_path(environ.get("PATH"))}
+    environment = {**environ, ACTIVE_ENV: "1", CLAUDE_MD_ENV: "1", "PATH": safe_path(environ.get("PATH"))}
     if pinned:
         environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     for name in (*CLAUDE_HOST_SESSION_ENV, *GIT_LOCATION_ENV):
         environment.pop(name, None)
     return environment
+
+
+# Pre-launch checks
+#
+# Before a Codex peer starts, the bridge checks that Codex still honours every name the bridge's command depends on.
+# A lost restriction refuses the call; a check that cannot reach a verdict becomes a warning, and the peer starts.
+# The command is never changed. The checks read exit statuses and exact tokens only.
+
+RESTRICTION_LOST = ("{name} no longer accepts {setting}, which the bridge passes to {purpose}. The consultation was "
+                    "not started; update peer-bridge or check {name}'s release notes.")
+UNVERIFIED = "{name}'s restrictions could not be checked before the start ({reason}); the peer ran unchecked."
+CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
+# Codex keys whose wrong-type value Codex refuses while it knows the key, and accepts silently once it does not.
+# web_search is a restriction too: without it, Codex's default or a system configuration could choose live search.
+CODEX_RESTRICTION_KEYS = {
+    "shell_environment_policy.inherit": "keep the peer's commands to the core environment",
+    f"shell_environment_policy.set.{ACTIVE_ENV}": "mark the peer's commands as a consultation",
+    "mcp_servers.enabled": "keep MCP servers out of the peer",
+    "web_search": "limit the peer's web search to OpenAI's index",
+    "features.multi_agent_v2.disable_native_tools": "keep the peer from starting sub-agents",
+}
+
+
+def codex_feature_names(command):
+    """The feature names a Codex command turns off: each --disable value, and each features.<name>=false key."""
+    names = [command[index + 1] for index, word in enumerate(command[:-1]) if word == "--disable"]
+    for index, word in enumerate(command[:-1]):
+        if word == "-c" and command[index + 1].startswith("features.") and command[index + 1].endswith("=false"):
+            name = command[index + 1][len("features."):-len("=false")]
+            if "." not in name:
+                names.append(name)
+    return names
+
+
+def codex_feature_rows(listing):
+    """Each feature's stage and effective state from `codex features list`: the first word of a row, a stage of one
+    or more words, then the state."""
+    rows = (line.split() for line in listing.splitlines())
+    # A row in another shape keeps its name, with a state nothing reads as on or off.
+    return {words[0]: (" ".join(words[1:-1]), words[-1]) if len(words) >= 3 else ("", "")
+            for words in rows if words}
+
+
+def codex_key_names(command):
+    """The `-c` keys a Codex command sets, in order, with each MCP server's own name folded into one key."""
+    keys = []
+    for index, word in enumerate(command[:-1]):
+        if word == "-c":
+            key = command[index + 1].partition("=")[0]
+            if key.startswith("mcp_servers.") and key.endswith(".enabled"):
+                key = "mcp_servers.enabled"
+            if key not in keys:
+                keys.append(key)
+    return keys
 
 
 # Commands
@@ -337,21 +438,28 @@ def codex_mcp_server_names(config):
 
 
 def build_command(provider, executable, conversation_id, backend_session_id=None, model=None, mcp_servers=(),
-                  reasoning_effort=None, pinned=False):
-    """The peer CLI's argument list. model, mcp_servers, reasoning_effort and pinned apply to Codex only."""
+                  reasoning_effort=None, pinned=False, subagents=True, directories=()):
+    """The peer CLI's argument list. mcp_servers and pinned apply to Codex only; directories, the consulted directory
+    and any extra ones, to Claude only."""
     if provider == "claude":
+        tools = [*CLAUDE_TOOLS, *CLAUDE_SUBAGENT_TOOLS] if subagents else list(CLAUDE_TOOLS)
         command = [
             executable, "--print", "--output-format", "json",
             "--name", f"peer-bridge {conversation_id}",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            # No --allowed-tools: allow rules would let Read reach any path; without them, dontAsk keeps reads inside
-            # the working directory and the user's own additional directories.
-            "--tools", "Read,Glob,Grep", "--disallowed-tools", "mcp__*", "--strict-mcp-config",
-            "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-chrome",
+            # No --allowed-tools: the user's own allow rules decide what else Read may reach, as in their sessions.
+            "--tools", ",".join(tools), "--disallowed-tools", "mcp__*", "--strict-mcp-config",
+            "--mcp-config", '{"mcpServers":{}}', "--no-chrome",
             # Only the user's own settings: a consulted repository's .claude settings can run commands.
             "--setting-sources", "user", "--settings", '{"disableAllHooks":true}',
             "--append-system-prompt", CONSULTATION_INSTRUCTIONS,
         ]
+        for directory in directories:
+            command.extend(["--add-dir", str(directory)])
+        if model:
+            command.extend(["--model", model])
+        if reasoning_effort:
+            command.extend(["--effort", reasoning_effort])
         if backend_session_id:
             command.extend(["--resume", backend_session_id])
         return command
@@ -360,10 +468,15 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
         command.extend(["--model", model])
     for feature in CODEX_DISABLED_FEATURES:
         command.extend(["--disable", feature])
+    if not subagents:
+        command.extend(CODEX_NO_SUBAGENTS)
     # Commands Codex runs see only the core environment, never the user's tokens, plus the consultation marker, so a
     # bridge started from one refuses to nest, and in a pinned checkout no replacement objects.
-    overrides = ['web_search="disabled"', 'shell_environment_policy.inherit="core"',
+    # Cached search answers from OpenAI's index and fetches no page, so a query reaches only the provider that already
+    # sees the consultation; `live` would let the peer open any URL.
+    overrides = ['web_search="cached"', 'shell_environment_policy.inherit="core"',
                  f'shell_environment_policy.set.{ACTIVE_ENV}="1"']
+    overrides += [f"features.{feature}=false" for feature in CODEX_EXTRA_DISABLED_FEATURES]
     if pinned:
         overrides.append('shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"')
     if reasoning_effort:
@@ -417,10 +530,12 @@ def completed_record(record, backend_session_id, commit):
     return updated
 
 
-def consultation_result(provider, conversation_id, reply, commit, model=None, reasoning_effort=None):
-    """The reply and what produced it: the pinned commit, and the Codex model and effort when chosen."""
+def consultation_result(provider, conversation_id, reply, commit, model=None, reasoning_effort=None, warnings=()):
+    """The reply and what produced it: the pinned commit, the model and effort when chosen, and the pre-launch check's
+    warnings when it had any."""
     result = {"provider": provider, "conversation_id": conversation_id, "reply": reply}
-    for key, value in (("commit", commit), ("model", model), ("reasoning_effort", reasoning_effort)):
+    for key, value in (("commit", commit), ("model", model), ("reasoning_effort", reasoning_effort),
+                       ("warnings", list(warnings))):
         if value:
             result[key] = value
     return result
@@ -645,6 +760,8 @@ def valid_job_outcome(outcome):
         return (isinstance(result, dict) and isinstance(result.get("conversation_id"), str)
                 and isinstance(result.get("reply"), str)
                 and all(key not in result or isinstance(result[key], str) for key in RESULT_FIELDS)
+                and ("warnings" not in result or (isinstance(result["warnings"], list)
+                                                  and all(isinstance(item, str) for item in result["warnings"])))
                 and "error" not in outcome)
     return "result" not in outcome and isinstance(outcome.get("error"), str)
 
@@ -683,7 +800,7 @@ def job_view(job_id, record, outcome, state):
     """What get, start and cancel return for a job."""
     view = {"job_id": job_id, "provider": record["provider"], "state": state}
     if outcome is not None and "result" in outcome:
-        view.update({key: outcome["result"][key] for key in RESULT_FIELDS if key in outcome["result"]})
+        view.update({key: outcome["result"][key] for key in (*RESULT_FIELDS, "warnings") if key in outcome["result"]})
     if outcome is not None and "error" in outcome:
         view["error"] = outcome["error"]
     return view

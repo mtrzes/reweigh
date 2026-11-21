@@ -1,6 +1,7 @@
 """Exercise the bridge as its clients see it: the MCP server's tools and envelopes, and the command line's JSON and exit
 statuses. Each test starts real bridge processes; what they do inside is tested in test_bridge.py and test_jobs.py.
-Checks that read the repository's files only are in test_repository.py.
+Checks that read the repository's files only are in test_repository.py; those that run the installed Codex and
+Claude Code, in an empty home, are here.
 
 Codex consultations here are refused before the bridge reads Codex configuration, so no bridge process reads the
 machine's /etc/codex/config.toml.
@@ -9,12 +10,17 @@ machine's /etc/codex/config.toml.
 import asyncio
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -23,8 +29,9 @@ from mcp.client.stdio import stdio_client
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, TESTS, BridgeTestCase, bridge, claude_prompt, claude_reply, claude_session,
-    codex_thread, codex_turn, git_repository,
+    codex_thread, codex_turn, consultation, git_repository, isolate,
 )
+import preflight  # noqa: E402  (found through the script directory support.py adds)
 
 DIFFERENT_PEER = "This conversation belongs to a different provider or working directory."
 
@@ -32,6 +39,111 @@ DIFFERENT_PEER = "This conversation belongs to a different provider or working d
 def canonical_json(value):
     """JSON text with sorted keys: equal only when the JSON is, so false and 0 differ, and a diff reads line by line."""
     return json.dumps(value, indent=2, sort_keys=True)
+
+
+
+
+class InstalledCliTests(unittest.TestCase):
+    """The bridge's commands against the CLIs installed here, each in an empty temporary home: Codex through the
+    pre-launch check the bridge runs, Claude Code signed out, so no model is called, through a canary of its own."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-installed-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+
+    def installed(self, name):
+        executable = shutil.which(name)
+        if executable is None:
+            # The run started by hand on a release commit installs both CLIs; elsewhere a missing one skips.
+            self.assertNotEqual(os.environ.get("GITHUB_EVENT_NAME"), "workflow_dispatch",
+                                f"The release run must install {name}.")
+            self.skipTest(f"{name} is not on PATH.")
+        return executable
+
+    def test_the_installed_codex_knows_every_name_the_bridge_passes(self):
+        async def runner(command, stdin, directory, timeout, environment):
+            result = await asyncio.to_thread(subprocess.run, command, cwd=directory, env=environment,
+                                             capture_output=True, timeout=timeout)
+            return result.returncode, result.stdout, result.stderr
+
+        executable = self.installed("codex")
+        # Control: the behaviours the check rests on, so a Codex that refuses every key cannot pass it silently.
+        environment = {"PATH": os.environ["PATH"], "HOME": str(self.root), "CODEX_HOME": str(self.root)}
+        for arguments, status in ((["-c", "web_search=1"], 1), (["-c", "peer_bridge_no_such_key=1"], 0),
+                                  (["--disable", "peer_bridge_no_such_feature"], 1)):
+            with self.subTest(control=arguments):
+                code, _, _ = asyncio.run(runner([executable, *arguments, "features", "list"], None, self.root,
+                                                DEADLINE_SECONDS, environment))
+                self.assertEqual(code, status)
+        for session, subagents in ((None, True), (None, False), (str(uuid.uuid4()), True)):
+            command = consultation.build_command("codex", executable, "conv", session, reasoning_effort="high",
+                                                 subagents=subagents)
+            with self.subTest(resumed=bool(session), subagents=subagents):
+                self.assertEqual(asyncio.run(preflight.preflight("codex", command, runner)), [])
+
+    def claude_canary(self, command):
+        """Run a Claude command signed out in an empty home, beside a user hook and a user MCP server that each touch
+        a marker if they run, in a repository whose settings name a model; return the markers written, the model
+        and the tools system/init reports."""
+        home, project = self.root / "home", self.root / "project"
+        for folder in (home / ".claude", project / ".claude"):
+            folder.mkdir(parents=True, exist_ok=True)
+        for marker in ("user-hook", "mcp"):
+            (self.root / marker).unlink(missing_ok=True)
+        hook = {"type": "command", "command": f"/usr/bin/touch {shlex.quote(str(self.root / 'user-hook'))}"}
+        (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [hook]}]}}))
+        (home / ".claude.json").write_text(json.dumps(
+            {"mcpServers": {"canary": {"command": "/usr/bin/touch", "args": [str(self.root / "mcp")]}}}))
+        (project / ".claude" / "settings.json").write_text(json.dumps({"model": "peer-bridge-canary-model"}))
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
+        status = subprocess.run([command[0], "auth", "status", "--json"], cwd=project, env=environment,
+                                capture_output=True, text=True, timeout=DEADLINE_SECONDS)
+        signed_in = json.loads(status.stdout).get("loggedIn")  # an unreadable answer fails the test, never skips it
+        self.assertIsInstance(signed_in, bool, "claude auth status --json gave no loggedIn")
+        if signed_in:
+            self.skipTest("Claude Code read the empty home as signed in; the canary would call a model.")
+        result = subprocess.run(command, input="check", cwd=project, env=environment, capture_output=True,
+                                text=True, timeout=DEADLINE_SECONDS)
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+        [init] = [record for record in records if record.get("subtype") == "init"]
+        return ({marker for marker in ("user-hook", "mcp") if (self.root / marker).exists()}, init.get("model"),
+                sorted(init.get("tools", [])))
+
+    def test_the_installed_claude_keeps_every_restriction_and_offers_every_tool(self):
+        executable = self.installed("claude")
+        streamed = ["--output-format", "stream-json", "--verbose"]
+        # Control: without the bridge's restrictions, each planted signal fires.
+        control = [executable, "--print", *streamed, "--tools", "Read", "--setting-sources", "user,project"]
+        self.assertEqual(self.claude_canary(control), ({"user-hook", "mcp"}, "peer-bridge-canary-model", ["Read"]))
+        # The bridge's command, as it runs a consultation, with streamed output: none fires, and every tool is there,
+        # Agent under the name Task.
+        command = consultation.build_command("claude", executable, "conv", directories=(str(self.root / "project"),))
+        at = command.index("--output-format")
+        command[at:at + 2] = streamed
+        markers, model, tools = self.claude_canary(command)
+        self.assertEqual(markers, set())
+        self.assertNotEqual(model, "peer-bridge-canary-model")
+        self.assertEqual(tools, ["Glob", "Grep", "Read", "Skill", "Task", "WebSearch"])
+
+
+class McpResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_result_with_warnings_passes_the_tool_s_output_schema(self):
+        # A consultation's result carries the pre-launch check's warnings, a list, beside its text fields.
+        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-result-")
+        self.addCleanup(temporary.cleanup)
+        isolate(self, Path(temporary.name))
+
+        async def consulted(bridge_self, provider, *arguments, **options):
+            return {"provider": provider, "conversation_id": "conv", "reply": "Answer.", "warnings": ["Checked."]}
+
+        with patch.object(bridge.Bridge, "consult", consulted):
+            for peer, tool in (("codex", "ask_codex"), ("claude", "ask_claude")):
+                with self.subTest(tool=tool):
+                    server = bridge.create_server(peer)
+                    _, result = await server.call_tool(tool, {"prompt": "Q", "working_directory": "/"})
+                    self.assertEqual(result, {"provider": peer, "conversation_id": "conv", "reply": "Answer.",
+                                              "warnings": ["Checked."]})
 
 
 class McpTests(BridgeTestCase):
@@ -93,8 +205,9 @@ class McpTests(BridgeTestCase):
             # One subtest per tool or tool group, so a broken route does not hide the ones after it.
             with self.subTest(part="annotations"):
                 for tool in listing.tools:
-                    # Cancelling stops a running consultation, so only that tool is not read-only.
-                    self.assertEqual(tool.annotations.readOnlyHint, tool.name != "cancel_consultation")
+                    # Consulting sends content to the other provider and cancelling stops a job: only lookups are
+                    # read-only.
+                    self.assertEqual(tool.annotations.readOnlyHint, tool.name.startswith(("list_", "read_", "get_")))
                     self.assertFalse(tool.annotations.destructiveHint)
 
             conversation = {"conversation_id": "unset"}
@@ -105,8 +218,13 @@ class McpTests(BridgeTestCase):
                 self.assertEqual((asked["provider"], asked["reply"]),
                                  ("claude", "claude consulted: Explain the query."))
                 conversation = {"conversation_id": asked["conversation_id"]}
-                failed, resumed = await self.call(session, "ask_claude", {**request, **conversation})
+                failed, resumed = await self.call(session, "ask_claude", {**request, **conversation, "model": "opus",
+                                                                          "reasoning_effort": "max"})
                 self.assertEqual((failed, resumed["conversation_id"]), (False, asked["conversation_id"]))
+                self.assertEqual((resumed["model"], resumed["reasoning_effort"]), ("opus", "max"))
+                arguments = self.calls()[-1]["arguments"]
+                self.assertEqual([arguments[arguments.index(flag) + 1] for flag in ("--model", "--effort")],
+                                 ["opus", "max"])
                 self.assertEqual(await self.call(session, "ask_claude", {**request, "prompt": " "}),
                                  (True, "A consultation question is required."))
             with self.subTest(tool="ask_codex"):
@@ -116,10 +234,14 @@ class McpTests(BridgeTestCase):
 
             waiting = {"wait_seconds": DEADLINE_SECONDS}
             with self.subTest(tool="start_claude_consultation, get_consultation, cancel_consultation"):
-                _, started = await self.call(session, "start_claude_consultation", request)
+                extra = self.root / "extra"
+                extra.mkdir()
+                _, started = await self.call(session, "start_claude_consultation", {
+                    **request, "model": "opus", "reasoning_effort": "max", "extra_directories": [str(extra)]})
                 _, done = await self.call(session, "get_consultation", {**waiting, "job_id": started["job_id"]})
-                self.assertEqual((done["state"], done["reply"]),
-                                 ("completed", "claude consulted: Explain the query."))
+                self.assertEqual((done["state"], done["reply"], done["model"], done["reasoning_effort"]),
+                                 ("completed", "claude consulted: Explain the query.", "opus", "max"))
+                self.assertIn(str(extra.resolve()), self.calls()[-1]["arguments"])
                 _, cancelled = await self.call(session, "cancel_consultation", {"job_id": started["job_id"]})
                 self.assertEqual(cancelled["state"], "completed")
             with self.subTest(tool="start_codex_consultation"):
@@ -155,8 +277,15 @@ class CommandLineTests(BridgeTestCase):
         target = ("ask", "--provider", "claude", "--working-directory", str(self.project))
         context = self.root / "context.md"
         context.write_text("Date filtering is relevant.", encoding="utf-8")
-        code, first = self.run_cli(*target, "--context-file", str(context), prompt=b"Explain the query.")
+        extra = [self.root / "extra-a", self.root / "extra-b"]
+        for folder in extra:
+            folder.mkdir()
+        code, first = self.run_cli(*target, "--context-file", str(context), "--extra-directory", str(extra[0]),
+                                   "--extra-directory", str(extra[1]), prompt=b"Explain the query.")
         self.assertEqual((code, set(first)), (0, {"provider", "conversation_id", "reply"}))
+        arguments = self.calls()[0]["arguments"]
+        added = [arguments[index + 1] for index, word in enumerate(arguments) if word == "--add-dir"]
+        self.assertEqual(added, [str(self.project.resolve()), *(str(folder.resolve()) for folder in extra)])
         self.assertIn("Date filtering is relevant.", first["reply"])
         code, second = self.run_cli(*target, "--conversation-id", first["conversation_id"], prompt=b"Null dates?")
         self.assertEqual((code, second["conversation_id"]), (0, first["conversation_id"]))
@@ -164,6 +293,7 @@ class CommandLineTests(BridgeTestCase):
         for extra, prompt, expected in (
             (("--context-file", str(self.root / "missing.md")), b"Explain.", "Cannot read the context file"),
             ((), b"Explain \xff the query.", "Cannot read the prompt from standard input as UTF-8"),
+            (("--extra-directory", str(context)), b"Explain.", "which is not a directory"),
         ):
             with self.subTest(expected=expected):
                 code, result = self.run_cli(*target, *extra, prompt=prompt)

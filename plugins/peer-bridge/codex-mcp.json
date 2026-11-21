@@ -2,12 +2,14 @@
   "mcpServers": {
     "peer-bridge": {
       "command": "uv",
-      "args": ["run", "--no-project", "--no-config", "--script", "./scripts/bridge.py", "--peer", "claude"],
+      "args": ["--directory", ".", "run", "--locked", "--no-project", "--no-config", "--script", "./scripts/bridge.py",
+               "--peer", "claude"],
       "cwd": ".",
       "startup_timeout_sec": 60,
       "tool_timeout_sec": 3900,
-      "env_vars": ["PEER_BRIDGE_THREADS", "PEER_BRIDGE_TIMEOUT_SECONDS", "PEER_BRIDGE_STATE_DIR", "PEER_BRIDGE_CLAUDE_BIN",
-                   "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"]
+      "env_vars": ["PEER_BRIDGE_ACTIVE", "PEER_BRIDGE_THREADS", "PEER_BRIDGE_TIMEOUT_SECONDS", "PEER_BRIDGE_STATE_DIR",
+                   "PEER_BRIDGE_CLAUDE_BIN", "PEER_BRIDGE_SUBAGENTS", "PEER_BRIDGE_CLAUDE_MODEL",
+                   "PEER_BRIDGE_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"]
     }
   }
 }
