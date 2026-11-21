@@ -33,12 +33,17 @@ from thread_parsing import HistoryLookup  # noqa: E402
 
 class ConsultationTests(BridgeTestCase):
     async def test_the_pre_launch_check_decides_what_starts_within_the_peer_s_budget(self):
-        # Its warnings reach the caller.
+        # It sees the provider and the command that then runs, and its warnings reach the caller.
+        checked = []
+
         async def warning(provider, command, runner):
+            checked.append((provider, command))
             return ["Lost a capability."]
 
         self.client.preflight = warning
         self.assertEqual((await self.consult("codex"))["warnings"], ["Lost a capability."])
+        [(provider, command)] = checked
+        self.assertEqual((provider, command[1:]), ("codex", self.calls()[-1]["arguments"]))
 
         # A refusal starts no peer.
         async def refusal(provider, command, runner):
@@ -51,11 +56,10 @@ class ConsultationTests(BridgeTestCase):
 
         # The check and the peer share one timeout: the peer gets what the check left, and nothing starts once it is
         # spent, the check's own commands included.
-        clock, peer_timeouts = SimpleNamespace(now=100.0), []
+        clock, peer_timeouts, check_timeouts, runs = SimpleNamespace(now=100.0), [], [], []
 
         async def recording(command, prompt, directory, timeout, **options):
-            if prompt is not None:
-                peer_timeouts.append(timeout)
+            (peer_timeouts if prompt is not None else runs).append(timeout)
             return await bridge.run_command(command, prompt, directory, timeout, **options)
 
         half = self.client.timeout / 2
@@ -65,6 +69,9 @@ class ConsultationTests(BridgeTestCase):
                 if spent > self.client.timeout:
                     with self.assertRaises(bridge.CommandTimeout):
                         await runner([command[0], "--version"], None, self.project, 5, {})
+                else:  # a check command that asks for the whole timeout gets only what is left
+                    await runner([sys.executable, "-c", ""], None, self.project, self.client.timeout, {})
+                    check_timeouts.append(self.client.timeout - spent)
                 return []
 
             self.client.preflight, peer_timeouts[:] = slow, []
@@ -76,6 +83,15 @@ class ConsultationTests(BridgeTestCase):
                     with self.assertRaisesRegex(bridge.BridgeError, "timed out"):
                         await self.consult("codex")
                 self.assertEqual(peer_timeouts, expected)
+        self.assertEqual(runs, check_timeouts)  # the check's own command was held to what was left
+
+    def test_the_sub_agent_switch_reaches_both_commands(self):
+        with patch.dict(os.environ, {"PEER_BRIDGE_SUBAGENTS": "0"}):
+            claude = bridge.command_for("claude", self.project, None, "conv")
+            codex = bridge.command_for("codex", self.project, None, "conv")
+        self.assertEqual(claude[claude.index("--tools") + 1], "Read,Glob,Grep,WebSearch")
+        self.assertIn("features.multi_agent_v2.disable_native_tools=true", codex)
+        self.assertIn("multi_agent", codex[codex.index("--disable"):codex.index("exec")])
 
     async def test_both_peers_resume_their_own_conversation_with_context(self):
         for provider in ("claude", "codex"):
@@ -783,6 +799,17 @@ class ConsultationTests(BridgeTestCase):
         same = await self.consult(working_directory=str(package), conversation_id=identifier)
         moved = await self.consult(working_directory=str(package), conversation_id=identifier, ref="HEAD")
         self.assertEqual((same["commit"], moved["commit"]), (first, second))
+        # A follow-up keeps the pin, so extra folders are refused for it too, before a peer starts.
+        with self.assertRaisesRegex(bridge.BridgeError, "cannot be combined with a pinned ref"):
+            await self.consult(working_directory=str(package), conversation_id=identifier,
+                               extra_directories=[str(self.root)])
+        # A background start with both is refused at once, before any job exists.
+        self.client.spawn = spawned = []
+        self.client.spawn = spawned.append
+        with self.assertRaisesRegex(bridge.BridgeError, "cannot be combined with a pinned ref"):
+            await self.client.start("claude", "Explain.", str(package), ref="HEAD", extra_directories=[str(self.root)])
+        self.assertEqual((spawned, list((self.state / "jobs").glob("*"))
+                          if (self.state / "jobs").exists() else []), ([], []))
         calls = self.calls()
         self.assertEqual([call["marker"] for call in calls], ["first", "first", "second"])
         checkout = self.state / "worktrees" / identifier / "pkg"
@@ -837,6 +864,7 @@ class ConsultationTests(BridgeTestCase):
             ({"ref": first, "working_directory": str(self.root / "not-a-repository")}, "inside a git repository"),
             ({"ref": first, "working_directory": str(planted)}, "does not record this folder"),
             ({"ref": first, "working_directory": str(foreign)}, "worktrees is not a folder inside it"),
+            ({"ref": first, "extra_directories": [str(self.root)]}, "cannot be combined with a pinned ref"),
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )
         for arguments, expected in cases:

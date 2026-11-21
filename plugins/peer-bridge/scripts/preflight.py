@@ -20,6 +20,8 @@ from consultation import (
 )
 
 NAME = "Codex"
+EFFORT_REFUSED = ("Codex rejected the reasoning effort {value}. The consultation was not started; correct or unset "
+                  "reasoning_effort, then try again.")
 CHECK_SECONDS = 20
 VERSION_SECONDS = 5
 # Codex exits 2 for an unknown option or value and 1 for configuration it cannot load; any other failure, such as a
@@ -58,21 +60,45 @@ async def codex_check(runner, command, home):
 
     ok, listing = await accepted(*flags, "features", "list")
     if not ok:
-        # Codex refused an option or value: find which, one at a time.
+        # Codex refused an option or value: find which, one at a time, once Codex answers without any.
+        if not (await accepted("features", "list"))[0]:
+            raise Inconclusive("codex features list failed without the bridge's options too")
         for option in codex_options(flags):
-            if not (await accepted(*option, "features", "list"))[0]:
+            alone, listed = await accepted(*option, "features", "list")
+            if not alone:
+                if option[0] == "-c" and option[1].startswith("model_reasoning_effort="):
+                    raise BridgeError(EFFORT_REFUSED.format(value=option[1].partition("=")[2]))
                 raise BridgeError(RESTRICTION_LOST.format(name=NAME, setting=" ".join(option),
                                                           purpose="restrict the peer"))
-        raise Inconclusive("Codex refused the bridge's options together but each alone")
+            # A listing that answered one option alone still says whether a feature it turns off is removed or on.
+            for feature in codex_feature_names(list(option)):
+                stage, state = codex_feature_rows(listed).get(feature, ("", ""))
+                if stage == "removed" or state == "true":
+                    raise BridgeError(RESTRICTION_LOST.format(name=NAME, setting=f"the feature {feature}",
+                                                              purpose=CODEX_FEATURE_PURPOSE))
+        listing = ""
+    # A listing the check cannot read leaves it without a verdict, but only after the other probes, any of which can
+    # still prove a restriction lost.
     rows = codex_feature_rows(listing)
-    if not rows or any(state not in ("true", "false") for _, state in rows.values()):
-        raise Inconclusive("codex features list printed no rows the check can read")
+    # A feature listed as removed is lost, however the rest of the listing reads.
     for feature in codex_feature_names(flags):
-        if not codex_feature_off(feature, rows):
+        if feature in rows and rows[feature][0] == "removed":
+            raise BridgeError(RESTRICTION_LOST.format(name=NAME, setting=f"the feature {feature}",
+                                                      purpose=CODEX_FEATURE_PURPOSE))
+    unread = [] if ok else ["the bridge's options, which Codex refused together but each alone"]
+    if ok and not any(state in ("true", "false") for _, state in rows.values()):
+        unread = ["a listing with no rows the check can read"]
+    # Only the features the command turns off decide: a row Codex adds in a new shape elsewhere does not.
+    for feature in codex_feature_names(flags) if not unread else ():
+        if feature in rows and rows[feature][0] != "removed" and rows[feature][1] not in ("true", "false"):
+            unread.append(f"{feature} in a state it cannot read")
+        elif not codex_feature_off(feature, rows):
             raise BridgeError(RESTRICTION_LOST.format(name=NAME, setting=f"the feature {feature}",
                                                       purpose=CODEX_FEATURE_PURPOSE))
     warnings = []
-    for key in codex_key_names(flags):
+    # The MCP restriction is checked whether or not this command names a server: a renamed table would leave the
+    # bridge finding none to switch off.
+    for key in dict.fromkeys([*codex_key_names(flags), "mcp_servers.enabled"]):
         restriction, capability = CODEX_RESTRICTION_KEYS.get(key), CODEX_CAPABILITY_KEYS.get(key)
         if (restriction or capability) and (await accepted(*CODEX_CANARIES.get(key, ("-c", f"{key}=1")),
                                                            "features", "list"))[0]:
@@ -85,6 +111,9 @@ async def codex_check(runner, command, home):
     if not (await accepted(*probe, "--help"))[0]:
         raise BridgeError(RESTRICTION_LOST.format(name=NAME, setting="codex " + " ".join(probe),
                                                   purpose=CODEX_EXEC_PURPOSE))
+    # An unreadable row leaves the check without a verdict only once no other probe has found a lost restriction.
+    if unread:
+        raise Inconclusive("codex features list shows " + ", ".join(unread))
     return warnings
 
 

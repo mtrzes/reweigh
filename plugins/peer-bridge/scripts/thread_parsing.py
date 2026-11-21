@@ -608,6 +608,8 @@ def core_worktree(config_text):
         line = raw.strip()
         if not line or line.startswith(("#", ";")):
             continue
+        if line.startswith("[") and "]" in line and line[line.index("]") + 1:].strip()[:1] in ("", "#", ";"):
+            line = line[:line.index("]") + 1]  # a comment after a section header
         if line.startswith("["):
             if not line.endswith("]") or '"' in line:
                 section = line  # a subsection; core has none
@@ -619,8 +621,13 @@ def core_worktree(config_text):
             continue
         if section == "core" and key.strip().lower() == "worktree":
             value = value.strip()
-            if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-                value = value[1:-1]
+            if value.startswith('"'):
+                closing = value.find('"', 1)
+                rest = value[closing + 1:].strip() if closing > 0 else "?"
+                # A quoted value, then nothing or a comment.
+                value = value[1:closing] if closing > 0 and (not rest or rest[0] in "#;") else ""
+            else:
+                value = value.split("#", 1)[0].split(";", 1)[0].strip()  # a comment after an unquoted value
             if not value or "\\" in value or '"' in value:
                 return None
             found.append(value)

@@ -46,6 +46,13 @@ class RequestFormatTests(unittest.TestCase):
             ("before model choices", earlier,
              earlier | {"model": None, "reasoning_effort": None, "extra_directories": None}),
             ("no extra directories", written | {"extra_directories": None}, written | {"extra_directories": None}),
+            ("written before extra directories",
+             {"provider": "codex", "prompt": "Why?", "working_directory": "/project", "context": "",
+              "conversation_id": None, "ref": None, "seed_thread": None, "model": "gpt-6-astra",
+              "reasoning_effort": "xhigh"},
+             {"provider": "codex", "prompt": "Why?", "working_directory": "/project", "context": "",
+              "conversation_id": None, "ref": None, "seed_thread": None, "model": "gpt-6-astra",
+              "reasoning_effort": "xhigh", "extra_directories": None}),
             ("directory as text", written | {"extra_directories": "/other"}, None),
             ("number as directory", written | {"extra_directories": [1]}, None),
             ("extra field", written | {"later": 1}, written),
@@ -599,6 +606,19 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertEqual((done["model"], done["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
         with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
             await self.queued(provider="codex", extra_directories=[str(self.root)])
+        # A Claude job's extra directories reach the runner resolved, with its warnings coming back from the result.
+        other = self.root / "other"
+        other.mkdir()
+        job_id = await self.queued(provider="claude", extra_directories=[str(other)])
+        received = []
+
+        async def claude(request):
+            received.append(request["extra_directories"])
+            return {"conversation_id": str(uuid.uuid4()), "reply": "done", "warnings": ["w"]}
+
+        await jobs.run_job(self.client.jobs, job_id, claude)
+        self.assertEqual(received, [[str(other.resolve())]])
+        self.assertEqual((await self.client.job(job_id, {"claude"}))["warnings"], ["w"])
 
     async def test_a_cancel_after_the_reply_but_before_its_outcome_keeps_the_result(self):
         job_id = await self.queued(prompt="PRIVATE QUESTION")

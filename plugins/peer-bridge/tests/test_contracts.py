@@ -20,6 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -28,7 +29,7 @@ from mcp.client.stdio import stdio_client
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, TESTS, BridgeTestCase, bridge, claude_prompt, claude_reply, claude_session,
-    codex_thread, codex_turn, consultation, git_repository,
+    codex_thread, codex_turn, consultation, git_repository, isolate,
 )
 import preflight  # noqa: E402  (found through the script directory support.py adds)
 
@@ -89,7 +90,9 @@ class InstalledCliTests(unittest.TestCase):
         environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
         status = subprocess.run([command[0], "auth", "status", "--json"], cwd=project, env=environment,
                                 capture_output=True, text=True, timeout=DEADLINE_SECONDS)
-        if json.loads(status.stdout or "{}").get("loggedIn") is not False:
+        signed_in = json.loads(status.stdout).get("loggedIn")  # an unreadable answer fails the test, never skips it
+        self.assertIsInstance(signed_in, bool, "claude auth status --json gave no loggedIn")
+        if signed_in:
             self.skipTest("Claude Code read the empty home as signed in; the canary would call a model.")
         result = subprocess.run(command, input="check", cwd=project, env=environment, capture_output=True,
                                 text=True, timeout=DEADLINE_SECONDS)
@@ -113,6 +116,25 @@ class InstalledCliTests(unittest.TestCase):
         self.assertEqual(markers, set())
         self.assertNotEqual(model, "peer-bridge-canary-model")
         self.assertEqual(tools, ["Glob", "Grep", "Read", "Skill", "Task", "WebSearch"])
+
+
+class McpResultTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_result_with_warnings_passes_the_tool_s_output_schema(self):
+        # A consultation's result carries the pre-launch check's warnings, a list, beside its text fields.
+        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-result-")
+        self.addCleanup(temporary.cleanup)
+        isolate(self, Path(temporary.name))
+
+        async def consulted(bridge_self, provider, *arguments, **options):
+            return {"provider": provider, "conversation_id": "conv", "reply": "Answer.", "warnings": ["Checked."]}
+
+        with patch.object(bridge.Bridge, "consult", consulted):
+            for peer, tool in (("codex", "ask_codex"), ("claude", "ask_claude")):
+                with self.subTest(tool=tool):
+                    server = bridge.create_server(peer)
+                    _, result = await server.call_tool(tool, {"prompt": "Q", "working_directory": "/"})
+                    self.assertEqual(result, {"provider": peer, "conversation_id": "conv", "reply": "Answer.",
+                                              "warnings": ["Checked."]})
 
 
 class McpTests(BridgeTestCase):
@@ -187,8 +209,13 @@ class McpTests(BridgeTestCase):
                 self.assertEqual((asked["provider"], asked["reply"]),
                                  ("claude", "claude consulted: Explain the query."))
                 conversation = {"conversation_id": asked["conversation_id"]}
-                failed, resumed = await self.call(session, "ask_claude", {**request, **conversation})
+                failed, resumed = await self.call(session, "ask_claude", {**request, **conversation, "model": "opus",
+                                                                          "reasoning_effort": "max"})
                 self.assertEqual((failed, resumed["conversation_id"]), (False, asked["conversation_id"]))
+                self.assertEqual((resumed["model"], resumed["reasoning_effort"]), ("opus", "max"))
+                arguments = self.calls()[-1]["arguments"]
+                self.assertEqual([arguments[arguments.index(flag) + 1] for flag in ("--model", "--effort")],
+                                 ["opus", "max"])
                 self.assertEqual(await self.call(session, "ask_claude", {**request, "prompt": " "}),
                                  (True, "A consultation question is required."))
             with self.subTest(tool="ask_codex"):
@@ -198,10 +225,14 @@ class McpTests(BridgeTestCase):
 
             waiting = {"wait_seconds": DEADLINE_SECONDS}
             with self.subTest(tool="start_claude_consultation, get_consultation, cancel_consultation"):
-                _, started = await self.call(session, "start_claude_consultation", request)
+                extra = self.root / "extra"
+                extra.mkdir()
+                _, started = await self.call(session, "start_claude_consultation", {
+                    **request, "model": "opus", "reasoning_effort": "max", "extra_directories": [str(extra)]})
                 _, done = await self.call(session, "get_consultation", {**waiting, "job_id": started["job_id"]})
-                self.assertEqual((done["state"], done["reply"]),
-                                 ("completed", "claude consulted: Explain the query."))
+                self.assertEqual((done["state"], done["reply"], done["model"], done["reasoning_effort"]),
+                                 ("completed", "claude consulted: Explain the query.", "opus", "max"))
+                self.assertIn(str(extra.resolve()), self.calls()[-1]["arguments"])
                 _, cancelled = await self.call(session, "cancel_consultation", {"job_id": started["job_id"]})
                 self.assertEqual(cancelled["state"], "completed")
             with self.subTest(tool="start_codex_consultation"):
@@ -237,8 +268,15 @@ class CommandLineTests(BridgeTestCase):
         target = ("ask", "--provider", "claude", "--working-directory", str(self.project))
         context = self.root / "context.md"
         context.write_text("Date filtering is relevant.", encoding="utf-8")
-        code, first = self.run_cli(*target, "--context-file", str(context), prompt=b"Explain the query.")
+        extra = [self.root / "extra-a", self.root / "extra-b"]
+        for folder in extra:
+            folder.mkdir()
+        code, first = self.run_cli(*target, "--context-file", str(context), "--extra-directory", str(extra[0]),
+                                   "--extra-directory", str(extra[1]), prompt=b"Explain the query.")
         self.assertEqual((code, set(first)), (0, {"provider", "conversation_id", "reply"}))
+        arguments = self.calls()[0]["arguments"]
+        added = [arguments[index + 1] for index, word in enumerate(arguments) if word == "--add-dir"]
+        self.assertEqual(added, [str(self.project.resolve()), *(str(folder.resolve()) for folder in extra)])
         self.assertIn("Date filtering is relevant.", first["reply"])
         code, second = self.run_cli(*target, "--conversation-id", first["conversation_id"], prompt=b"Null dates?")
         self.assertEqual((code, second["conversation_id"]), (0, first["conversation_id"]))
@@ -246,6 +284,7 @@ class CommandLineTests(BridgeTestCase):
         for extra, prompt, expected in (
             (("--context-file", str(self.root / "missing.md")), b"Explain.", "Cannot read the context file"),
             ((), b"Explain \xff the query.", "Cannot read the prompt from standard input as UTF-8"),
+            (("--extra-directory", str(context)), b"Explain.", "which is not a directory"),
         ):
             with self.subTest(expected=expected):
                 code, result = self.run_cli(*target, *extra, prompt=prompt)

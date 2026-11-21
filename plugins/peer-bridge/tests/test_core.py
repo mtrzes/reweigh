@@ -96,7 +96,8 @@ class EnvironmentTests(unittest.TestCase):
         result = c.peer_environment(environ)
         # Empty and relative PATH entries would search the consulted repository.
         self.assertEqual(result, {"PATH": "/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept",
-                                  "ANTHROPIC_API_KEY": "kept", c.ACTIVE_ENV: "1", c.CLAUDE_MD_ENV: "1"})
+                                  "ANTHROPIC_API_KEY": "kept", "PEER_BRIDGE_ACTIVE": "1",
+                                  "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"})
         self.assertEqual(environ, original)
         self.assertEqual(c.peer_environment(environ, pinned=True)["GIT_NO_REPLACE_OBJECTS"], "1")
         defaults = [entry for entry in os.defpath.split(os.pathsep) if entry.startswith("/")]
@@ -127,15 +128,22 @@ class EnvironmentTests(unittest.TestCase):
 
 class ChoiceTests(unittest.TestCase):
     def test_choices_are_one_token(self):
-        accepted = ((("gpt-6-astra", "xhigh")), ("gpt-6-astra", "xhigh")), ((("opus", "max")), ("opus", "max")), \
-                   (((" gpt-5.1 ", "")), ("gpt-5.1", None)), (((None, "")), (None, None))
+        accepted = ((("codex", "gpt-6-astra", "xhigh")), ("gpt-6-astra", "xhigh")),\
+                   ((("claude", "opus", "max")), ("opus", "max")),\
+                   ((("claude", "sonnet[1m]", None)), ("sonnet[1m]", None)),\
+                   ((("claude", "us.anthropic.claude-sonnet-4-20250514-v1:0", None)),
+                    ("us.anthropic.claude-sonnet-4-20250514-v1:0", None)),\
+                   ((("claude", "claude-sonnet-4-5@20250929", None)), ("claude-sonnet-4-5@20250929", None)),\
+                   ((("codex", " gpt-5.1 ", "")), ("gpt-5.1", None)), ((("codex", None, "")), (None, None))
         for arguments, expected in accepted:
             with self.subTest(arguments=arguments):
                 self.assertEqual(c.check_choices(*arguments), expected)
-        for model, effort in (("gpt x", None), (None, 'high"\nsandbox_mode="x'), ("a" * 65, None), (None, 3)):
-            with self.subTest(model=model, effort=effort):
+        refused = (("codex", "gpt x", None), ("codex", None, 'high"\nsandbox_mode="x'), ("codex", "a" * 65, None),
+                   ("codex", None, 3), ("codex", "gpt[1m]", None), ("claude", None, "max[1]"))
+        for provider, model, effort in refused:
+            with self.subTest(provider=provider, model=model, effort=effort):
                 with self.assertRaisesRegex(c.BridgeError, "one word"):
-                    c.check_choices(model, effort)
+                    c.check_choices(provider, model, effort)
 
     def test_a_call_overrides_the_environment_of_its_provider(self):
         environ = {"PEER_BRIDGE_CODEX_MODEL": "env-model", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "low",
@@ -226,9 +234,9 @@ class CommandTests(unittest.TestCase):
                                  directories=("/repo", "/other"))
         self.assertEqual(chosen, [*policy, "--add-dir", "/repo", "--add-dir", "/other", "--model", "opus",
                                   "--effort", "max", "--resume", SESSION])
-        # Without sub-agents, only the Agent tool goes.
+        # Without sub-agents, Agent goes, and Skill with it, since a skill can fork a sub-agent.
         without = c.build_command("claude", "/bin/claude", "conv", subagents=False)
-        self.assertEqual(without[without.index("--tools") + 1], "Read,Glob,Grep,WebSearch,Skill")
+        self.assertEqual(without[without.index("--tools") + 1], "Read,Glob,Grep,WebSearch")
 
     def test_codex_command(self):
         sandbox = ["/bin/codex", "--no-daemon", "--sandbox", "read-only", "--ask-for-approval", "never"]
@@ -263,7 +271,7 @@ class CommandTests(unittest.TestCase):
     def test_subagents_are_off_only_for_the_exact_value_0(self):
         for value, enabled in ((None, True), ("0", False), ("1", True), ("", True), ("false", True), (" 0", True)):
             with self.subTest(value=value):
-                environ = {} if value is None else {c.SUBAGENTS_ENV: value}
+                environ = {} if value is None else {"PEER_BRIDGE_SUBAGENTS": value}
                 self.assertEqual(c.subagents_enabled(environ), enabled)
 
 
@@ -1049,6 +1057,10 @@ class RepositoryLayoutTests(unittest.TestCase):
             ('[core]\n\tWorkTree = "../../../sub"\n', "../../../sub"),
             ("[core]\n\tbare = false\n[remote \"origin\"]\n\tworktree = x\n", None),
             ("[core]\n\tworktree = a\n\tworktree = b\n", None),
+            ("[core]\n\tworktree = ../../../lib # relative to gitdir\n", "../../../lib"),
+            ('[core]\n\tworktree = "../../../lib" # relative to gitdir\n', "../../../lib"),
+            ("[core] # submodule settings\n\tworktree = ../lib\n", "../lib"),
+            ("[core] ; submodule settings\n\tworktree = ../lib\n", "../lib"),
             ("[core]\n\tworktree = a\\\\b\n", None),
             ("", None),
         )

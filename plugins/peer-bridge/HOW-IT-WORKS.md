@@ -67,8 +67,9 @@ flowchart TB
 ```
 
 - **The peer only reads.** Claude runs as `claude -p` with Read, Glob, Grep, WebSearch, Skill and Agent, and the
-  repository's CLAUDE.md; Codex as `codex exec` in its read-only sandbox. A peer may start sub-agents, which keep its
-  restrictions, unless `PEER_BRIDGE_SUBAGENTS=0` is set. Neither peer can start another consultation.
+  repository's CLAUDE.md; Codex as `codex exec` in its read-only sandbox. A peer may start sub-agents unless
+  `PEER_BRIDGE_SUBAGENTS=0` is set; that also prevents the one known write, a worktree created by one of the user's
+  own Claude agent types with worktree isolation. Neither peer can start another consultation.
   [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read
   and what the bridge does not cover.
 - **Where the two peers differ.** Claude applies the user's Claude settings and allow rules; Codex ignores the user's
@@ -78,7 +79,7 @@ flowchart TB
   each reads is in
   [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md#what-it-does-not-protect-against).
 - **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
-  readable, a Codex value it does not list is refused before Codex starts; the
+  readable, a Codex model it does not list, or an effort its model does not list, is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
 - **A renamed name never crashes a consultation.** Before a Codex peer starts, `preflight.py` checks in an empty home,
   under the consultation's guard and within its timeout, that Codex still honours the names the command depends on;
@@ -173,10 +174,11 @@ when it may take over.
 
 ## Scope
 
-- **In:** asking the other agent a scoped question with read-only access, continuing that conversation, pinning it to
-  a commit, choosing Codex's model and effort, running it in the background, and reading what the other app's agent
+- **In:** asking the other agent a scoped question with read-only access, continuing that conversation, pinning it to a
+  commit, choosing either peer's model and effort, running it in the background, and reading what the other app's agent
   last said in this repository.
-- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write, push or use
-  tools beyond reading, nesting consultations, network access of its own, and Windows.
+- **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write or push,
+  tools beyond reading, search and, unless switched off, sub-agents, nesting consultations, other network access of its
+  own, and Windows.
 - **Experimental:** the thread tools, `seed_thread` and `list_codex_models` read the apps' internal files, which can
   change in any release. The thread tools and `seed_thread` are off unless `PEER_BRIDGE_THREADS=1` is set.

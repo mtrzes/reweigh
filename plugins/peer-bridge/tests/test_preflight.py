@@ -8,6 +8,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,8 +27,9 @@ async def plain_runner(command, stdin, directory, timeout, environment):
 
 # A Codex that knows every name the bridge passes, except as SETTINGS says: `features list` exits 2 on a value in
 # rejected; it lists each disabled feature as `stable false` unless rows says otherwise; it refuses a wrong-type
-# canary with exit 1 unless its key is in renamed; `exec ... --help` exits 2 on an option in exec_gone; it lists
-# nothing with empty_listing, and exits with a status on an argument named in crash.
+# canary with exit 1 unless its key is in renamed; `exec ... --help` exits 2 on an option in exec_gone (resume_gone
+# under `exec resume`); it lists nothing with empty_listing, only a header with header_only, refuses the values in
+# together only when all are passed at once, and exits with a status on an argument named in crash.
 FAKE = textwrap.dedent('''\
     import json, sys
     settings = json.loads({settings!r})
@@ -39,6 +41,14 @@ FAKE = textwrap.dedent('''\
             sys.exit(status)
     if arguments == ["--version"]:
         print(settings.get("version", "codex-cli 1.0")); sys.exit(0)
+    if arguments[-2:] == ["features", "list"] and settings.get("broken"):
+        sys.exit(1)
+    if arguments[-2:] == ["features", "list"] and all(value in arguments for value in settings.get("together", [None])):
+        sys.exit(2)
+    canary = any(word.endswith("=1") for word in arguments)
+    if arguments[-2:] == ["features", "list"] and settings.get("header_only") and not canary:
+        print("FEATURE STAGE ENABLED")
+        sys.exit(0)
     if arguments[-2:] == ["features", "list"]:
         values = [arguments[i + 1] for i, word in enumerate(arguments[:-1])
                   if word in ("-c", "--disable", "--sandbox", "--ask-for-approval", "--model")]
@@ -52,14 +62,15 @@ FAKE = textwrap.dedent('''\
         if settings.get("empty_listing"):
             sys.exit(0)
         rows = settings.get("rows", {{}})
-        print("image_generation  stable  true")
+        print("image_generation", rows.get("image_generation", "stable true"))
         for name in names:
             row = rows.get(name, "stable false")
             if row is not None:
                 print(name, row)
         sys.exit(0)
     if arguments[:1] == ["exec"] and arguments[-1] == "--help":
-        sys.exit(2 if any(option in settings.get("exec_gone", []) for option in arguments) else 0)
+        gone = settings.get("resume_gone" if "resume" in arguments else "exec_gone", [])
+        sys.exit(2 if any(option in gone for option in arguments) else 0)
     sys.exit(2)
 ''')
 
@@ -109,11 +120,31 @@ class PreflightTests(unittest.TestCase):
             ({"renamed": ["web_search"]}, (), "Codex no longer accepts -c web_search, which the bridge passes to "
              "limit the peer's web search to OpenAI's index"),
             ({"renamed": ["mcp_servers.peer-bridge-canary.enabled"]}, mcp, "-c mcp_servers.enabled"),
+            ({"renamed": ["mcp_servers.peer-bridge-canary.enabled"]}, (), "-c mcp_servers.enabled"),
             ({"rows": {"hooks": "stable true"}}, (), "Codex no longer accepts the feature hooks"),
             ({"rows": {"apps": "removed false"}}, (), "Codex no longer accepts the feature apps"),
             ({"rows": {"plugins": None}}, (), "Codex no longer accepts the feature plugins"),
             ({"exec_gone": ["--ignore-rules"]}, (), "Codex no longer accepts codex exec --json "
              "--ignore-user-config --ignore-rules"),
+            # An unreadable row, listing or combination does not hide a restriction another probe proves lost.
+            ({"rows": {"hooks": "false"}, "renamed": ["web_search"]}, (), "Codex no longer accepts -c web_search"),
+            ({"header_only": True, "renamed": ["web_search"]}, (), "Codex no longer accepts -c web_search"),
+            # A removed feature is lost whatever its state column says, even in a listing with no other readable row.
+            ({"rows": {"apps": "removed n/a"}}, (), "Codex no longer accepts the feature apps"),
+            ({"rows": {**{name: None for name in (*c.CODEX_DISABLED_FEATURES, *c.CODEX_EXTRA_DISABLED_FEATURES,
+                                                  "multi_agent", "multi_agent_v2.disable_native_tools")},
+                       "apps": "removed n/a", "image_generation": "stable on"}}, (),
+             "Codex no longer accepts the feature apps"),
+            # A one-option retry that lists the feature as removed, or as on, refuses too.
+            ({"together": ["hooks", "plugins"], "rows": {"hooks": "removed false"}}, (),
+             "Codex no longer accepts the feature hooks"),
+            ({"together": ["hooks", "plugins"], "rows": {"hooks": "stable true"}}, (),
+             "Codex no longer accepts the feature hooks"),
+            ({"rejected": ['model_reasoning_effort="high"']}, (),
+             "Codex rejected the reasoning effort \"high\". The consultation was not started; correct or unset"),
+            # A confirmed loss refuses even beside a row of a feature the command does not use, in a new shape.
+            ({"rows": {"hooks": "stable true", "image_generation": "stable maybe"}}, (),
+             "Codex no longer accepts the feature hooks"),
         )
         for settings, extra, message in cases:
             command = self.command(self.fake(**settings), subagents=False)
@@ -123,6 +154,30 @@ class PreflightTests(unittest.TestCase):
                     self.check(command)
                 self.assertIn(message, str(refused.exception))
                 self.assertIn("The consultation was not started", str(refused.exception))
+
+    def test_a_follow_up_is_checked_under_exec_resume(self):
+        executable = self.fake(resume_gone=["--ignore-rules"])
+        self.assertEqual(self.check(self.command(executable)), [])
+        with self.assertRaises(c.BridgeError) as refused:
+            self.check(self.command(executable, "session"))
+        self.assertIn("Codex no longer accepts codex exec --json resume --ignore-user-config --ignore-rules",
+                      str(refused.exception))
+
+    def test_the_check_runs_codex_in_an_empty_home_with_only_path(self):
+        seen = []
+
+        async def recording(command, stdin, directory, timeout, environment):
+            seen.append((environment, sorted(directory.iterdir())))  # the home, as Codex finds it
+            return await plain_runner(command, stdin, directory, timeout, environment)
+
+        with unittest.mock.patch.dict("os.environ", {"OPENAI_API_KEY": "secret", "PATH": "relative:/usr/bin:/bin"}):
+            self.check(self.command(self.fake()), runner=recording)
+        self.assertTrue(seen)
+        for environment, entries in seen:
+            self.assertEqual(sorted(environment), ["CODEX_HOME", "HOME", "PATH"])
+            self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+            self.assertEqual(environment["HOME"], environment["CODEX_HOME"])
+            self.assertEqual(entries, [])
 
     def test_a_lost_capability_warns_and_leaves_the_command_alone(self):
         command = self.command(self.fake(renamed=["model_reasoning_effort"]))
@@ -136,8 +191,15 @@ class PreflightTests(unittest.TestCase):
         cases = (
             (str(self.root / "missing"), "missing did not run"),
             (self.fake(crash={"web_search=1": 139}), "a check ended with status 139"),
-            (self.fake(empty_listing=True), "codex features list printed no rows the check can read"),
+            (self.fake(empty_listing=True), "codex features list shows a listing with no rows the check can read"),
             (self.fake(crash={"--version": 1}), "its version could not be read"),
+            # Codex failing without the bridge's options too says nothing about the options.
+            (self.fake(broken=True), "codex features list failed without the bridge's options too"),
+            (self.fake(rows={"hooks": "stable maybe"}), "codex features list shows hooks in a state it cannot read"),
+            (self.fake(rows={"hooks": "false"}), "codex features list shows hooks in a state it cannot read"),
+            (self.fake(header_only=True), "codex features list shows a listing with no rows the check can read"),
+            (self.fake(together=["hooks", "plugins"]),
+             "codex features list shows the bridge's options, which Codex refused together but each alone"),
         )
         for executable, reason in cases:
             gate = preflight.Preflight()

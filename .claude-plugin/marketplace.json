@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "peer-bridge",
-  "description": "Read-only peer consultations between Claude Code and Codex.",
+  "description": "Peer consultations between Claude Code and Codex that do not edit your project.",
   "owner": {
     "name": "mtrzes",
     "url": "https://github.com/mtrzes"
@@ -10,7 +10,7 @@
     {
       "name": "peer-bridge",
       "source": "./plugins/peer-bridge",
-      "description": "Consult Codex from Claude Code or Claude Code from Codex through read-only, resumable CLI sessions, pinned to a commit when needed, and read each other's recent threads in the same repository.",
+      "description": "Consult Codex from Claude Code or Claude Code from Codex through resumable CLI sessions that do not edit your project, pinned to a commit when needed, and read each other's recent threads in the same repository.",
       "author": { "name": "mtrzes", "url": "https://github.com/mtrzes" },
       "category": "development"
     }

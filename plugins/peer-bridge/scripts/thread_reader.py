@@ -377,8 +377,14 @@ def git_common_dir(directory):
             return None
 
     result = ask(*LAYOUT_ARGUMENTS)
-    if result is None or result.returncode:
+    if result is None:
         return None
+    if result.returncode:
+        # A bare repository has no working tree, so no .git pointer to check: its own folder is its git directory.
+        bare = ask(*LAYOUT_ARGUMENTS[:2], "--git-common-dir")
+        location = git_output_path(bare.stdout) if bare and not bare.returncode else None
+        common = Path(location).resolve() if location else None
+        return common if common and Path(directory).resolve().is_relative_to(common) else None
     paths = layout_paths(result.stdout)
     if paths is None:
         # A path holding a newline: one path per call is unambiguous.

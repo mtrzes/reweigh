@@ -21,14 +21,17 @@
   passed with `--add-dir` so the repository's `.claude` settings still do not apply. `ask_claude` and
   `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`; `PEER_BRIDGE_CLAUDE_MODEL` and
   `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` set defaults.
-- Either peer may start sub-agents; `PEER_BRIDGE_SUBAGENTS=0` stops it. For Codex that means `--disable multi_agent`
-  and `features.multi_agent_v2.disable_native_tools=true`, since `--disable multi_agent` alone never did.
+- Either peer may start sub-agents; `PEER_BRIDGE_SUBAGENTS=0` stops it, for Claude by removing Agent and Skill. For
+  Codex that means `--disable multi_agent` and `features.multi_agent_v2.disable_native_tools=true`, since `--disable
+  multi_agent` alone never did.
 - Before a Codex peer starts, the bridge checks that Codex still honours every name the command depends on
-  (`preflight.py`). A lost restriction refuses the call, naming it; a lost capability, or a check without a verdict,
-  adds `warnings` to the result. The command is never changed. Claude Code is checked by the contract tests.
+  (`preflight.py`). A lost restriction, or an option or value Codex rejects on its own, refuses the call, naming it
+  (an `exec` option, with the options checked together); a silently ignored reasoning-effort key, or a check without a
+  verdict, adds `warnings` to a successful result. The command is never changed. Claude Code is checked by the
+  contract tests.
 - A folder whose `.git` points at a git directory that does not point back, as an unpacked archive's can, no longer
   counts as that repository: thread reads refuse it and leave out threads recorded there, and pinning refuses it, and
-  a repository whose `.git/worktrees` is not a folder inside it.
+  a repository whose `.git/worktrees` exists and is not a real folder inside it.
 
 ## 1.0.0-beta.2
 

@@ -60,9 +60,10 @@ CHOICE_ENV = {"claude": ("PEER_BRIDGE_CLAUDE_MODEL", "PEER_BRIDGE_CLAUDE_REASONI
 # passed that way, so its CLAUDE.md loads while its .claude settings, which can run commands, do not.
 CLAUDE_MD_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
 MAX_EXTRA_DIRECTORIES = 20
-# The Claude peer's tools: reading, Anthropic's web search, skills, and sub-agents unless they are switched off.
-CLAUDE_TOOLS = ("Read", "Glob", "Grep", "WebSearch", "Skill")
-CLAUDE_SUBAGENT_TOOL = "Agent"
+# The Claude peer's tools: reading, Anthropic's web search, and, unless sub-agents are switched off, skills and
+# sub-agents. A skill can fork a sub-agent of its own, so Skill goes with Agent.
+CLAUDE_TOOLS = ("Read", "Glob", "Grep", "WebSearch")
+CLAUDE_SUBAGENT_TOOLS = ("Skill", "Agent")
 # Failure messages. Only these fixed messages reach the caller, never the CLI's own output.
 WRITER_HELD = (
     "{name} has this conversation open elsewhere, such as in Codex Desktop, which allows one writer. Start a new "
@@ -78,7 +79,11 @@ OUTSIDE_GIT = (
 MODEL_HINT = " A Codex model or reasoning effort was chosen; if Codex rejected it, change it or leave it unset."
 # Characters a Codex model name or reasoning effort may contain. Codex itself decides which values it accepts.
 CODEX_CHOICE_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+# Claude Code's model names may also carry a bracketed variant, such as sonnet[1m], or be a provider's model ID or ARN.
+CHOICE_CHARACTERS = {"codex": CODEX_CHOICE_CHARACTERS, "claude": CODEX_CHOICE_CHARACTERS | frozenset("[]:/@")}
 CODEX_CHOICE_MAX_LENGTH = 64
+# A Claude model may be a provider's inference-profile ARN.
+CHOICE_MAX_LENGTH = {"codex": CODEX_CHOICE_MAX_LENGTH, "claude": 256}
 CLOSED_INPUT = "The peer CLI closed its input. Check its installation and authentication."
 # Claude Code writes this fixed tag at the start of a stderr line when it does not know the requested model.
 CLAUDE_UNRECOGNIZED_MODEL_TAG = "[claude-code:unrecognized_model]"
@@ -152,11 +157,11 @@ def check_prompt(prompt):
     return prompt
 
 
-def check_choices(model=None, reasoning_effort=None):
+def check_choices(provider, model=None, reasoning_effort=None):
     """Return the requested model and reasoning effort, each None when not chosen.
 
-    Each must be one token of letters, digits, dots, dashes or underscores; the peer CLI decides which values it
-    accepts.
+    Each must be one token of letters, digits, dots, dashes or underscores, and a Claude model may carry brackets; the
+    peer CLI decides which values it accepts.
     """
     choices = []
     for name, value in (("model", model), ("reasoning_effort", reasoning_effort)):
@@ -164,8 +169,9 @@ def check_choices(model=None, reasoning_effort=None):
         if value in (None, ""):
             choices.append(None)
             continue
-        if (not isinstance(value, str) or len(value) > CODEX_CHOICE_MAX_LENGTH
-                or not set(value) <= CODEX_CHOICE_CHARACTERS):
+        allowed = CHOICE_CHARACTERS[provider] if name == "model" else CODEX_CHOICE_CHARACTERS
+        longest = CHOICE_MAX_LENGTH[provider] if name == "model" else CODEX_CHOICE_MAX_LENGTH
+        if not isinstance(value, str) or len(value) > longest or not set(value) <= allowed:
             raise BridgeError(f"{name} must be one word of letters, digits, dots, dashes or underscores.")
         choices.append(value)
     return tuple(choices)
@@ -382,6 +388,7 @@ CODEX_RESTRICTION_KEYS = {
     f"shell_environment_policy.set.{ACTIVE_ENV}": "mark the peer's commands as a consultation",
     "mcp_servers.enabled": "keep MCP servers out of the peer",
     "web_search": "limit the peer's web search to OpenAI's index",
+    "features.multi_agent_v2.disable_native_tools": "keep the peer from starting sub-agents",
 }
 CODEX_CAPABILITY_KEYS = {"model_reasoning_effort": "the chosen reasoning effort"}
 CODEX_EXEC_PURPOSE = "keep the user's configuration and command rules out of the peer"
@@ -417,7 +424,9 @@ def codex_feature_rows(listing):
     """Each feature's stage and effective state from `codex features list`: the first word of a row, a stage of one
     or more words, then the state."""
     rows = (line.split() for line in listing.splitlines())
-    return {words[0]: (" ".join(words[1:-1]), words[-1]) for words in rows if len(words) >= 3}
+    # A row in another shape keeps its name, with a state nothing reads as on or off.
+    return {words[0]: (" ".join(words[1:-1]), words[-1]) if len(words) >= 3 else ("", "")
+            for words in rows if words}
 
 
 def codex_feature_off(name, rows):
@@ -456,7 +465,7 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
     """The peer CLI's argument list. mcp_servers and pinned apply to Codex only; directories, the consulted directory
     and any extra ones, to Claude only."""
     if provider == "claude":
-        tools = [*CLAUDE_TOOLS, CLAUDE_SUBAGENT_TOOL] if subagents else list(CLAUDE_TOOLS)
+        tools = [*CLAUDE_TOOLS, *CLAUDE_SUBAGENT_TOOLS] if subagents else list(CLAUDE_TOOLS)
         command = [
             executable, "--print", "--output-format", "json",
             "--name", f"peer-bridge {conversation_id}",

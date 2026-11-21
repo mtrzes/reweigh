@@ -11,11 +11,18 @@ line runs.
   managed policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers,
   skills' MCP installs or apps, and with web search limited to cached results from OpenAI's index. A peer that tries to
   edit, run a command that writes, or reach the network other than through its search tool is refused by its own
-  CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in its tests.
-- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, the bridge checks in an
-  empty home that Codex still honours the names the command depends on, and refuses the call, naming the setting,
-  when one is lost. When the check cannot reach a verdict, the peer still starts and the result carries a warning.
-  Claude Code's restrictions are checked against the installed Claude Code by the test suite, not before each start.
+  CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in its tests. The one
+  known write, a Claude agent type with worktree isolation, is under Sub-agents below.
+- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, the bridge reads
+  Codex's version; for each new version and command shape it checks, in an empty home, that Codex still honours the
+  names the command depends on, and keeps the verdict in the process that runs the consultation, so each
+  background job checks afresh. It refuses the call, naming the setting (for an `exec` option, the options it
+  checked together), when a restriction is lost or Codex rejects an option or value on its own; top-level
+  options Codex rejects only together leave the check without a verdict, as below, unless another probe proves a
+  restriction lost, while `exec` options rejected together refuse; when Codex silently ignores the reasoning-effort
+  key, or the check cannot reach a verdict, the peer starts if time remains, and a successful result carries a
+  warning. Claude Code's restrictions are checked against the installed Claude Code by the test suite, not before
+  each start.
 - **What a consulted repository can and cannot do.** It cannot make the bridge run its code (a Codex peer may run it
   inside its read-only sandbox), or point it at another repository on your machine. It can still influence what the
   peer answers, and the hints the bridge gives when a consultation fails.
@@ -23,14 +30,15 @@ line runs.
   and refuses to start inside a marked one; the Codex plugin forwards the mark. This guards against recursion, not
   against a process that drops the mark.
 - **Pinning runs no repository code.** Preparing a pinned checkout runs no git hook, file-system monitor or filter
-  driver, including one configured only for linked worktrees; git uses no transport, so a partial clone's missing
-  object fails instead of being fetched, and no replacement object, so the checkout holds the commit named; Git LFS
-  downloads nothing; and no inherited `GIT_*` variable reaches the bridge's git. Removing the checkout touches no other
-  worktree of the repository. This assumes the repository's configuration does not change while the checkout is made.
-  Pinning writes a temporary worktree record into the repository's `.git/worktrees`, removed with the checkout, and is
-  refused in a folder whose `.git` points at a git directory that does not point back, or whose `.git/worktrees` is not
-  a folder inside it. A repository whose objects come from elsewhere, through `objects/info/alternates` or a link, can
-  still show the peer another repository's files at a commit both share.
+  driver, including one configured only for linked worktrees; git uses no transport, so a partial clone's missing object
+  fails instead of being fetched, and no replacement object, so the checkout holds the commit named; Git LFS downloads
+  nothing; and no inherited `GIT_*` variable reaches the bridge's git. Removing the checkout touches no other worktree
+  of the repository. This assumes the repository's configuration does not change while the checkout is made. Pinning
+  writes a temporary worktree record under `worktrees/` in the repository's common git directory (`git rev-parse
+  --git-common-dir`), removed with the checkout, and is refused in a folder whose `.git` points at a git directory that
+  does not point back, or whose `worktrees/` registry exists and is
+  not a real folder inside it. A repository whose objects come from elsewhere, through `objects/info/alternates` or a
+  link, can still show the peer another repository's files at a commit both share.
 - **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
   entries only, so a file in the repository named like a command never runs in place of it.
 - **The peer's process group ends with the consultation**, also when the bridge is killed, and so do the sign-in
@@ -65,7 +73,9 @@ line runs.
 - **Sub-agents.** A peer may start sub-agents unless `PEER_BRIDGE_SUBAGENTS=0`. Each reads the repository's
   instructions too, and each adds to the consultation's cost and time. That they keep the peer's restrictions is an
   observation, not a tested guarantee: a Codex sub-agent was seen with the read-only sandbox, and Claude Code's
-  `--tools` bounds its sub-agents by inspection of its code.
+  `--tools` bounds its sub-agents by inspection of its code. One of your own Claude agent types that sets
+  `isolation: worktree` creates a git worktree in the consulted repository when the peer starts it: a write, which
+  `PEER_BRIDGE_SUBAGENTS=0` avoids, as it also removes Skill, since a skill can fork a sub-agent.
 - **Codex threads continued elsewhere.** A Codex thread is placed in a repository by the working directory its session
   started in. Turns it later ran in another directory, for example after resuming it elsewhere, are returned with it.
   This is one reason the thread tools are off unless `PEER_BRIDGE_THREADS=1`.

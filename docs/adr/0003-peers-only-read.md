@@ -16,12 +16,15 @@ worktree of their own (`claude --worktree`, `codex --worktree`).
 
 ## Decision
 - Every peer peer-bridge starts only reads: Claude with Read, Glob, Grep, WebSearch, Skill and Agent, none of which
-  writes, Codex in its read-only sandbox. Codex can
+  writes, Codex in its read-only sandbox. One exception, accepted by the operator: a user's own Claude agent type
+  with `isolation: worktree`, started through Agent, creates a git worktree; `PEER_BRIDGE_SUBAGENTS=0` removes Agent
+  and Skill. Codex can
   run commands, which its sandbox keeps from writing. No tool, flag or command lets a peer edit, write files or write to
   a session.
-- A tool that consults or starts a consultation is not marked read-only, though the peer only reads: it sends
-  repository content to the other provider, so a host that skips approval for read-only tools still asks. Only
-  the list, read and get tools carry `readOnlyHint`. Annotations are hints a host may ignore.
+- A tool that consults or starts a consultation is not marked read-only, though the peer only reads: it sends repository
+  content to the other provider, so a host that skips approval for read-only tools does not skip them; whether it asks
+  is the host's decision. Every tool carries `readOnlyHint`; only the list, read and get tools set it to true.
+  Annotations are hints a host may ignore.
 - Split work goes through the apps themselves: the lead puts the handoff in its reply; the operator starts the other
   app in its own worktree; the lead follows it with `read_codex_thread` or `read_claude_thread` and reviews the
   resulting branch with `ask_*` and `ref`.

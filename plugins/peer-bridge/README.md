@@ -19,7 +19,7 @@ pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script
 
 Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
 `2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
-On Linux, only the unit tests run, in CI, with Python 3.11 and 3.15.
+On Linux, only the test suites run, in CI, with Python 3.11 and 3.15 and the newest Codex.
 
 On macOS, ChatGPT.app bundles the Codex CLI at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
 without adding it to `PATH`. When `PEER_BRIDGE_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
@@ -85,13 +85,14 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `seed_thread` | Optional ID or name of a thread in the peer's app (a Codex thread when asking Codex, a Claude Code session when asking Claude Code) whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
 | `model` | Optional: the model for this call, such as `gpt-6-astra` for Codex or `opus` for Claude; overrides `PEER_BRIDGE_CODEX_MODEL` or `PEER_BRIDGE_CLAUDE_MODEL`. |
 | `reasoning_effort` | Optional: the reasoning effort for this call, such as `high` or `xhigh` (Codex) or `high` or `max` (Claude); overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT` or `PEER_BRIDGE_CLAUDE_REASONING_EFFORT`. |
-| `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`; a `CLAUDE.md` in one of them is loaded as instructions too. A Codex peer already reads any file you can. |
+| `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`; a `CLAUDE.md` in one of them is loaded as instructions too. Refused for a pinned consultation, whether `ref` is given or the conversation is already pinned. A Codex peer already reads any file you can. |
 
 `list_codex_models` (and the `codex-models` command) lists the models this Codex account offers, with each model's
-reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue
-is readable, a consultation whose model, or whose model's effort, it does not list is refused before Codex starts,
-with the values it does list. Without a catalogue, or without a named model to check an effort against, the choice
-goes to Codex unchecked.
+reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue is
+readable, a consultation whose model, or whose model's effort, it does not list is refused before Codex starts, with the
+values it does list. Without a catalogue, without a named model to check an effort against, or for a model whose
+catalogue entry lists no efforts, the catalogue check is skipped; the pre-launch check still finds out whether Codex
+accepts the effort at all.
 
 For example, ask the available peer tool:
 
@@ -123,8 +124,10 @@ cause only when an exact field or a check establishes it, and never by reading t
 
 The bridge runs the sign-in check and the history lookup only while time remains from the consultation timeout, and
 gives up looking for a `.git` entry after 10 seconds. If the checks and result fields establish no cause, the bridge
-returns a generic error. When a Codex model or reasoning effort was chosen, per call or by environment, a failed Codex
-consultation adds that the choice may be the cause, because Codex reports a rejected choice only in prose.
+returns a generic error. A reasoning effort Codex rejects before the start is refused with a message saying to correct
+or unset it. When a Codex consultation that chose a model or reasoning effort, per call or by environment, fails after
+the start with no other cause established, the message adds that the choice may be the cause, because Codex reports a
+rejected choice only in prose.
 
 ### Pinned refs
 
@@ -134,15 +137,13 @@ worktree under the state directory, and runs the peer in the same subdirectory o
 `commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells
 the peer to read only inside that checkout and to say when something is absent at the commit; this is an instruction,
 not a sandbox, because either peer can read outside it. The worktree is removed when the consultation ends, including
-on timeout or cancellation, and the peer stays read-only. While it exists, git records it in the repository's
-`.git/worktrees`. Pinning is refused in a folder whose `.git` points at a git directory that does not record it back,
-as a folder unpacked from an archive can be set up to, or whose `.git/worktrees` is not a folder inside it.
+on timeout or cancellation, and the peer stays read-only. SECURITY.md says when pinning is refused.
 
 Claude resumes a session only from the directory it ran in, so each conversation keeps one checkout path,
 `worktrees/<conversation_id>`, recreated on every call. A follow-up without `ref` reads the conversation's pinned commit
 again, and a follow-up with `ref` moves the conversation to the new commit. A conversation started without `ref` cannot
-be pinned later; start a new one. Pinning registers the temporary worktree in the repository's `.git/worktrees` while
-the consultation runs and leaves the working tree untouched.
+be pinned later; start a new one. Pinning registers the temporary worktree under `worktrees/` in the repository's common
+git directory while the consultation runs and leaves the working tree untouched.
 
 ### Background consultations
 
@@ -157,11 +158,11 @@ consultation in a detached runner, and return at once:
 `get_consultation` takes the `job_id` and an optional `wait_seconds`, at most 60, and returns the job's `state`:
 `queued`, `running`, `cancelling` while a cancelled job's runner stops, `completed`, `failed`, `cancelled`, or `lost`
 when its runner stopped without a result or did not claim it within two minutes. A completed job adds the
-`conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, `model` and `reasoning_effort` when
-chosen, and `warnings` as for `ask_`; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops a running job, its
-peer and the peer's child processes, and removes a pinned checkout. Each server sees only the jobs of the peers it
-exposes. Each status read or cancellation can wait up to one second for the job's state lock before reporting that
-the job is busy.
+`conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, `model` and `reasoning_effort` when chosen,
+and `warnings` as for `ask_`; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops
+a running job, its peer and the peer's child processes, and removes a pinned checkout. Each server sees only the jobs of
+the peers it exposes. Each status read or cancellation can wait up to one second for the job's state lock before
+reporting that the job is busy.
 
 Each job runs in its own process, so it outlives a restart of the MCP server or the calling app, and a later server
 reads its result. The runner deletes the request holding the prompt and context after trying to read it. The reply is kept as
@@ -245,15 +246,17 @@ uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no
 ```
 
 A history the reader does not know how to parse is refused with a reason. A Codex rollout it cannot place in a
-repository, or a thread with more than one rollout file, is left out of the listing and reads like a missing thread;
-the listing's `unsupported_threads_machine_wide` counts such rollouts across all of `CODEX_HOME`, not only this
-repository's. A history folder the reader cannot list may hold threads of this repository; the listing's
+repository, or a thread with more than one rollout file, is left out of the listing and reads like a missing thread; the
+listing's `unsupported_threads_machine_wide` counts the threads whose rollouts are duplicated, unsupported or
+unreadable, across all of `CODEX_HOME`, not only this repository's. A single supported rollout recorded in another
+repository, a deleted worktree, a folder outside any repository, or one whose `.git` does not point back is left out
+uncounted. A history folder the reader cannot list may hold threads of this repository; the listing's
 `unreadable_history_directories_machine_wide` counts such folders across the whole history.
 
 ## Runtime boundaries
 
-Claude runs as `claude -p` with `Read`, `Glob`, `Grep`, `WebSearch`, `Skill` and, unless `PEER_BRIDGE_SUBAGENTS=0`,
-`Agent`, in `dontAsk` mode, and loads only the user's own settings (`--setting-sources user`), so a consulted
+Claude runs as `claude -p` with `Read`, `Glob`, `Grep`, `WebSearch` and, unless `PEER_BRIDGE_SUBAGENTS=0`, `Skill`
+and `Agent`, in `dontAsk` mode, and loads only the user's own settings (`--setting-sources user`), so a consulted
 repository's `.claude/settings.json` cannot run commands; its `CLAUDE.md` loads through `--add-dir`. It reads inside the
 consulted directory, any `extra_directories`, Claude Code's own temporary folder, and wherever the user's own settings
 add a directory or allow a read; a read anywhere else, such as the home folder, is denied. A web search sends its query
@@ -290,8 +293,9 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
 | `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` | Optional Claude effort, such as `high` or `max`, passed as `--effort`; a per-call `reasoning_effort` overrides it. |
 | `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
-| `PEER_BRIDGE_SUBAGENTS` | `0` stops a peer from starting sub-agents; any other value, or none, lets it start them. They keep its read-only sandbox, and each one adds to the consultation's cost and time. |
+| `PEER_BRIDGE_SUBAGENTS` | `0` stops a peer from starting sub-agents (for Claude, it removes Agent and Skill); any other value, or none, lets it start them. Each one adds to the consultation's cost and time; SECURITY.md says what is known about their restrictions. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
+| `CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION`, `AWS_PROFILE`, `CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, `GOOGLE_APPLICATION_CREDENTIALS` | Claude Code's own backend settings; the Codex plugin forwards them, so a Claude peer started from Codex reaches the same backend. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 
 After increasing the bridge timeout, increase the host's MCP tool timeout to leave room for shutdown and result delivery.
@@ -349,8 +353,10 @@ commit, and CI runs only those.
 ```
 
 The tests use simulated peer executables, synthetic thread histories and temporary state; they call no model and read
-no real history or settings. [ADR 0002](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/docs/adr/0002-test-architecture.md)
-sets the rules a change to the tests follows.
+no real history or user settings. The contract tests also run the installed Codex and Claude Code, each in a temporary
+home, so machine-wide configuration such as `/etc/codex/config.toml` still applies to them.
+[ADR 0002](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/docs/adr/0002-test-architecture.md) sets the rules
+a change to the tests follows.
 
 The adapters follow the official [Claude headless interface](https://code.claude.com/docs/en/headless) and
 [Codex non-interactive interface](https://developers.openai.com/codex/noninteractive).

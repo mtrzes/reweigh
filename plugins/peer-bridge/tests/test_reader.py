@@ -83,6 +83,11 @@ class ReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(ThreadUnavailable, "does not record this folder"):
             ThreadReader(CodexFilesSource()).list(planted, 20)
         self.assertIsNone(thread_reader.git_common_dir(self.root))
+        # A bare repository's own folder scopes its linked worktrees' threads, as before.
+        bare = self.root / "bare.git"
+        git(self.root, "init", "--quiet", "--bare", str(bare))
+        self.assertEqual(thread_reader.git_common_dir(bare), bare)
+        self.assertEqual(thread_reader.git_common_dir(bare / "hooks"), bare)
         # A thread recorded in a redirected folder is left out of a real repository's listing, which still lists its
         # own.
         codex_thread(self.codex_home, main / "deep", codex_turn("t1", "Real."), name="Real review")

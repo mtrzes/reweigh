@@ -84,6 +84,8 @@ class Budget:
 
 
 TIMED_OUT = "Consultation timed out. Narrow the question or increase the configured timeout."
+# A pinned consultation tells the peer to read only inside its checkout, which extra folders would contradict.
+PINNED_EXTRA = "extra_directories cannot be combined with a pinned ref: the peer reads only the pinned checkout."
 
 
 class CommandTimeout(BridgeError):
@@ -703,7 +705,7 @@ class Bridge:
         directory = self.project_directory(provider, working_directory)
         if conversation_id:
             validate_session_id(conversation_id)
-        model, reasoning_effort = check_choices(model, reasoning_effort)
+        model, reasoning_effort = check_choices(provider, model, reasoning_effort)
         if provider == "codex":
             # A model or effort Codex does not list would be ignored or refused only once Codex runs; refuse it now.
             check_against_catalogue(codex_catalogue(), *peer_choices(provider, os.environ, model, reasoning_effort))
@@ -724,6 +726,8 @@ class Bridge:
         """Start a consultation in a detached runner and return its job at once."""
         directory, model, reasoning_effort, extra = self.checked_request(
             provider, prompt, working_directory, conversation_id, model, reasoning_effort, extra_directories)
+        if ref and extra:
+            raise BridgeError(PINNED_EXTRA)
         if seed_thread:
             self.check_threads_enabled()  # refused now, not once the runner reads the thread
         request = job_request(provider, prompt, directory, context, conversation_id, ref, seed_thread, model,
@@ -798,6 +802,8 @@ class Bridge:
             pass  # best effort: a leftover checkout costs only disk space
         with self.store.open(provider, directory, conversation_id) as conversation:
             ref = consulted_ref(conversation.record, ref)
+            if ref is not None and extra:
+                raise BridgeError(PINNED_EXTRA)
             async with pinned_checkout(conversation, directory, ref) as (consulted, commit):
                 command = command_for(provider, consulted, conversation.record.get("backend_session_id"),
                                       conversation.identifier, model, reasoning_effort, pinned=commit is not None,
