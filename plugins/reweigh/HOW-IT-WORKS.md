@@ -96,6 +96,8 @@ flowchart TB
   an earlier run left in its place, share 300 seconds. Removing it afterwards has 120 seconds; a checkout it cannot
   remove is left for a later sweep, and the consultation's outcome stands. The peer's timeout starts once the checkout
   is ready. Reading a `seed_thread`, and sweeping checkouts left by runs that died (120 seconds each), come first.
+  With each guard's stop and the `.git` probe, the timed steps of a pinned call take at most its timeout plus 445
+  seconds; the seed read, the sweep and deleting a folder git does not record are not timed.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
   given a cause only when an exact fact establishes it, such as `loggedIn: false` or a writer-lock file. Codex events
   are separated by LF, so Unicode line separators inside a reply are preserved.

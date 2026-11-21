@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The tool-call timeout registered for Codex, and the `MCP_TOOL_TIMEOUT` the README gives Claude Code, are now 4200
+  seconds, up from 3900: a pinned `ask_*` call at the longest bridge timeout could outlast 3900 seconds and be dropped
+  with its reply. In Codex, add the plugin again after updating; a server registered by hand needs
+  `tool_timeout_sec = 4200` in its `config.toml` section. In Claude Code, raise a `MCP_TOOL_TIMEOUT=3900000` you
+  launch with to `4200000`.
+
 ## 1.0.0-beta.3
 
 - peer-bridge is now reweigh, and the old names are not read any more. To move from 1.0.0-beta.2:
