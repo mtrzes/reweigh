@@ -45,10 +45,10 @@ CODEX_DISABLED_FEATURES = ("apps", "plugins", "hooks", "computer_use", "browser_
 # a rename loses that layer without stopping consultations. A skill's MCP dependency cannot install in `codex exec`,
 # which cannot ask the user, and would otherwise change the user's Codex configuration.
 CODEX_EXTRA_DISABLED_FEATURES = ("skill_mcp_dependency_install",)
-# A Codex peer may start sub-agents, which keep its read-only sandbox, unless this is set to exactly 0. Neither
+# A peer may start sub-agents, which keep its restrictions, unless this is set to exactly 0. Neither
 # --disable multi_agent nor --disable multi_agent_v2 stops them; removing v2's native tools does, and Codex refuses
 # to start when it no longer knows that key, so the switch never fails open.
-SUBAGENTS_ENV = "PEER_BRIDGE_CODEX_SUBAGENTS"
+SUBAGENTS_ENV = "PEER_BRIDGE_SUBAGENTS"
 CODEX_NO_SUBAGENTS = ("--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true")
 PROVIDER_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 MODEL_SETTINGS = {"claude": "the model in Claude Code's settings", "codex": "PEER_BRIDGE_CODEX_MODEL"}
@@ -379,7 +379,9 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
         command.extend(CODEX_NO_SUBAGENTS)
     # Commands Codex runs see only the core environment, never the user's tokens, plus the consultation marker, so a
     # bridge started from one refuses to nest, and in a pinned checkout no replacement objects.
-    overrides = ['web_search="disabled"', 'shell_environment_policy.inherit="core"',
+    # Cached search answers from OpenAI's index and fetches no page, so a query reaches only the provider that already
+    # sees the consultation; `live` would let the peer open any URL.
+    overrides = ['web_search="cached"', 'shell_environment_policy.inherit="core"',
                  f'shell_environment_policy.set.{ACTIVE_ENV}="1"']
     overrides += [f"features.{feature}=false" for feature in CODEX_EXTRA_DISABLED_FEATURES]
     if pinned:

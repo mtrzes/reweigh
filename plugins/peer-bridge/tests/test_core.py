@@ -220,7 +220,7 @@ class CommandTests(unittest.TestCase):
         # A second layer only, so set as configuration, which a Codex that no longer knows the name ignores.
         extra = ["-c", "features.skill_mcp_dependency_install=false"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv"), [
-            *sandbox, *disabled, "-c", 'web_search="disabled"', "-c", 'shell_environment_policy.inherit="core"',
+            *sandbox, *disabled, "-c", 'web_search="cached"', "-c", 'shell_environment_policy.inherit="core"',
             "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', *extra, "exec", "--json",
             "--ignore-user-config", "--ignore-rules", "-",
         ])
@@ -228,7 +228,7 @@ class CommandTests(unittest.TestCase):
         command = c.build_command("codex", "/bin/codex", "conv", SESSION, model="gpt-x", mcp_servers={"b", "a\"q"},
                                   reasoning_effort='xhigh"\nsandbox_mode="danger', pinned=True)
         self.assertEqual(command, [
-            *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="disabled"',
+            *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="cached"',
             "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
             *extra, "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
             "-c", 'model_reasoning_effort="xhigh\\"\\nsandbox_mode=\\"danger"',
@@ -238,7 +238,7 @@ class CommandTests(unittest.TestCase):
         # Sub-agents are on unless the operator turns them off; then both multi-agent tool sets go.
         no_subagents = ["--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv", subagents=False), [
-            *sandbox, *disabled, *no_subagents, "-c", 'web_search="disabled"',
+            *sandbox, *disabled, *no_subagents, "-c", 'web_search="cached"',
             "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
             *extra, "exec", "--json", "--ignore-user-config", "--ignore-rules", "-",
         ])

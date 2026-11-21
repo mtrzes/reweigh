@@ -67,7 +67,7 @@ flowchart TB
 ```
 
 - **The peer only reads.** Claude runs as `claude -p` with Read, Glob and Grep; Codex as `codex exec` in its read-only
-  sandbox. A Codex peer may start sub-agents, which keep its sandbox, unless `PEER_BRIDGE_CODEX_SUBAGENTS=0` is set.
+  sandbox. A Codex peer may start sub-agents, which keep its sandbox, unless `PEER_BRIDGE_SUBAGENTS=0` is set.
   Neither peer can start another consultation.
   [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read
   and what the bridge does not cover.

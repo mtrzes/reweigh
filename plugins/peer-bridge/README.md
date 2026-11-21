@@ -277,7 +277,7 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
 | `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The bridge refuses a model or effort missing from Codex's catalogue before Codex starts. |
 | `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
-| `PEER_BRIDGE_CODEX_SUBAGENTS` | `0` stops a Codex peer from starting sub-agents; any other value, or none, lets it start them. They keep its read-only sandbox, and each one adds to the consultation's cost and time. |
+| `PEER_BRIDGE_SUBAGENTS` | `0` stops a peer from starting sub-agents; any other value, or none, lets it start them. They keep its read-only sandbox, and each one adds to the consultation's cost and time. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 
