@@ -1,6 +1,7 @@
 """Exercise the bridge as its clients see it: the MCP server's tools and envelopes, and the command line's JSON and exit
 statuses. Each test starts real bridge processes; what they do inside is tested in test_bridge.py and test_jobs.py.
-Checks that read the repository's files only are in test_repository.py.
+Checks that read the repository's files only are in test_repository.py; the one that runs the installed Codex's
+`features list` is here.
 
 Codex consultations here are refused before the bridge reads Codex configuration, so no bridge process reads the
 machine's /etc/codex/config.toml.
@@ -9,8 +10,10 @@ machine's /etc/codex/config.toml.
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -23,7 +26,7 @@ from mcp.client.stdio import stdio_client
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, TESTS, BridgeTestCase, bridge, claude_prompt, claude_reply, claude_session,
-    codex_thread, codex_turn, git_repository,
+    codex_thread, codex_turn, consultation, git_repository,
 )
 
 DIFFERENT_PEER = "This conversation belongs to a different provider or working directory."
@@ -32,6 +35,38 @@ DIFFERENT_PEER = "This conversation belongs to a different provider or working d
 def canonical_json(value):
     """JSON text with sorted keys: equal only when the JSON is, so false and 0 differ, and a diff reads line by line."""
     return json.dumps(value, indent=2, sort_keys=True)
+
+
+class CodexContractTests(unittest.TestCase):
+    def test_codex_knows_every_feature_the_bridge_disables(self):
+        # A name Codex drops stops every consultation (--disable) or silently loses a layer (configuration), so the
+        # release run installs Codex and fails here first. Elsewhere it runs when codex is on PATH, in an empty home,
+        # so Codex reads none of the user's configuration or history.
+        executable = shutil.which("codex")
+        if executable is None:
+            self.assertNotEqual(os.environ.get("GITHUB_ACTIONS"), "true", "The release run must install Codex.")
+            self.skipTest("codex is not on PATH.")
+        with tempfile.TemporaryDirectory() as home:
+            listing = subprocess.run(
+                [executable, "features", "list"], cwd=home, env={"PATH": os.environ["PATH"], "HOME": home,
+                                                                  "CODEX_HOME": home},
+                capture_output=True, text=True, timeout=DEADLINE_SECONDS, check=True,
+            ).stdout
+        # Each row is a name, a stage of one or more words, and the effective state.
+        stages = {words[0]: " ".join(words[1:-1]) for words in map(str.split, listing.splitlines()) if len(words) >= 3}
+        for feature in (*consultation.CODEX_DISABLED_FEATURES, *consultation.CODEX_EXTRA_DISABLED_FEATURES):
+            with self.subTest(feature=feature):
+                self.assertTrue(feature in stages, "Codex no longer knows this feature; find what replaced it.")
+                self.assertNotEqual(stages[feature], "removed", "Codex removed this feature; find what replaced it.")
+        # Codex refuses to start on a key it does not know, so the sub-agent switch fails closed; this finds a rename
+        # before a release instead of at an operator's next consultation.
+        with tempfile.TemporaryDirectory() as home:
+            result = subprocess.run(
+                [executable, *consultation.CODEX_NO_SUBAGENTS, "features", "list"], cwd=home,
+                env={"PATH": os.environ["PATH"], "HOME": home, "CODEX_HOME": home},
+                capture_output=True, text=True, timeout=DEADLINE_SECONDS,
+            )
+        self.assertEqual(result.returncode, 0, "Codex no longer accepts the sub-agent switch: " + result.stderr[-300:])
 
 
 class McpTests(BridgeTestCase):

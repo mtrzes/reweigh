@@ -48,6 +48,12 @@ jobs:
           VIRTUAL_ENV="$PWD/.venv" uv sync --active --locked \
             --script plugins/peer-bridge/scripts/bridge.py
 
+      # The newest Codex, for the check that it still knows every feature and setting the bridge turns off
+      # (ADR 0002). The package has no install scripts; Codex runs only in an empty temporary home, and this job holds
+      # no secrets.
+      - name: Install Codex
+        run: npm install --global --ignore-scripts @openai/codex
+
       - name: Run plugin tests
         run: .venv/bin/python -m unittest discover -s plugins/peer-bridge/tests
 

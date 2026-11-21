@@ -4,6 +4,16 @@
 
 - CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
   when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version.
+- Both plugin launchers and the README's commands run `uv --directory <plugin root> run --locked`. `uv` no longer
+  picks up a `.venv` Python from the folder the app starts in (Claude Code ignores a plugin server's `cwd`), and a
+  lock file that no longer matches the script stops the server instead of resolving from the package index.
+- Codex consultations also turn off `skill_mcp_dependency_install`, so a skill cannot add an MCP server to the user's
+  Codex configuration. It is set as configuration, so a Codex that renames it still starts; a contract test, run in
+  CI against the newest Codex, fails when Codex no longer knows a feature the bridge disables.
+- A Codex peer may start sub-agents, which keep its read-only sandbox; `PEER_BRIDGE_CODEX_SUBAGENTS=0` stops it.
+  `--disable multi_agent` never did: it is now passed only with the switch, together with
+  `features.multi_agent_v2.disable_native_tools=true`. The consultation instructions no longer ask the peer not to
+  delegate.
 
 ## 1.0.0-beta.2
 

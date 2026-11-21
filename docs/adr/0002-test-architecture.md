@@ -28,7 +28,10 @@ spent waiting. One maintainer runs the suites on macOS; users run the bridge on 
 - An interleaving is produced with hooks or locks, never with timing; every wait has a deadline.
 - A wait that must wake on an event is proved with its timers made to fail the test, never with a time bound.
 - Every child process, descriptor and lock a test acquires has one owner that releases it when the test fails.
-- Tests run on temporary homes, isolated git config and fakes, never the user's CLIs, history or network.
+- Tests run on temporary homes, isolated git config and fakes, never the user's CLIs, history or network. One
+  exception: a contract test runs the installed Codex's `features list` in an empty temporary home, to check that
+  Codex still knows every feature and setting the bridge turns off; it skips where Codex is absent, and CI installs
+  the newest Codex for it.
 - Shared fixtures and fakes live in `tests/support.py`; test files never import each other.
 - A test that repeats what another proves, at the same or a lower level, is deleted.
 - A passing run prints nothing beyond the test runner's summary, so any warning it shows is new.

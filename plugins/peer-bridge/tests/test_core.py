@@ -215,11 +215,13 @@ class CommandTests(unittest.TestCase):
 
     def test_codex_command(self):
         sandbox = ["/bin/codex", "--no-daemon", "--sandbox", "read-only", "--ask-for-approval", "never"]
-        disabled = ["--disable", "apps", "--disable", "plugins", "--disable", "hooks", "--disable", "multi_agent",
-                    "--disable", "computer_use", "--disable", "browser_use", "--disable", "browser_use_external"]
+        disabled = ["--disable", "apps", "--disable", "plugins", "--disable", "hooks", "--disable", "computer_use",
+                    "--disable", "browser_use", "--disable", "browser_use_external"]
+        # A second layer only, so set as configuration, which a Codex that no longer knows the name ignores.
+        extra = ["-c", "features.skill_mcp_dependency_install=false"]
         self.assertEqual(c.build_command("codex", "/bin/codex", "conv"), [
             *sandbox, *disabled, "-c", 'web_search="disabled"', "-c", 'shell_environment_policy.inherit="core"',
-            "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', "exec", "--json",
+            "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"', *extra, "exec", "--json",
             "--ignore-user-config", "--ignore-rules", "-",
         ])
         # The effort is quoted as one TOML string, so a crafted value cannot add another setting.
@@ -228,11 +230,24 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(command, [
             *sandbox, "--model", "gpt-x", *disabled, "-c", 'web_search="disabled"',
             "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
-            "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
+            *extra, "-c", 'shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"',
             "-c", 'model_reasoning_effort="xhigh\\"\\nsandbox_mode=\\"danger"',
             "-c", 'mcp_servers."a\\"q".enabled=false', "-c", 'mcp_servers."b".enabled=false',
             "exec", "--json", "resume", SESSION, "--ignore-user-config", "--ignore-rules", "-",
         ])
+        # Sub-agents are on unless the operator turns them off; then both multi-agent tool sets go.
+        no_subagents = ["--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true"]
+        self.assertEqual(c.build_command("codex", "/bin/codex", "conv", subagents=False), [
+            *sandbox, *disabled, *no_subagents, "-c", 'web_search="disabled"',
+            "-c", 'shell_environment_policy.inherit="core"', "-c", 'shell_environment_policy.set.PEER_BRIDGE_ACTIVE="1"',
+            *extra, "exec", "--json", "--ignore-user-config", "--ignore-rules", "-",
+        ])
+
+    def test_subagents_are_off_only_for_the_exact_value_0(self):
+        for value, enabled in ((None, True), ("0", False), ("1", True), ("", True), ("false", True), (" 0", True)):
+            with self.subTest(value=value):
+                environ = {} if value is None else {c.SUBAGENTS_ENV: value}
+                self.assertEqual(c.subagents_enabled(environ), enabled)
 
 
 class RecordTests(unittest.TestCase):

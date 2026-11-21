@@ -27,7 +27,7 @@ PROVIDERS = ("claude", "codex")
 CONSULTATION_INSTRUCTIONS = (
     "This is a peer consultation. Follow the project's instructions. "
     "Inspect relevant files if needed and answer the specific question with evidence. "
-    "Do not edit files, run tests, commit, push, contact people, or delegate to another agent. "
+    "Do not edit files, run tests, commit, push or contact people. "
     "The lead agent will decide how to use your advice."
 )
 # A peer can read outside its pinned checkout, and was seen answering from the live working tree when a file was
@@ -38,9 +38,18 @@ PINNED_INSTRUCTIONS = (
     "copy of the repository, which shows other content. When something the question needs is absent at this commit, "
     "say so instead of looking for it elsewhere."
 )
-CODEX_DISABLED_FEATURES = (
-    "apps", "plugins", "hooks", "multi_agent", "computer_use", "browser_use", "browser_use_external",
-)
+# The features a consultation's restrictions depend on, disabled with --disable: Codex refuses to start when it no
+# longer knows one, so a consultation never runs without them.
+CODEX_DISABLED_FEATURES = ("apps", "plugins", "hooks", "computer_use", "browser_use", "browser_use_external")
+# Features disabled only as a second layer, set as configuration, which Codex ignores when it no longer knows the name:
+# a rename loses that layer without stopping consultations. A skill's MCP dependency cannot install in `codex exec`,
+# which cannot ask the user, and would otherwise change the user's Codex configuration.
+CODEX_EXTRA_DISABLED_FEATURES = ("skill_mcp_dependency_install",)
+# A Codex peer may start sub-agents, which keep its read-only sandbox, unless this is set to exactly 0. Neither
+# --disable multi_agent nor --disable multi_agent_v2 stops them; removing v2's native tools does, and Codex refuses
+# to start when it no longer knows that key, so the switch never fails open.
+SUBAGENTS_ENV = "PEER_BRIDGE_CODEX_SUBAGENTS"
+CODEX_NO_SUBAGENTS = ("--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true")
 PROVIDER_NAMES = {"claude": "Claude Code", "codex": "Codex"}
 MODEL_SETTINGS = {"claude": "the model in Claude Code's settings", "codex": "PEER_BRIDGE_CODEX_MODEL"}
 # Failure messages. Only these fixed messages reach the caller, never the CLI's own output.
@@ -293,6 +302,11 @@ THREADS_OFF = (f"Reading the other app's threads is off. It is experimental; set
                "to turn it on, with seed_thread.")
 
 
+def subagents_enabled(environ):
+    """Whether a Codex peer may start sub-agents: only the exact value 0 turns them off."""
+    return environ.get(SUBAGENTS_ENV) != "0"
+
+
 def threads_enabled(environ):
     """Whether the experimental thread tools and seed_thread are on: only the exact value 1 turns them on."""
     return environ.get(THREADS_ENV) == "1"
@@ -337,8 +351,8 @@ def codex_mcp_server_names(config):
 
 
 def build_command(provider, executable, conversation_id, backend_session_id=None, model=None, mcp_servers=(),
-                  reasoning_effort=None, pinned=False):
-    """The peer CLI's argument list. model, mcp_servers, reasoning_effort and pinned apply to Codex only."""
+                  reasoning_effort=None, pinned=False, subagents=True):
+    """The peer CLI's argument list. model, mcp_servers, reasoning_effort, pinned and subagents apply to Codex only."""
     if provider == "claude":
         command = [
             executable, "--print", "--output-format", "json",
@@ -360,10 +374,13 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
         command.extend(["--model", model])
     for feature in CODEX_DISABLED_FEATURES:
         command.extend(["--disable", feature])
+    if not subagents:
+        command.extend(CODEX_NO_SUBAGENTS)
     # Commands Codex runs see only the core environment, never the user's tokens, plus the consultation marker, so a
     # bridge started from one refuses to nest, and in a pinned checkout no replacement objects.
     overrides = ['web_search="disabled"', 'shell_environment_policy.inherit="core"',
                  f'shell_environment_policy.set.{ACTIVE_ENV}="1"']
+    overrides += [f"features.{feature}=false" for feature in CODEX_EXTRA_DISABLED_FEATURES]
     if pinned:
         overrides.append('shell_environment_policy.set.GIT_NO_REPLACE_OBJECTS="1"')
     if reasoning_effort:

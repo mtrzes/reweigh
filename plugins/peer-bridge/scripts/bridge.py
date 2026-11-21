@@ -27,7 +27,8 @@ from consultation import (
     check_limit, check_prompt, check_provider, check_thread_request, codex_mcp_server_names, completed_record,
     consultation_outcome, consultation_result, consultation_timeout, consulted_ref, executable_variable,
     failure_message, filter_overrides, git_environment, new_record, output_signals, peer_environment, resumed_record,
-    THREADS_OFF, safe_path, seed_context, threads_enabled, signed_in_from, validate_commit, validate_session_id, with_seed,
+    THREADS_OFF, safe_path, seed_context, subagents_enabled, threads_enabled, signed_in_from, validate_commit,
+    validate_session_id, with_seed,
 )
 from consultation import (
     FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
@@ -338,6 +339,7 @@ def command_for(provider, working_directory, backend_session_id, conversation_id
     return build_command(
         provider, executable, conversation_id, backend_session_id, model=model,
         mcp_servers=codex_mcp_servers(), reasoning_effort=reasoning_effort, pinned=pinned,
+        subagents=subagents_enabled(os.environ),
     )
 
 

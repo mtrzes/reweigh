@@ -58,10 +58,11 @@ and add the plugin again. Restart Codex to load it.
 Without the plugin, register the script directly and give it the same timeouts in the generated
 `[mcp_servers.peer-bridge]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`),
 and the `env_vars` list from the plugin's `codex-mcp.json`: Codex passes an MCP server only the environment variables
-it names.
+it names. `--directory` points `uv` at the plugin, so it never runs a Python environment from the folder Codex
+starts in, and `--locked` refuses a lock file that no longer matches the script.
 
 ```sh
-codex mcp add peer-bridge -- uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py --peer claude
+codex mcp add peer-bridge -- uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py --peer claude
 ```
 
 The startup allowance covers the first `uv` dependency installation. For Claude Code versions that support
@@ -166,7 +167,7 @@ reads its result. The runner deletes the request holding the prompt and context 
 The `ask` command runs a consultation from a shell and prints its result when it finishes:
 
 ```sh
-uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py ask \
+uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py ask \
   --provider codex --working-directory /absolute/path/to/project --context-file review-context.md < question.md
 ```
 
@@ -182,9 +183,9 @@ start and deletes the job's prompt and context. `job --job-id ID [--wait SECONDS
 `cancel --job-id ID` match `get_consultation` and `cancel_consultation`:
 
 ```sh
-uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py start \
+uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py start \
   --provider codex --working-directory /absolute/path/to/project < question.md
-uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py job --job-id JOB_ID --wait 60
+uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py job --job-id JOB_ID --wait 60
 ```
 
 Use the peer's response as advice. The calling agent assesses it and applies the project's permission and review rules
@@ -228,9 +229,9 @@ bridge reads its three latest agent messages and adds them to the new consultati
 material. The CLI has the same reads:
 
 ```sh
-uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py threads \
+uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py threads \
   --provider codex --working-directory /absolute/path/to/project
-uv run --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py read-thread \
+uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py read-thread \
   --provider codex --working-directory /absolute/path/to/project --thread "Review payment retries"
 ```
 
@@ -276,6 +277,7 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
 | `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The bridge refuses a model or effort missing from Codex's catalogue before Codex starts. |
 | `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
+| `PEER_BRIDGE_CODEX_SUBAGENTS` | `0` stops a Codex peer from starting sub-agents; any other value, or none, lets it start them. They keep its read-only sandbox, and each one adds to the consultation's cost and time. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 

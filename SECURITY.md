@@ -8,9 +8,10 @@ line runs.
 
 - **The peer cannot write.** Claude runs with only Read, Glob and Grep, in `dontAsk` mode, with no MCP servers, slash
   commands or project settings, and ordinary hooks disabled; administrator-managed hooks follow Claude Code's managed
-  policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers, apps or
-  web search. A peer that tries to edit, run a command that writes, or reach the network is refused by its own CLI's
-  restrictions; the bridge chooses those restrictions and checks the exact command line in its tests.
+  policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers, skills'
+  MCP installs, apps or web search. A peer that tries to edit, run a command that writes, or reach the network is
+  refused by its own CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in its
+  tests.
 - **A consultation does not nest by accident.** The bridge marks the peer's environment, and the commands Codex runs,
   and refuses to start inside a marked one. This guards against recursion, not against a process that drops the mark.
 - **Pinning runs no repository code.** Preparing a pinned checkout runs no git hook, file-system monitor or filter
