@@ -596,6 +596,8 @@ def reciprocal(layout):
         return (layout.gitdir_back == dot and layout.commondir == layout.common_dir
                 and layout.git_dir.parent == layout.common_dir / "worktrees")
     # A submodule whose git directory lives in its superproject's: git records the working tree as core.worktree.
+    # Kept although dropping it would shorten the layout check: refusing submodules was rejected by the operator, and
+    # test_reader test_git_s_own_layouts_give_their_shared_git_directory holds it.
     return (layout.worktree_back == layout.top and layout.commondir is None
             and layout.common_dir == layout.git_dir)
 
