@@ -31,7 +31,7 @@
   contract tests.
 - A folder whose `.git` points at a git directory that does not point back, as an unpacked archive's can, no longer
   counts as that repository: thread reads refuse it and leave out threads recorded there, and pinning refuses it, and
-  a repository whose `.git/worktrees` exists and is not a real folder inside it.
+  a repository whose `worktrees/` registry, under its common git directory, exists and is not a real folder inside it.
 
 ## 1.0.0-beta.2
 

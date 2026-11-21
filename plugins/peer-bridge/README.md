@@ -137,7 +137,8 @@ worktree under the state directory, and runs the peer in the same subdirectory o
 `commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells
 the peer to read only inside that checkout and to say when something is absent at the commit; this is an instruction,
 not a sandbox, because either peer can read outside it. The worktree is removed when the consultation ends, including
-on timeout or cancellation, and the peer stays read-only. SECURITY.md says when pinning is refused.
+on timeout or cancellation. The peer keeps its restrictions; SECURITY.md says when pinning is refused, and names the
+one known write a Claude peer can make, which `PEER_BRIDGE_SUBAGENTS=0` prevents.
 
 Claude resumes a session only from the directory it ran in, so each conversation keeps one checkout path,
 `worktrees/<conversation_id>`, recreated on every call. A follow-up without `ref` reads the conversation's pinned commit
@@ -289,7 +290,7 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_CLAUDE_BIN` | Claude Code executable; defaults to `claude` on `PATH`. |
 | `PEER_BRIDGE_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI bundled with ChatGPT.app. A set value that does not resolve is an error, not a fallback. |
 | `PEER_BRIDGE_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
-| `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The bridge refuses a model or effort missing from Codex's catalogue before Codex starts. |
+| `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The catalogue check is described under [Consultation requests](#consultation-requests). |
 | `PEER_BRIDGE_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
 | `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` | Optional Claude effort, such as `high` or `max`, passed as `--effort`; a per-call `reasoning_effort` overrides it. |
 | `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |

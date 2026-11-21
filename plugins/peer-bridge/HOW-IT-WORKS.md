@@ -174,9 +174,9 @@ when it may take over.
 
 ## Scope
 
-- **In:** asking the other agent a scoped question with read-only access, continuing that conversation, pinning it to a
-  commit, choosing either peer's model and effort, running it in the background, and reading what the other app's agent
-  last said in this repository.
+- **In:** asking the other agent a scoped question with read-only access (SECURITY.md names one exception),
+  continuing that conversation, pinning it to a commit, choosing either peer's model and effort, running it in the
+  background, and reading what the other app's agent last said in this repository.
 - **Out:** writing to either app's sessions, operating either app's interface, letting the peer edit, write or push,
   tools beyond reading, search and, unless switched off, sub-agents, nesting consultations, other network access of its
   own, and Windows.
