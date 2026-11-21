@@ -1,0 +1,14 @@
+{
+  "cli_version": "codex-cli 0.169.1",
+  "exit_status": 0,
+  "stdout": [
+    "{\"type\": \"thread.started\", \"thread_id\": \"00000000-0000-0000-0000-000000000007\"}",
+    "{\"type\": \"turn.started\"}",
+    "{\"type\": \"item.completed\", \"item\": {\"id\": \"TEXT-27\", \"type\": \"agent_message\", \"text\": \"PEER-BRIDGE-CAPTURE-OK\"}}",
+    "{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 15138, \"cached_input_tokens\": 13440, \"cache_write_input_tokens\": 0, \"output_tokens\": 14, \"reasoning_output_tokens\": 0}}",
+    ""
+  ],
+  "stderr": [
+    ""
+  ]
+}

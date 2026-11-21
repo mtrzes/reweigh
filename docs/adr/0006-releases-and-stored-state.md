@@ -18,8 +18,8 @@ records, background jobs and their requests, written by whichever release ran th
   `https://github.com/mtrzes/peer-bridge/blob/v<version>/`, so an installed copy reads its own release's documents.
 - Between releases, each user-visible change adds a line under `## Unreleased`, above the newest release.
 - A release, in order: set the version in both manifests and in those links, rename `## Unreleased` to
-  `## <version>`, run both suites locally, start CI by hand on that commit ([ADR 0002](0002-test-architecture.md)),
-  and once it passes, tag that commit `v<version>`.
+  `## <version>`, run `dev/capture_cli_output.py` and commit the diff, run both suites locally, start CI by hand on
+  that commit ([ADR 0002](0002-test-architecture.md)), and once it passes, tag that commit `v<version>`.
 - A field added to stored state gets a default when it is missing, so state an earlier release wrote stays readable;
   today that covers `pinned_commit`, the result's optional fields, and a request's `model` and `reasoning_effort`.
   Readers check the fields they use and ignore others; a missing or malformed field they need stops the resume or job

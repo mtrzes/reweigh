@@ -486,6 +486,69 @@ class OutcomeTests(unittest.TestCase):
                     self.assertEqual(message, generic)
 
 
+def captured(name):
+    """A real CLI's (exit status, stdout, stderr), as dev/capture_cli_output.py recorded and scrubbed it."""
+    capture = json.loads((Path(__file__).parent / "fixtures" / "cli" / f"{name}.json").read_text(encoding="utf-8"))
+    return capture["exit_status"], "\n".join(capture["stdout"]), "\n".join(capture["stderr"])
+
+
+class CapturedOutputTests(unittest.TestCase):
+    """The parsers on the installed CLIs' own output, recaptured before each release (ADR 0002)."""
+
+    REPLY = "PEER-BRIDGE-CAPTURE-OK"
+
+    def test_a_consultation_and_its_resume_yield_the_session_and_reply(self):
+        # Both CLIs keep the session's ID when resumed, and say so again in the resumed run's output.
+        for provider, name, session in (
+                ("codex", "codex-exec", "00000000-0000-0000-0000-000000000007"),
+                ("codex", "codex-exec-resume", "00000000-0000-0000-0000-000000000007"),
+                ("claude", "claude-json", "00000000-0000-0000-0000-000000000002"),
+                ("claude", "claude-json-resume", "00000000-0000-0000-0000-000000000002")):
+            with self.subTest(capture=name):
+                status, output, _ = captured(name)
+                self.assertEqual(c.consultation_outcome(provider, status, output), (session, self.REPLY))
+
+    def test_an_unknown_model_fails_with_the_fields_diagnosis_reads(self):
+        status, output, errors = captured("codex-exec-unknown-model")
+        self.assertEqual(status, 1)
+        with self.assertRaisesRegex(c.BridgeError, "Codex did not complete"):
+            c.parse_response("codex", output)
+        status, output, errors = captured("claude-json-unknown-model")
+        self.assertEqual(status, 1)
+        self.assertEqual(c.output_signals("claude", output, errors),
+                         {"api_error_status": 404, "unrecognized_model": True})
+
+    def test_the_sign_in_probes(self):
+        for provider, name, expected in (("claude", "claude-auth-status-signed-in", True),
+                                         ("claude", "claude-auth-status-signed-out", False),
+                                         ("codex", "codex-login-status-signed-in", True),
+                                         ("codex", "codex-login-status-signed-out", False)):
+            with self.subTest(capture=name):
+                status, output, _ = captured(name)
+                self.assertIs(c.signed_in_from(provider, status, output), expected)
+
+    def test_the_features_list_shows_each_feature_the_command_disables_as_off(self):
+        status, output, _ = captured("codex-features-list")
+        self.assertEqual(status, 0)
+        rows = c.codex_feature_rows(output)
+        disabled = ("apps", "plugins", "hooks", "computer_use", "browser_use", "browser_use_external",
+                    "skill_mcp_dependency_install")
+        self.assertEqual({name: rows.get(name) for name in disabled}, dict.fromkeys(disabled, ("stable", "false")))
+        self.assertEqual(rows["guardianv2.thread_context"], ("removed", "false"))
+        self.assertEqual(rows["web_search_cached"], ("deprecated", "false"))
+
+    def test_the_models_catalogue(self):
+        _, output, _ = captured("codex-models-cache")
+        full = ["low", "medium", "high", "xhigh", "max", "ultra"]
+        self.assertEqual([(model["model"], model["default_reasoning_effort"], model["reasoning_efforts"])
+                          for model in c.catalogue_models(json.loads(output))], [
+            ("gpt-6.2-sol", "low", full), ("gpt-6.2-astra", "low", full), ("gpt-6.1-terra", "low", full),
+            ("gpt-6.1-sol", "low", full), ("gpt-6-astra", "medium", full), ("gpt-6-sol", "medium", full),
+            ("gpt-6-luna", "medium", full[:-1]), ("gpt-5.6-sol", "low", full), ("gpt-5.6-terra", "medium", full),
+            ("gpt-5.6-luna", "medium", full[:-1]),
+        ])
+
+
 class JobRuleTests(unittest.TestCase):
     RECORD = {"provider": "codex", "working_directory": "/repo", "state": "queued", "created_at": 1000.0}
 

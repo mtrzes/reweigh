@@ -1,0 +1,11 @@
+{
+  "cli_version": "2.1.326 (Claude Code)",
+  "exit_status": 1,
+  "stdout": [
+    "{\"loggedIn\": false, \"authMethod\": \"TEXT-10\", \"apiProvider\": \"TEXT-2\", \"analyticsDisabled\": false, \"projectsDirectory\": \"TEXT-11\", \"configDirectory\": \"TEXT-12\", \"loginExpiresAt\": null, \"consoleProfileSignInOffered\": true}",
+    ""
+  ],
+  "stderr": [
+    ""
+  ]
+}

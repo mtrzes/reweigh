@@ -1,0 +1,11 @@
+{
+  "cli_version": "2.1.326 (Claude Code)",
+  "exit_status": 0,
+  "stdout": [
+    "{\"loggedIn\": true, \"authMethod\": \"TEXT-1\", \"apiProvider\": \"TEXT-2\", \"analyticsDisabled\": false, \"projectsDirectory\": \"TEXT-3\", \"configDirectory\": \"TEXT-4\", \"loginExpiresAt\": \"TEXT-5\", \"consoleProfileSignInOffered\": true, \"email\": \"TEXT-6\", \"orgId\": \"00000000-0000-0000-0000-000000000001\", \"orgName\": \"TEXT-7\", \"subscriptionType\": \"TEXT-8\", \"storedClaudeAiLogin\": true, \"planTier\": \"TEXT-9\"}",
+    ""
+  ],
+  "stderr": [
+    ""
+  ]
+}
