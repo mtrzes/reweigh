@@ -161,11 +161,26 @@ class PreflightTests(unittest.TestCase):
 
 
 class PreflightRuleTests(unittest.TestCase):
-    def test_feature_rows_keep_the_stage_and_the_state(self):
-        listing = "apps     stable     false\nmulti_agent  deprecated  true\nodd under development false\nshort x\n"
-        self.assertEqual(c.codex_feature_rows(listing), {
-            "apps": ("stable", "false"), "multi_agent": ("deprecated", "true"), "odd": ("under development", "false"),
-            "short": ("", "")})
+    def test_feature_rows_are_read_from_codex_s_own_listing(self):
+        # `codex features list` from codex-cli 0.169.1 in an empty home, with the bridge's options and sub-agents off.
+        listing = (Path(__file__).parent / "fixtures" / "codex_features_list.txt").read_text()
+        rows = c.codex_feature_rows(listing)
+        self.assertEqual(len(rows), 215)
+        flags = self.command_flags()
+        self.assertEqual({name: rows[name] for name in c.codex_feature_names(flags)}, {
+            "apps": ("stable", "false"), "plugins": ("stable", "false"), "hooks": ("stable", "false"),
+            "computer_use": ("stable", "false"), "browser_use": ("stable", "false"),
+            "browser_use_external": ("stable", "false"), "multi_agent": ("deprecated", "false"),
+            "skill_mcp_dependency_install": ("stable", "false")})
+        self.assertEqual((rows["agent_message_board"], rows["apply_patch_freeform"], rows["image_generation"]),
+                         (("under development", "false"), ("removed", "false"), ("stable", "true")))
+        # A row in another shape keeps its name, with a state nothing reads as on or off.
+        self.assertEqual(c.codex_feature_rows("short x\n"), {"short": ("", "")})
+
+    @staticmethod
+    def command_flags():
+        command = c.build_command("codex", "codex", "conv", None, reasoning_effort="high", subagents=False)
+        return command[1:command.index("exec")]
 
     def test_the_names_a_command_passes(self):
         flags = ["--no-daemon", "--sandbox", "read-only", "--disable", "hooks",

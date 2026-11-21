@@ -40,12 +40,10 @@ from preflight import preflight
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
-from thread_parsing import (
-    FOREIGN_WORKTREES, REDIRECTED_REPOSITORY, reciprocal,
-)
+from thread_parsing import FOREIGN_WORKTREES
 from thread_reader import (
-    LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, layout_paths,
-    nearest_git_entry, repository_layout, worktrees_inside,
+    CORE_WORKTREE_ARGUMENTS, LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, RepositoryRedirected,
+    ThreadReader, ThreadUnavailable, checked_layout, nearest_git_entry, worktrees_inside,
 )
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
@@ -629,17 +627,17 @@ async def pinned_checkout(scope, directory, ref):
         return
     worktree, preparation = scope.worktree, scope.budget(CHECKOUT_PREPARATION_SECONDS)
     outside = "A ref needs a working_directory inside a git repository."
-    paths = layout_paths(os.fsencode(await scope.git(
-        directory, *LAYOUT_ARGUMENTS, failure=outside, timeout=preparation.left())))
-    if paths is None:
-        raise BridgeError(outside)  # a path holding a newline is not read
-    configured = await scope.git(directory, "config", "--file", str(paths[1] / "config"), "--get", "core.worktree",
-                                 failure="Cannot read the repository's git configuration.", allowed=(1,),
-                                 timeout=preparation.left())
+    layout = await scope.git(directory, *LAYOUT_ARGUMENTS, failure=outside, timeout=preparation.left())
+    configured = await scope.git(directory, *CORE_WORKTREE_ARGUMENTS, allowed=(1,), timeout=preparation.left(),
+                                 failure="Cannot read the repository's git configuration.")
     # Pinning writes a worktree record into the repository's git directory, so both must be the repository's own: a
     # folder unpacked from an archive can aim its .git at another repository. These checks come before any write.
-    if not reciprocal(repository_layout(directory, *paths, configured or None)):
-        raise BridgeError(REDIRECTED_REPOSITORY)
+    try:
+        paths = checked_layout(directory, os.fsencode(layout), os.fsencode(configured))
+    except RepositoryRedirected as exc:
+        raise BridgeError(str(exc)) from exc
+    if paths is None:
+        raise BridgeError(outside)
     if not worktrees_inside(paths[2]):
         raise BridgeError(FOREIGN_WORKTREES)
     repository = paths[0]
