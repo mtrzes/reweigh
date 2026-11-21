@@ -36,6 +36,7 @@ from consultation import (
     failure_probes, git_entry_found, history_presence, peer_choices,
 )
 from cleanup import run_to_completion
+from preflight import Preflight
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
@@ -337,6 +338,17 @@ def codex_catalogue():
         return catalogue_models(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return []
+
+
+def conversation_runner(conversation, budget):
+    """The pre-launch check's runner: the conversation's guard, within what is left of the peer's budget."""
+    async def run(command, stdin, directory, timeout, environment):
+        return await conversation.run(command, stdin, directory, min(timeout, budget.left()), environment=environment)
+    return run
+
+
+# One cache per server process: a verdict holds until the CLI's version changes.
+PREFLIGHT = Preflight()
 
 
 def command_for(provider, working_directory, backend_session_id, conversation_id, model=None, reasoning_effort=None,
@@ -659,7 +671,7 @@ async def pinned_checkout(scope, directory, ref):
 
 
 class Bridge:
-    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None):
+    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None, preflight=None):
         self.store = store or SessionStore(state_directory())
         self.readers = readers or {
             "claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource()),
@@ -669,6 +681,8 @@ class Bridge:
         self.spawn = spawn or spawn_runner
         # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
         self.probe = probe or FailureProbe
+        # Checks, before a peer starts, that its CLI still knows the names the command depends on.
+        self.preflight = preflight or PREFLIGHT
 
     def checked_request(self, provider, prompt, working_directory, conversation_id, model=None, reasoning_effort=None,
                         extra_directories=()):
@@ -780,6 +794,8 @@ class Bridge:
                 failure = None
                 # The failure probes share what is left of it.
                 peer = conversation.budget(self.timeout)
+                # A CLI that renamed a name a restriction needs stops the call here, before the peer starts.
+                warnings = await self.preflight(provider, command, conversation_runner(conversation, peer))
                 try:
                     return_code, output, errors = await conversation.run(
                         command, handoff, consulted, self.timeout,
@@ -800,7 +816,8 @@ class Bridge:
                                                  chose_model=bool(model or reasoning_effort))
                 raise BridgeError(failure_message(provider, facts, str(exc))) from exc
             conversation.save(backend_session_id, commit)
-            return consultation_result(provider, conversation.identifier, reply, commit, model, reasoning_effort)
+            return consultation_result(provider, conversation.identifier, reply, commit, model, reasoning_effort,
+                                       warnings)
 
     @staticmethod
     async def failure_facts(provider, record, output, errors, probe, chose_model=False):
@@ -896,7 +913,7 @@ def create_server(peer):
             prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
             ref: str | None = None, seed_thread: str | None = None, model: str | None = None,
             reasoning_effort: str | None = None, extra_directories: list[str] | None = None,
-        ) -> dict[str, str]:
+        ) -> dict[str, Any]:
             """Ask Claude Code a scoped question; reuse conversation_id for a follow-up; pin a commit with ref;
             seed_thread names a Claude Code session whose recent agent messages become context. model (such as opus
             or sonnet) and reasoning_effort (such as high or max) choose what Claude runs for this call;
@@ -934,7 +951,7 @@ def create_server(peer):
             prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
             ref: str | None = None, seed_thread: str | None = None, model: str | None = None,
             reasoning_effort: str | None = None,
-        ) -> dict[str, str]:
+        ) -> dict[str, Any]:
             """Ask Codex a scoped question; reuse conversation_id for a follow-up; pin a commit with ref;
             seed_thread names a Codex thread whose recent agent messages become context. model (such as
             gpt-6-astra) and reasoning_effort (such as low, medium, high or xhigh) choose what Codex runs for this

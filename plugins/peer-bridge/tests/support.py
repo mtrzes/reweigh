@@ -123,6 +123,31 @@ PEER_SOURCE = textwrap.dedent('''\
     from pathlib import Path
 
     arguments = sys.argv[1:]
+    if "SIMULATED_PEER_PID_DIR" not in os.environ:
+        # The bridge's pre-launch check runs the CLI with only PATH and HOME: answer as the real CLI does in an empty,
+        # signed-out home, knowing every name the bridge passes.
+        if "--version" in arguments:
+            print("simulated 1.0")
+            sys.exit(0)
+        if arguments[:2] == ["auth", "status"]:
+            print(json.dumps({"loggedIn": False}))
+            sys.exit(0)
+        if arguments[-2:] == ["features", "list"]:
+            values = [arguments[i + 1] for i, word in enumerate(arguments[:-1]) if word == "-c"]
+            if any(value.endswith("=1") for value in values):
+                sys.exit(1)  # a wrong-type canary on a key Codex knows
+            names = [arguments[i + 1] for i, word in enumerate(arguments[:-1]) if word == "--disable"]
+            names += [value[len("features."):].partition("=")[0] for value in values if value.startswith("features.")]
+            for name in names:
+                print(f"{name}  stable  false")
+            sys.exit(0)
+        if "--print" in arguments:
+            requested = arguments[arguments.index("--tools") + 1].split(",")
+            print(json.dumps({"type": "system", "subtype": "init",
+                              "tools": ["Task" if name == "Agent" else name for name in requested]}))
+            print(json.dumps({"type": "result", "is_error": True, "duration_api_ms": 0}))
+            sys.exit(1)
+        sys.exit(2)
     signed_in = os.environ.get("SIMULATED_SIGNED_IN", "1") == "1"
     if arguments[:2] in (["auth", "status"], ["login", "status"]) and os.environ.get("SIMULATED_PROBE_HANGS"):
         # A sign-in probe that starts a SIGTERM-ignoring helper, records its PID, then never answers.
@@ -248,6 +273,10 @@ class RecordingProbe:
         return self.answers.get(name)
 
 
+async def no_preflight(provider, command, runner):
+    return []
+
+
 class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
     """A bridge whose peers are the stand-in CLI, with every home, state and git setting inside a temporary root."""
 
@@ -271,7 +300,8 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
         })
         self.addCleanup(self.kill_recorded_processes)
         self.store = bridge.SessionStore(self.state)
-        self.client = bridge.Bridge(store=self.store, timeout=DEADLINE_SECONDS)
+        # The pre-launch check is tested on its own; in-process consultations skip it, as each would add CLI runs.
+        self.client = bridge.Bridge(store=self.store, timeout=DEADLINE_SECONDS, preflight=no_preflight)
 
     def kill_recorded_processes(self):
         """The fixture's own cleanup: kill every stand-in peer process that recorded its PID, even if the test failed

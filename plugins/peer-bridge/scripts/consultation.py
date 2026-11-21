@@ -363,6 +363,65 @@ def peer_environment(environ, pinned=False):
     return environment
 
 
+# Pre-launch checks
+#
+# Before a peer starts, the bridge checks that its CLI still knows every name the bridge's command depends on. A name
+# that restricts the peer and is gone refuses the call; a name that only gives the peer a capability and is gone adds
+# a warning to the result. The checks read exit statuses, exact tokens and file existence only.
+
+RESTRICTION_LOST = ("{name} no longer accepts {setting}, which the bridge passes to {purpose}. The consultation was "
+                    "not started; update peer-bridge or check {name}'s release notes.")
+CAPABILITY_LOST = "{name} no longer offers {capability} under that name; the peer ran without it."
+UNVERIFIED = "{name}'s restrictions could not be checked before the start ({reason}); the peer ran unchecked."
+# Codex keys whose wrong-type value Codex refuses while it knows the key, and accepts silently once it does not.
+CODEX_RESTRICTION_KEYS = {
+    "shell_environment_policy.inherit": "keep the peer's commands to the core environment",
+    f"shell_environment_policy.set.{ACTIVE_ENV}": "mark the peer's commands as a consultation",
+}
+CODEX_CAPABILITY_KEYS = {"web_search": "cached web search", "model_reasoning_effort": "the chosen reasoning effort"}
+CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
+# The names Claude Code reports in its system/init tools list for each tool the bridge requests.
+CLAUDE_REPORTED_TOOLS = {"Read": "Read", "Glob": "Glob", "Grep": "Grep", "WebSearch": "WebSearch", "Skill": "Skill",
+                         "Agent": "Task"}
+# Markers a planted canary writes when a protection fails, and what the protection is.
+CLAUDE_CANARY_MARKERS = {
+    "user-hook": ('--settings {"disableAllHooks":true}', "keep the user's hooks from running in the peer"),
+    "project-hook": ("--setting-sources user", "keep a repository's .claude settings out of the peer"),
+    "mcp": ("--strict-mcp-config", "keep MCP servers out of the peer"),
+}
+
+
+def codex_feature_names(command):
+    """The feature names a Codex command turns off: each --disable value, and each features.<name>=false key."""
+    names = [command[index + 1] for index, word in enumerate(command[:-1]) if word == "--disable"]
+    for index, word in enumerate(command[:-1]):
+        if word == "-c" and command[index + 1].startswith("features.") and command[index + 1].endswith("=false"):
+            names.append(command[index + 1][len("features."):-len("=false")])
+    return names
+
+
+def codex_feature_stages(listing):
+    """Each feature's stage from `codex features list`: the first word of a row, then a stage of one or more words,
+    then the effective state."""
+    rows = (line.split() for line in listing.splitlines())
+    return {words[0]: " ".join(words[1:-1]) for words in rows if len(words) >= 3}
+
+
+def codex_key_names(command):
+    """The `-c` keys a Codex command sets, in order."""
+    return [command[index + 1].partition("=")[0] for index, word in enumerate(command[:-1]) if word == "-c"]
+
+
+def claude_tool_names(command):
+    """The tool names a Claude command requests with --tools."""
+    return command[command.index("--tools") + 1].split(",") if "--tools" in command else []
+
+
+def missing_claude_tools(requested, reported):
+    """The requested tools whose reported name system/init does not list."""
+    return [name for name in requested if CLAUDE_REPORTED_TOOLS.get(name, name) not in reported]
+
+
 # Commands
 
 
@@ -469,10 +528,12 @@ def completed_record(record, backend_session_id, commit):
     return updated
 
 
-def consultation_result(provider, conversation_id, reply, commit, model=None, reasoning_effort=None):
-    """The reply and what produced it: the pinned commit, and the model and effort when chosen."""
+def consultation_result(provider, conversation_id, reply, commit, model=None, reasoning_effort=None, warnings=()):
+    """The reply and what produced it: the pinned commit, the model and effort when chosen, and the pre-launch check's
+    warnings when it had any."""
     result = {"provider": provider, "conversation_id": conversation_id, "reply": reply}
-    for key, value in (("commit", commit), ("model", model), ("reasoning_effort", reasoning_effort)):
+    for key, value in (("commit", commit), ("model", model), ("reasoning_effort", reasoning_effort),
+                       ("warnings", list(warnings))):
         if value:
             result[key] = value
     return result
@@ -697,6 +758,8 @@ def valid_job_outcome(outcome):
         return (isinstance(result, dict) and isinstance(result.get("conversation_id"), str)
                 and isinstance(result.get("reply"), str)
                 and all(key not in result or isinstance(result[key], str) for key in RESULT_FIELDS)
+                and ("warnings" not in result or (isinstance(result["warnings"], list)
+                                                  and all(isinstance(item, str) for item in result["warnings"])))
                 and "error" not in outcome)
     return "result" not in outcome and isinstance(outcome.get("error"), str)
 
@@ -735,7 +798,7 @@ def job_view(job_id, record, outcome, state):
     """What get, start and cancel return for a job."""
     view = {"job_id": job_id, "provider": record["provider"], "state": state}
     if outcome is not None and "result" in outcome:
-        view.update({key: outcome["result"][key] for key in RESULT_FIELDS if key in outcome["result"]})
+        view.update({key: outcome["result"][key] for key in (*RESULT_FIELDS, "warnings") if key in outcome["result"]})
     if outcome is not None and "error" in outcome:
         view["error"] = outcome["error"]
     return view

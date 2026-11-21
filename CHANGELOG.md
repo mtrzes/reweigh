@@ -4,6 +4,9 @@
 
 - CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
   when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version.
+- Before a peer starts, the bridge checks that its CLI still knows every name the command depends on (`preflight.py`).
+  A restriction it no longer honours stops the call with a message naming it; a lost capability adds `warnings` to
+  the result. Nothing crashes. The check runs in an empty home under the consultation's guard, once per CLI version.
 - A folder whose `.git` points at a git directory that does not point back (an unpacked archive can carry such a
   pointer) no longer counts as that repository: thread reads refuse it and leave out threads recorded there, and
   pinning refuses it, and also a repository whose `objects/info/alternates` reaches outside it.

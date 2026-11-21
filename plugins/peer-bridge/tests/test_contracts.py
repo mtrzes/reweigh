@@ -1,7 +1,7 @@
 """Exercise the bridge as its clients see it: the MCP server's tools and envelopes, and the command line's JSON and exit
 statuses. Each test starts real bridge processes; what they do inside is tested in test_bridge.py and test_jobs.py.
-Checks that read the repository's files only are in test_repository.py; the one that runs the installed Codex's
-`features list` is here.
+Checks that read the repository's files only are in test_repository.py; those that run the installed Codex and
+Claude Code, in an empty home, are here.
 
 Codex consultations here are refused before the bridge reads Codex configuration, so no bridge process reads the
 machine's /etc/codex/config.toml.
@@ -67,6 +67,40 @@ class CodexContractTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=DEADLINE_SECONDS,
             )
         self.assertEqual(result.returncode, 0, "Codex no longer accepts the sub-agent switch: " + result.stderr[-300:])
+
+
+class InstalledCliTests(unittest.TestCase):
+    """The pre-launch check against the CLIs installed here: the bridge's real commands pass with no warning. Each
+    check runs in an empty temporary home; Claude's runs signed out, so no model is called."""
+
+    def check(self, provider, command):
+        import asyncio
+        import preflight
+
+        async def runner(command, stdin, directory, timeout, environment):
+            result = await asyncio.to_thread(subprocess.run, command, input=stdin.encode() if stdin else None,
+                                             cwd=directory, env=environment, capture_output=True, timeout=timeout)
+            return result.returncode, result.stdout, result.stderr
+
+        return asyncio.run(preflight.Preflight()(provider, command, runner))
+
+    def test_the_installed_codex_knows_every_name_the_bridge_passes(self):
+        executable = shutil.which("codex")
+        if executable is None:
+            self.assertNotEqual(os.environ.get("GITHUB_ACTIONS"), "true", "The release run must install Codex.")
+            self.skipTest("codex is not on PATH.")
+        for subagents in (True, False):
+            command = consultation.build_command("codex", executable, "conv", reasoning_effort="high",
+                                                 subagents=subagents)
+            with self.subTest(subagents=subagents):
+                self.assertEqual(self.check("codex", command), [])
+
+    def test_the_installed_claude_keeps_every_restriction_and_offers_every_tool(self):
+        executable = shutil.which("claude")
+        if executable is None:
+            self.skipTest("claude is not on PATH.")
+        command = consultation.build_command("claude", executable, "conv", directories=("/",))
+        self.assertEqual(self.check("claude", command), [])
 
 
 class McpTests(BridgeTestCase):
