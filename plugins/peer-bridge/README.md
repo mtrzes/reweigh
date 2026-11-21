@@ -85,7 +85,7 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `seed_thread` | Optional ID or name of a thread in the peer's app (a Codex thread when asking Codex, a Claude Code session when asking Claude Code) whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
 | `model` | Optional: the model for this call, such as `gpt-6-astra` for Codex or `opus` for Claude; overrides `PEER_BRIDGE_CODEX_MODEL` or `PEER_BRIDGE_CLAUDE_MODEL`. |
 | `reasoning_effort` | Optional: the reasoning effort for this call, such as `high` or `xhigh` (Codex) or `high` or `max` (Claude); overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT` or `PEER_BRIDGE_CLAUDE_REASONING_EFFORT`. |
-| `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`. A Codex peer already reads any file you can. |
+| `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`; a `CLAUDE.md` in one of them is loaded as instructions too. A Codex peer already reads any file you can. |
 
 `list_codex_models` (and the `codex-models` command) lists the models this Codex account offers, with each model's
 reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue
@@ -105,8 +105,8 @@ For example, ask the available peer tool:
 
 A successful response contains `provider`, `conversation_id` and `reply`; `model` and `reasoning_effort` when the
 consultation chose them, from the request or the environment: the values the bridge passed to the peer CLI, which does
-not report back what it ran with; and `warnings` when the pre-launch check dropped a capability the CLI no longer
-offers, or could not reach a verdict. Pass the returned ID on follow-ups, with the same peer and project directory.
+not report back what it ran with; and `warnings` when Codex's pre-launch check found a capability it no longer
+accepts, or could not reach a verdict. Pass the returned ID on follow-ups, with the same peer and project directory.
 Bridge metadata binds each ID to the provider and canonical directory; it does not accept a peer CLI's raw session ID. A
 per-conversation file lock prevents overlapping resumes.
 
@@ -158,7 +158,7 @@ consultation in a detached runner, and return at once:
 `queued`, `running`, `cancelling` while a cancelled job's runner stops, `completed`, `failed`, `cancelled`, or `lost`
 when its runner stopped without a result or did not claim it within two minutes. A completed job adds the
 `conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, `model` and `reasoning_effort` when
-chosen, and `warnings` when the pre-launch check found a capability gone; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops a running job, its
+chosen, and `warnings` as for `ask_`; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops a running job, its
 peer and the peer's child processes, and removes a pinned checkout. Each server sees only the jobs of the peers it
 exposes. Each status read or cancellation can wait up to one second for the job's state lock before reporting that
 the job is busy.

@@ -33,39 +33,49 @@ from thread_parsing import HistoryLookup  # noqa: E402
 
 class ConsultationTests(BridgeTestCase):
     async def test_the_pre_launch_check_decides_what_starts_within_the_peer_s_budget(self):
-        # Its warnings reach the caller, and the command it returns is the one that runs.
+        # Its warnings reach the caller.
         async def warning(provider, command, runner):
-            return ["Lost a capability."], [*command[:-1], "--checked", command[-1]]
+            return ["Lost a capability."]
 
         self.client.preflight = warning
-        answer = await self.consult("claude", model="opus")
-        self.assertEqual(answer["warnings"], ["Lost a capability."])
-        self.assertIn("--checked", self.calls()[-1]["arguments"])
+        self.assertEqual((await self.consult("codex"))["warnings"], ["Lost a capability."])
 
         # A refusal starts no peer.
         async def refusal(provider, command, runner):
-            raise bridge.BridgeError("Claude Code no longer accepts --tools.")
+            raise bridge.BridgeError("Codex no longer accepts --disable hooks.")
 
         self.client.preflight, calls = refusal, len(self.calls())
-        with self.assertRaisesRegex(bridge.BridgeError, "no longer accepts --tools"):
-            await self.consult("claude")
+        with self.assertRaisesRegex(bridge.BridgeError, "no longer accepts --disable hooks"):
+            await self.consult("codex")
         self.assertEqual(len(self.calls()), calls)
 
-        # A check that spends the whole budget leaves the peer none, so it does not start; the check's own commands
-        # get no more than what is left.
-        clock = SimpleNamespace(now=100.0)
+        # The check and the peer share one timeout: the peer gets what the check left, and nothing starts once it is
+        # spent, the check's own commands included.
+        clock, peer_timeouts = SimpleNamespace(now=100.0), []
 
-        async def slow(provider, command, runner):
-            clock.now += self.client.timeout + 1
-            with self.assertRaises(bridge.CommandTimeout):
-                await runner([command[0], "--version"], None, self.project, 5, {})
-            return [], command
+        async def recording(command, prompt, directory, timeout, **options):
+            if prompt is not None:
+                peer_timeouts.append(timeout)
+            return await bridge.run_command(command, prompt, directory, timeout, **options)
 
-        self.client.preflight = slow
-        self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now)
-        with self.assertRaisesRegex(bridge.BridgeError, "timed out"):
-            await self.consult("claude")
-        self.assertEqual(len(self.calls()), calls)
+        half = self.client.timeout / 2
+        for spent, expected in ((half, [self.client.timeout - half]), (self.client.timeout + 1, [])):
+            async def slow(provider, command, runner):
+                clock.now += spent
+                if spent > self.client.timeout:
+                    with self.assertRaises(bridge.CommandTimeout):
+                        await runner([command[0], "--version"], None, self.project, 5, {})
+                return []
+
+            self.client.preflight, peer_timeouts[:] = slow, []
+            self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now, runner=recording)
+            with self.subTest(spent=spent):
+                if expected:
+                    await self.consult("codex")
+                else:
+                    with self.assertRaisesRegex(bridge.BridgeError, "timed out"):
+                        await self.consult("codex")
+                self.assertEqual(peer_timeouts, expected)
 
     async def test_both_peers_resume_their_own_conversation_with_context(self):
         for provider in ("claude", "codex"):

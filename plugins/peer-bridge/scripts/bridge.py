@@ -355,14 +355,6 @@ def conversation_runner(conversation, budget):
     return run
 
 
-def ran_choices(provider, command, model, reasoning_effort):
-    """The model and effort the command still carries after the pre-launch check dropped any it found unsupported."""
-    if provider == "claude":
-        return (model if "--model" in command else None), (reasoning_effort if "--effort" in command else None)
-    effort_set = any(word.startswith("model_reasoning_effort=") for word in command)
-    return model, (reasoning_effort if effort_set else None)
-
-
 # One cache per server process: a verdict holds until the CLI's version changes.
 PREFLIGHT = Preflight()
 
@@ -815,10 +807,8 @@ class Bridge:
                 failure = None
                 # The failure probes share what is left of it.
                 peer = conversation.budget(self.timeout)
-                # A CLI that renamed a name a restriction needs stops the call here, before the peer starts; one that
-                # lost a capability runs without it.
-                warnings, command = await self.preflight(provider, command, conversation_runner(conversation, peer))
-                model, reasoning_effort = ran_choices(provider, command, model, reasoning_effort)
+                # A Codex that renamed a name a restriction needs stops the call here, before the peer starts.
+                warnings = await self.preflight(provider, command, conversation_runner(conversation, peer))
                 if peer.left() <= 0:
                     raise BridgeError(TIMED_OUT)
                 try:

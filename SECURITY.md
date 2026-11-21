@@ -9,16 +9,16 @@ line runs.
 - **The peer cannot write.** Claude runs with Read, Glob, Grep, WebSearch, Skill and Agent, in `dontAsk` mode, with
   no MCP servers or project settings, and ordinary hooks disabled; administrator-managed hooks follow Claude Code's
   managed policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers,
-  skills' MCP installs or apps, and with web search limited to cached results from OpenAI's index. Sub-agents a peer
-  starts keep its
-  restrictions. A peer that tries to edit, run a command that writes, or reach the network is refused by its own CLI's
-  restrictions; the bridge chooses those restrictions and checks the exact command line in its tests. Before each
-  start it also checks, in an empty home, that the CLI still honours the names it can check: the disabled features,
-  the configuration keys, the `exec` options, Claude's hook, settings and MCP restrictions and its tool list. A lost
-  restriction refuses the call; when a check cannot reach a verdict, the peer starts and the result says so.
-- **What a consulted repository can and cannot do.** It cannot make the bridge run its code, or point it at another
-  repository on your machine. It can still influence what the peer answers, and the hints the bridge gives when a
-  consultation fails.
+  skills' MCP installs or apps, and with web search limited to cached results from OpenAI's index. A peer that tries to
+  edit, run a command that writes, or reach the network other than through its search tool is refused by its own
+  CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in its tests.
+- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, the bridge checks in an
+  empty home that Codex still honours the names the command depends on, and refuses the call, naming the setting,
+  when one is lost. When the check cannot reach a verdict, the peer still starts and the result carries a warning.
+  Claude Code's restrictions are checked against the installed Claude Code by the test suite, not before each start.
+- **What a consulted repository can and cannot do.** It cannot make the bridge run its code (a Codex peer may run it
+  inside its read-only sandbox), or point it at another repository on your machine. It can still influence what the
+  peer answers, and the hints the bridge gives when a consultation fails.
 - **A consultation does not nest by accident.** The bridge marks the peer's environment, and the commands Codex runs,
   and refuses to start inside a marked one; the Codex plugin forwards the mark. This guards against recursion, not
   against a process that drops the mark.
@@ -49,8 +49,8 @@ line runs.
 - **History filenames are checked against the app's records.** The bridge opens only regular files and follows
   no symlinks below the configured app home. A history's recorded session ID must match the filename.
 - **The tools' read-only hint.** Only the list, read and get tools are annotated read-only. `ask_*` and `start_*` are
-  not: they send repository content to the other provider, so a host that skips approval for read-only tools still
-  asks.
+  not: they send repository content to the other provider, so a host that skips approval for read-only tools does not
+  skip them. Whether the host asks is up to the host.
 
 ## What it does not protect against
 
@@ -58,12 +58,14 @@ line runs.
   consulted directory, any `extra_directories` the call names, Claude Code's own temporary folder, and wherever the
   user's own Claude settings add a directory or allow a read. Anything a peer reads goes to its model provider, can go
   into its web searches, goes into its CLI's history, and can come back in the reply.
-- **Prompt injection.** Files in the repository, its instructions (AGENTS.md, CLAUDE.md), its skills and seeded
-  threads can steer the peer. Its reply is advice from a model that may have read hostile text; check it before
+- **Prompt injection.** Files in the repository, its instructions (AGENTS.md, CLAUDE.md), its skills (Codex) and
+  seeded threads can steer the peer. Its reply is advice from a model that may have read hostile text; check it before
   acting on it. Opening a link, loading a remote image, or running a command from a reply can send private data to a
   third party.
 - **Sub-agents.** A peer may start sub-agents unless `PEER_BRIDGE_SUBAGENTS=0`. Each reads the repository's
-  instructions too, and each adds to the consultation's cost and time.
+  instructions too, and each adds to the consultation's cost and time. That they keep the peer's restrictions is an
+  observation, not a tested guarantee: a Codex sub-agent was seen with the read-only sandbox, and Claude Code's
+  `--tools` bounds its sub-agents by inspection of its code.
 - **Codex threads continued elsewhere.** A Codex thread is placed in a repository by the working directory its session
   started in. Turns it later ran in another directory, for example after resuming it elsewhere, are returned with it.
   This is one reason the thread tools are off unless `PEER_BRIDGE_THREADS=1`.

@@ -10,10 +10,13 @@ machine's /etc/codex/config.toml.
 import asyncio
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -27,6 +30,7 @@ from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, TESTS, BridgeTestCase, bridge, claude_prompt, claude_reply, claude_session,
     codex_thread, codex_turn, consultation, git_repository,
 )
+import preflight  # noqa: E402  (found through the script directory support.py adds)
 
 DIFFERENT_PEER = "This conversation belongs to a different provider or working directory."
 
@@ -39,38 +43,76 @@ def canonical_json(value):
 
 
 class InstalledCliTests(unittest.TestCase):
-    """The pre-launch check against the CLIs installed here: the bridge's real commands pass with no warning. Each
-    check runs in an empty temporary home; Claude's runs signed out, so no model is called."""
+    """The bridge's commands against the CLIs installed here, each in an empty temporary home: Codex through the
+    pre-launch check the bridge runs, Claude Code signed out, so no model is called, through a canary of its own."""
 
-    def check(self, provider, command):
-        import asyncio
-        import preflight
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-installed-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
 
-        async def runner(command, stdin, directory, timeout, environment):
-            result = await asyncio.to_thread(subprocess.run, command, input=stdin.encode() if stdin else None,
-                                             cwd=directory, env=environment, capture_output=True, timeout=timeout)
-            return result.returncode, result.stdout, result.stderr
-
-        return asyncio.run(preflight.Preflight()(provider, command, runner))
+    def installed(self, name):
+        executable = shutil.which(name)
+        if executable is None:
+            if name == "codex":
+                self.assertNotEqual(os.environ.get("GITHUB_ACTIONS"), "true", "CI must install Codex.")
+            self.skipTest(f"{name} is not on PATH.")
+        return executable
 
     def test_the_installed_codex_knows_every_name_the_bridge_passes(self):
-        executable = shutil.which("codex")
-        if executable is None:
-            self.assertNotEqual(os.environ.get("GITHUB_ACTIONS"), "true", "The release run must install Codex.")
-            self.skipTest("codex is not on PATH.")
-        for subagents in (True, False):
-            command = consultation.build_command("codex", executable, "conv", reasoning_effort="high",
+        async def runner(command, stdin, directory, timeout, environment):
+            result = await asyncio.to_thread(subprocess.run, command, cwd=directory, env=environment,
+                                             capture_output=True, timeout=timeout)
+            return result.returncode, result.stdout, result.stderr
+
+        executable = self.installed("codex")
+        for session, subagents in ((None, True), (None, False), (str(uuid.uuid4()), True)):
+            command = consultation.build_command("codex", executable, "conv", session, reasoning_effort="high",
                                                  subagents=subagents)
-            with self.subTest(subagents=subagents):
-                self.assertEqual(self.check("codex", command), ([], command))
+            with self.subTest(resumed=bool(session), subagents=subagents):
+                self.assertEqual(asyncio.run(preflight.Preflight()("codex", command, runner)), [])
+
+    def claude_canary(self, command):
+        """Run a Claude command signed out in an empty home, beside a user hook and a user MCP server that each touch
+        a marker if they run, in a repository whose settings name a model; return the markers written, the model
+        and the tools system/init reports."""
+        home, project = self.root / "home", self.root / "project"
+        for folder in (home / ".claude", project / ".claude"):
+            folder.mkdir(parents=True, exist_ok=True)
+        for marker in ("user-hook", "mcp"):
+            (self.root / marker).unlink(missing_ok=True)
+        hook = {"type": "command", "command": f"/usr/bin/touch {shlex.quote(str(self.root / 'user-hook'))}"}
+        (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [hook]}]}}))
+        (home / ".claude.json").write_text(json.dumps(
+            {"mcpServers": {"canary": {"command": "/usr/bin/touch", "args": [str(self.root / "mcp")]}}}))
+        (project / ".claude" / "settings.json").write_text(json.dumps({"model": "peer-bridge-canary-model"}))
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
+        status = subprocess.run([command[0], "auth", "status", "--json"], cwd=project, env=environment,
+                                capture_output=True, text=True, timeout=DEADLINE_SECONDS)
+        if json.loads(status.stdout or "{}").get("loggedIn") is not False:
+            self.skipTest("Claude Code read the empty home as signed in; the canary would call a model.")
+        result = subprocess.run(command, input="check", cwd=project, env=environment, capture_output=True,
+                                text=True, timeout=DEADLINE_SECONDS)
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+        [init] = [record for record in records if record.get("subtype") == "init"]
+        return ({marker for marker in ("user-hook", "mcp") if (self.root / marker).exists()}, init.get("model"),
+                sorted(init.get("tools", [])))
 
     def test_the_installed_claude_keeps_every_restriction_and_offers_every_tool(self):
-        executable = shutil.which("claude")
-        if executable is None:
-            self.skipTest("claude is not on PATH.")
-        command = consultation.build_command("claude", executable, "conv", model="sonnet", reasoning_effort="low",
-                                             directories=("/",))
-        self.assertEqual(self.check("claude", command), ([], command))
+        executable = self.installed("claude")
+        streamed = ["--output-format", "stream-json", "--verbose"]
+        # Control: without the bridge's restrictions, each planted signal fires.
+        control = [executable, "--print", *streamed, "--tools", "Read", "--setting-sources", "user,project"]
+        self.assertEqual(self.claude_canary(control), ({"user-hook", "mcp"}, "peer-bridge-canary-model", ["Read"]))
+        # The bridge's command, as it runs a consultation, with streamed output: none fires, and every tool is there,
+        # Agent under the name Task.
+        command = consultation.build_command("claude", executable, "conv", directories=(str(self.root / "project"),))
+        at = command.index("--output-format")
+        command[at:at + 2] = streamed
+        markers, model, tools = self.claude_canary(command)
+        self.assertEqual(markers, set())
+        self.assertNotEqual(model, "peer-bridge-canary-model")
+        self.assertEqual(tools, ["Glob", "Grep", "Read", "Skill", "Task", "WebSearch"])
 
 
 class McpTests(BridgeTestCase):

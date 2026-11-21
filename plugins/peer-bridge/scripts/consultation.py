@@ -366,38 +366,40 @@ def peer_environment(environ, pinned=False):
 
 # Pre-launch checks
 #
-# Before a peer starts, the bridge checks that its CLI still honours every name the bridge's command depends on. A
-# lost restriction refuses the call; a lost capability is dropped from the command and reported as a warning; a check
-# that cannot reach a verdict is reported as a warning too, and the peer starts. The checks read exit statuses, exact
-# tokens and file existence only.
+# Before a Codex peer starts, the bridge checks that Codex still honours every name the bridge's command depends on.
+# A lost restriction refuses the call; a lost capability, and a check that cannot reach a verdict, become warnings,
+# and the peer starts. The command is never changed. The checks read exit statuses and exact tokens only.
 
 RESTRICTION_LOST = ("{name} no longer accepts {setting}, which the bridge passes to {purpose}. The consultation was "
                     "not started; update peer-bridge or check {name}'s release notes.")
-CAPABILITY_LOST = "{name} no longer offers {capability} under that name; the peer ran without it."
+CAPABILITY_LOST = "{name} no longer accepts {capability} under that name; the peer ran without it."
 UNVERIFIED = "{name}'s restrictions could not be checked before the start ({reason}); the peer ran unchecked."
 CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
 # Codex keys whose wrong-type value Codex refuses while it knows the key, and accepts silently once it does not.
+# web_search is a restriction too: without it, Codex's default or a system configuration could choose live search.
 CODEX_RESTRICTION_KEYS = {
     "shell_environment_policy.inherit": "keep the peer's commands to the core environment",
     f"shell_environment_policy.set.{ACTIVE_ENV}": "mark the peer's commands as a consultation",
     "mcp_servers.enabled": "keep MCP servers out of the peer",
+    "web_search": "limit the peer's web search to OpenAI's index",
 }
-CODEX_CAPABILITY_KEYS = {"web_search": "cached web search", "model_reasoning_effort": "the chosen reasoning effort"}
-# The `codex exec` options the consultation relies on, checked with --help, which fails on an unknown one.
+CODEX_CAPABILITY_KEYS = {"model_reasoning_effort": "the chosen reasoning effort"}
 CODEX_EXEC_PURPOSE = "keep the user's configuration and command rules out of the peer"
-# The names Claude Code reports in its system/init tools list for each tool the bridge requests.
-CLAUDE_REPORTED_TOOLS = {"Read": "Read", "Glob": "Glob", "Grep": "Grep", "WebSearch": "WebSearch", "Skill": "Skill",
-                         "Agent": "Task"}
-# Markers a planted canary writes when a protection fails, and what the protection is.
-CLAUDE_CANARY_MARKERS = {
-    "user-hook": ('--settings {"disableAllHooks":true}', "keep the user's hooks from running in the peer"),
-    "mcp": ("--strict-mcp-config", "keep MCP servers out of the peer"),
-}
-# A model name only the canary repository's own .claude/settings.json names: system/init reports it only when Claude
-# Code loaded that file, which --setting-sources user must prevent.
-CLAUDE_CANARY_MODEL = "peer-bridge-canary-model"
-CLAUDE_PROJECT_SETTINGS = ("--setting-sources user", "keep a repository's .claude settings out of the peer")
-CLAUDE_TOOLS_PURPOSE = "keep the peer to the tools it lists"
+# Codex's top-level options that take a value; each other option stands alone.
+CODEX_VALUE_OPTIONS = ("--disable", "-c", "--sandbox", "--ask-for-approval", "--model")
+
+
+def codex_options(flags):
+    """A Codex command's top-level options, each with its value, in order."""
+    options, index = [], 0
+    while index < len(flags):
+        if flags[index] in CODEX_VALUE_OPTIONS and index + 1 < len(flags):
+            options.append(tuple(flags[index:index + 2]))
+            index += 2
+        else:
+            options.append((flags[index],))
+            index += 1
+    return options
 
 
 def codex_feature_names(command):
@@ -434,44 +436,6 @@ def codex_key_names(command):
             if key not in keys:
                 keys.append(key)
     return keys
-
-
-def without_setting(command, key):
-    """A Codex command without the `-c` override for key."""
-    kept, skip = [], False
-    for index, word in enumerate(command):
-        if skip:
-            skip = False
-            continue
-        if word == "-c" and index + 1 < len(command) and command[index + 1].partition("=")[0] == key:
-            skip = True
-            continue
-        kept.append(word)
-    return kept
-
-
-def without_option(command, option):
-    """A command without an option and its value."""
-    if option not in command:
-        return list(command)
-    index = command.index(option)
-    return command[:index] + command[index + 2:]
-
-
-def claude_tool_names(command):
-    """The tool names a Claude command requests with --tools."""
-    return command[command.index("--tools") + 1].split(",") if "--tools" in command else []
-
-
-def missing_claude_tools(requested, reported):
-    """The requested tools whose reported name system/init does not list."""
-    return [name for name in requested if CLAUDE_REPORTED_TOOLS.get(name, name) not in reported]
-
-
-def unexpected_claude_tools(requested, reported):
-    """The tools system/init lists that the command did not request."""
-    allowed = {CLAUDE_REPORTED_TOOLS.get(name, name) for name in requested}
-    return sorted(set(reported) - allowed)
 
 
 # Commands

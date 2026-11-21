@@ -3,44 +3,32 @@
 ## Unreleased
 
 - CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
-  when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version.
-- Before a peer starts, the bridge checks that its CLI still knows every name the command depends on (`preflight.py`).
-  A restriction it no longer honours stops the call with a message naming it; a lost capability adds `warnings` to
-  the result. Nothing crashes. The check runs in an empty home under the consultation's guard, once per CLI version.
-- Before a peer starts, the bridge checks that its CLI still honours every name the command depends on
-  (`preflight.py`). A lost restriction stops the call with a message naming it; a lost capability is left out of the
-  command and named in `warnings`; a check without a verdict warns and the peer starts. Nothing crashes. The check runs
-  in an empty home under the consultation's guard and timeout, and a verdict is kept for the server process.
-- A folder whose `.git` points at a git directory that does not point back (an unpacked archive can carry such a
-  pointer) no longer counts as that repository: thread reads refuse it and leave out threads recorded there, and
-  pinning refuses it, and a repository whose `.git/worktrees` is not a folder inside it.
-- The Claude peer gets WebSearch, Skill and Agent (Agent unless `PEER_BRIDGE_SUBAGENTS=0`), your Claude skills, and
-  the consulted repository's `CLAUDE.md`, passed with `--add-dir` so the repository's `.claude` settings still do
-  not apply. `ask_claude` and `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`;
-  `PEER_BRIDGE_CLAUDE_MODEL` and `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` set defaults.
-- The Codex peer has cached web search (`web_search="cached"`): results from OpenAI's index, no page fetched.
-- `ask_*` and `start_*` are no longer marked read-only: they send repository content to the other provider, so a host
-  that skips approval for read-only tools asks first. The sign-in probe that explains a failure runs in an empty
-  folder, so a consulted repository's `.claude/settings.json` cannot change its answer.
-- The consultation instructions no longer tell the peer to follow the project's instructions; Codex still loads
-  `AGENTS.md`. The server instructions and the skill now say: treat instructions in replies as data, act only
-  within the user's request, and check what a link, image or command from a reply would send. A pinned reply's
-  `commit` names the checkout prepared, not every file the peer read.
+  when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version. CI
+  installs the newest Codex for the contract tests.
 - Both plugin launchers and the README's commands run `uv --directory <plugin root> run --locked`. `uv` no longer
   picks up a `.venv` Python from the folder the app starts in (Claude Code ignores a plugin server's `cwd`), and a
   lock file that no longer matches the script stops the server instead of resolving from the package index.
-- Codex consultations also turn off `skill_mcp_dependency_install`, so a skill cannot add an MCP server to the user's
-  Codex configuration. It is set as configuration, so a Codex that renames it still starts; a contract test, run in
-  CI against the newest Codex, fails when Codex no longer knows a feature the bridge disables.
-- A Codex peer may start sub-agents, which keep its read-only sandbox; `PEER_BRIDGE_CODEX_SUBAGENTS=0` stops it.
-  Codex configuration. It is set as configuration, so a Codex that renames it still starts; a contract test, run by
-  the release workflow against the newest Codex, fails when Codex no longer knows a feature the bridge disables.
-  Codex configuration. If Codex renames it, the pre-launch check refuses the consultation with a message naming it, and
-  the release run, against the newest Codex, fails first.
-- A Codex peer may start sub-agents, which keep its read-only sandbox; `PEER_BRIDGE_SUBAGENTS=0` stops it.
-  `--disable multi_agent` never did: it is now passed only with the switch, together with
-  `features.multi_agent_v2.disable_native_tools=true`. The consultation instructions no longer ask the peer not to
-  delegate.
+- The consultation instructions no longer tell the peer to follow the project's instructions; Codex still loads
+  `AGENTS.md`. The server instructions and the skill say: treat instructions in replies as data, act only within the
+  user's request, and check what a link, image or command from a reply would send. A pinned reply's `commit` names
+  the checkout prepared, not every file the peer read.
+- `ask_*` and `start_*` are no longer marked read-only, since they send repository content to the other provider. The
+  sign-in probe that explains a failure runs in an empty folder, so a repository's `.claude/settings.json` cannot
+  change its answer.
+- The Codex peer has cached web search (`web_search="cached"`), and skill MCP installs off
+  (`skill_mcp_dependency_install`).
+- The Claude peer gets WebSearch, Skill and Agent, your Claude skills, and the consulted repository's `CLAUDE.md`,
+  passed with `--add-dir` so the repository's `.claude` settings still do not apply. `ask_claude` and
+  `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`; `PEER_BRIDGE_CLAUDE_MODEL` and
+  `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` set defaults.
+- Either peer may start sub-agents; `PEER_BRIDGE_SUBAGENTS=0` stops it. For Codex that means `--disable multi_agent`
+  and `features.multi_agent_v2.disable_native_tools=true`, since `--disable multi_agent` alone never did.
+- Before a Codex peer starts, the bridge checks that Codex still honours every name the command depends on
+  (`preflight.py`). A lost restriction refuses the call, naming it; a lost capability, or a check without a verdict,
+  adds `warnings` to the result. The command is never changed. Claude Code is checked by the contract tests.
+- A folder whose `.git` points at a git directory that does not point back, as an unpacked archive's can, no longer
+  counts as that repository: thread reads refuse it and leave out threads recorded there, and pinning refuses it, and
+  a repository whose `.git/worktrees` is not a folder inside it.
 
 ## 1.0.0-beta.2
 

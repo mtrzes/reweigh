@@ -275,7 +275,7 @@ class RecordingProbe:
 
 
 async def no_preflight(provider, command, runner):
-    return [], command
+    return []
 
 
 class BridgeTestCase(unittest.IsolatedAsyncioTestCase):

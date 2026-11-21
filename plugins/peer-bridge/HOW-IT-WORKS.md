@@ -80,8 +80,10 @@ flowchart TB
 - **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
   readable, a Codex value it does not list is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
-- **A renamed name never crashes a consultation.** Before a peer starts, `preflight.py` checks in an empty home that
-  its CLI still honours the names the command depends on; SECURITY.md says which, and what happens when one is gone.
+- **A renamed name never crashes a consultation.** Before a Codex peer starts, `preflight.py` checks in an empty home,
+  under the consultation's guard and within its timeout, that Codex still honours the names the command depends on;
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md#what-the-bridge-enforces) says
+  what happens when one is gone.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the group and stops all of it
   when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL; sign-in probes and
   git commands run under a guard too. Each guard holds the conversation's lock until its group has stopped. The git

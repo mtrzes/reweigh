@@ -28,9 +28,9 @@ Include only the material needed to answer the question. Ask for file references
 Both peers take `model` and `reasoning_effort` (`--model` and `--reasoning-effort` in the CLI). Set them when the user
 or the project names them, for example `gpt-6-astra` at `xhigh` for a Codex review or `opus` at `max` for a Claude one;
 `list_codex_models` shows what this Codex account offers. Otherwise leave them unset and the peer uses its default. The
-reply names the model and effort the bridge passed when one was chosen, and `warnings` names any the peer's CLI no
-longer offers. Do not call `codex exec`
-directly to get a model: it runs without the bridge's restrictions.
+reply names the model and effort the bridge passed when one was chosen; `PEER_BRIDGE_CODEX_*` and
+`PEER_BRIDGE_CLAUDE_*` set defaults when the call names none. Do not call `codex exec` directly to get a model: it runs
+without the bridge's restrictions.
 
 A consultation that may take minutes, such as a review, runs better in the background: call
 `start_codex_consultation` (or `start_claude_consultation`) with the same arguments, continue independent work, then
