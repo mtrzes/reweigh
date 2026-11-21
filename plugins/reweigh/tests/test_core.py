@@ -495,7 +495,7 @@ def captured(name):
 class CapturedOutputTests(unittest.TestCase):
     """The parsers on the installed CLIs' own output, recaptured before each release (ADR 0002)."""
 
-    REPLY = "PEER-BRIDGE-CAPTURE-OK"
+    REPLY = "REWEIGH-CAPTURE-OK"
 
     def test_a_consultation_and_its_resume_yield_the_session_and_reply(self):
         # Both CLIs keep the session's ID when resumed, and say so again in the resumed run's output.

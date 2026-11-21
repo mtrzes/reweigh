@@ -70,14 +70,14 @@ flowchart TB
 - **The peer only reads.** Claude runs as `claude -p` with the read and search tools the
   [README](README.md#runtime-boundaries) lists, and the repository's CLAUDE.md; Codex as `codex exec` in its read-only
   sandbox. Neither peer can start another consultation.
-  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read,
+  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md) lists what each peer can read,
   the one known write a sub-agent can make, and what the bridge does not cover.
 - **Where the two peers differ.** Claude applies the user's Claude settings and allow rules; Codex ignores the user's
   config.toml and command rules, since an allowed command runs outside its sandbox. Codex loads the repository's skills
   and can run read-only commands; Claude loads the user's own skills and the repository's CLAUDE.md, not its skills,
   and has no shell, since Claude Code's sandbox cannot keep a command from writing. Codex's plugins stay off. Where
   each reads is in
-  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/SECURITY.md#what-it-does-not-protect-against).
+  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-it-does-not-protect-against).
 - **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
   readable, a Codex model it does not list, or an effort its model does not list, is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
@@ -138,7 +138,7 @@ cancel the job, since the caller never learns its ID; if that fails, the error n
 cancellation waits at most one second for the job's state lock, then reports the job busy; the runner still answers
 SIGTERM and SIGHUP while it waits, and cleanup skips a job whose lock is held. The locking model is in
 `scripts/jobs.py`; how long a finished job is kept, in
-[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/SECURITY.md#what-is-kept-and-for-how-long).
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-is-kept-and-for-how-long).
 
 ## Thread reading
 
@@ -167,11 +167,11 @@ app; it puts a handoff in its own reply, which the other session reads with `rea
 `read_claude_thread`. To split work, the operator
 starts the other app in its own worktree (`claude --worktree`, `codex --worktree`), and the lead follows it with
 `read_*_thread` and reviews its branch with `ref`. No peer ever edits;
-[ADR 0003](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/docs/adr/0003-peers-only-read.md) records why.
+[ADR 0003](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0003-peers-only-read.md) records why.
 
 Codex's session files are an internal format. A developer tool outside the plugin, `dev/codex_app_server.py`, tests
 whether Codex's app-server API could replace reading them;
-[ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/docs/adr/0001-codex-thread-reader-source.md) sets
+[ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0001-codex-thread-reader-source.md) sets
 when it may take over.
 
 ## Scope

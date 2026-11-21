@@ -17,13 +17,13 @@ class ScrubTests(unittest.TestCase):
         scrub = capture.Scrubber()
         output = "\n".join(map(json.dumps, (
             {"type": "thread.started", "thread_id": THREAD},
-            {"type": "item.completed", "item": {"type": "agent_message", "text": "PEER-BRIDGE-CAPTURE-OK",
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "REWEIGH-CAPTURE-OK",
                                                 "cwd": "/Users/me/private", "tokens": 3, "done": True}},
             {"type": "item.completed", "item": {"type": "reasoning", "text": "/Users/me/private"}},
         ))) + "\nnot json\n"
         self.assertEqual(scrub.json_lines(output).split("\n"), [
             '{"type": "thread.started", "thread_id": "00000000-0000-0000-0000-000000000001"}',
-            '{"type": "item.completed", "item": {"type": "agent_message", "text": "PEER-BRIDGE-CAPTURE-OK", '
+            '{"type": "item.completed", "item": {"type": "agent_message", "text": "REWEIGH-CAPTURE-OK", '
             '"cwd": "TEXT-1", "tokens": 3, "done": true}}',
             '{"type": "item.completed", "item": {"type": "reasoning", "text": "TEXT-1"}}',
             "TEXT-2", "",

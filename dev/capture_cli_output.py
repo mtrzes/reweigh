@@ -37,7 +37,7 @@ FIXTURES = ROOT / "plugins" / "reweigh" / "tests" / "fixtures" / "cli"
 sys.path.insert(0, str(ROOT / "plugins" / "reweigh" / "scripts"))
 import consultation as c  # noqa: E402
 
-REPLY = "PEER-BRIDGE-CAPTURE-OK"
+REPLY = "REWEIGH-CAPTURE-OK"
 PROMPT = f"Reply with exactly {REPLY} and nothing else. Do not read files or run commands."
 FOLLOW_UP = f"Reply with exactly {REPLY} again, and nothing else."
 UNKNOWN_MODEL = "reweigh-no-such-model"

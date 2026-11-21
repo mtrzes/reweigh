@@ -271,7 +271,7 @@ still apply and may refuse the consultation configuration.
 
 Whatever a peer reads goes to its model provider, and each peer CLI keeps its own authentication, logs and transcript
 outside the project. The full list of what the bridge enforces, and what it does not, is in
-[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/SECURITY.md).
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md).
 
 Claude consultations are saved as CLI sessions for the supplied project and named `reweigh <conversation_id>`.
 They remain resumable by their Claude session ID. The [Claude session documentation][claude-sessions] excludes print-mode
@@ -355,7 +355,7 @@ commit, and CI runs only those.
 The tests use simulated peer executables, synthetic thread histories and temporary state; they call no model and read
 no real history or user settings. The contract tests also run the installed Codex and Claude Code, each in a temporary
 home, so machine-wide configuration such as `/etc/codex/config.toml` still applies to them.
-[ADR 0002](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.2/docs/adr/0002-test-architecture.md) sets the rules
+[ADR 0002](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0002-test-architecture.md) sets the rules
 a change to the tests follows.
 
 The adapters follow the official [Claude headless interface](https://code.claude.com/docs/en/headless) and

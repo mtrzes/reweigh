@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-beta.3
 
 - peer-bridge is now reweigh, and the old names are not read any more. To move from 1.0.0-beta.2:
   - Install `reweigh@reweigh` from the `mtrzes/reweigh` marketplace in Claude Code and in Codex, then remove

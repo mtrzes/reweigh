@@ -4,8 +4,8 @@
   "stdout": [
     "{\"type\": \"thread.started\", \"thread_id\": \"00000000-0000-0000-0000-000000000007\"}",
     "{\"type\": \"turn.started\"}",
-    "{\"type\": \"item.completed\", \"item\": {\"id\": \"TEXT-27\", \"type\": \"agent_message\", \"text\": \"PEER-BRIDGE-CAPTURE-OK\"}}",
-    "{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 30556, \"cached_input_tokens\": 26880, \"cache_write_input_tokens\": 0, \"output_tokens\": 28, \"reasoning_output_tokens\": 0}}",
+    "{\"type\": \"item.completed\", \"item\": {\"id\": \"TEXT-27\", \"type\": \"agent_message\", \"text\": \"REWEIGH-CAPTURE-OK\"}}",
+    "{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 30532, \"cached_input_tokens\": 28416, \"cache_write_input_tokens\": 0, \"output_tokens\": 24, \"reasoning_output_tokens\": 0}}",
     ""
   ],
   "stderr": [
