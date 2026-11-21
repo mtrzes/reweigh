@@ -4,6 +4,9 @@
 
 - CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
   when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version.
+- A folder whose `.git` points at a git directory that does not point back (an unpacked archive can carry such a
+  pointer) no longer counts as that repository: thread reads refuse it and leave out threads recorded there, and
+  pinning refuses it, and also a repository whose `objects/info/alternates` reaches outside it.
 - The Claude peer gets WebSearch, Skill and Agent (Agent unless `PEER_BRIDGE_SUBAGENTS=0`), your Claude skills, and
   the consulted repository's `CLAUDE.md`, passed with `--add-dir` so the repository's `.claude` settings still do
   not apply. `ask_claude` and `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`;

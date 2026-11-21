@@ -130,9 +130,13 @@ consultation adds that the choice may be the cause, because Codex reports a reje
 A peer reading the working tree while the calling agent keeps editing it reviews a moving target. With `ref`, the
 bridge resolves the ref to a commit in the working directory's repository, checks that commit out as a detached
 worktree under the state directory, and runs the peer in the same subdirectory of that checkout. The response adds
-`commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells the peer to read only inside that checkout and to say when
-something is absent at the commit; this is an instruction, not a sandbox, because either peer can read outside it. The
-worktree is removed when the consultation ends, including on timeout or cancellation, and the peer stays read-only.
+`commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells
+the peer to read only inside that checkout and to say when something is absent at the commit; this is an instruction,
+not a sandbox, because either peer can read outside it. The worktree is removed when the consultation ends, including
+on timeout or cancellation, and the peer stays read-only. While it exists, git records it in the repository's
+`.git/worktrees`. Pinning is refused in a folder whose `.git` points at a git directory that does not record it back,
+and in a repository that reads objects from outside itself (`objects/info/alternates`), as a folder unpacked from an
+archive can be set up to.
 
 Claude resumes a session only from the directory it ran in, so each conversation keeps one checkout path,
 `worktrees/<conversation_id>`, recreated on every call. A follow-up without `ref` reads the conversation's pinned commit
@@ -211,7 +215,9 @@ which no consultation can continue:
 | `max_messages` | Reading only: how many of the latest agent messages; defaults to 3, at most 20. |
 
 A thread is readable only when its recorded working directory belongs to the same git repository as
-`working_directory`, worktrees included; a thread whose worktree has since been deleted is not. The read checks this
+`working_directory`, worktrees and submodules included; a thread whose worktree has since been deleted is not. A
+folder whose `.git` points at a git directory that does not record it back, as git does for its own worktrees and
+submodules, belongs to no repository here. The read checks this
 again on the same open file it reads the messages from, and refuses a file that changes while it is read, after one
 more try. For Claude Code, replies, listed titles and exact-name selection use the main session's current stay in
 the repository. After a rewind, replies follow the active branch. The reader looks back up to 32 MiB for the

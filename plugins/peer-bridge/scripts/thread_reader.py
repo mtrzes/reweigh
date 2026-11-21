@@ -25,8 +25,9 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary,
-    ThreadUnavailable, UUID_PATTERN, claude_cwd_search, claude_head, claude_snapshot, claude_title_search,
+    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout, TailWindows,
+    ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, UUID_PATTERN, claude_cwd_search, core_worktree,
+    reciprocal, claude_head, claude_snapshot, claude_title_search,
     claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
     is_supported_history, listing_result, match_thread, newest_first, parse_session_index, rollout_identifier,
     scan_codex, search_tail, snapshot_result, turns_search,
@@ -34,7 +35,8 @@ from thread_parsing import (
 
 __all__ = [
     "GIT_LOCATION_ENV", "ClaudeSessionsSource", "CodexFilesSource", "ThreadReader", "ThreadSource",
-    "ThreadUnavailable", "git_common_dir",
+    "RepositoryRedirected", "ThreadUnavailable", "borrowed_objects", "git_common_dir", "repository_layout",
+    "layout_paths", "LAYOUT_ARGUMENTS",
 ]
 
 # Each search starts at 256 KiB of a history's tail and doubles its window up to the most a capture keeps.
@@ -255,20 +257,82 @@ class ClaudeSessionsSource:
         return read_stable(self.home, lambda: self.session_file(summary.id), read)
 
 
+# The rev-parse arguments that print a working tree's layout, one absolute path per line, in RepositoryLayout order.
+LAYOUT_ARGUMENTS = ("rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
+
+
+def layout_paths(stdout):
+    """The three paths LAYOUT_ARGUMENTS prints, or None when git printed anything else."""
+    lines = stdout.split(b"\n")
+    if lines[-1:] == [b""]:
+        lines = lines[:-1]
+    if len(lines) != 3 or not all(lines):
+        return None
+    return tuple(Path(os.fsdecode(line)).resolve() for line in lines)
+
+
+def back_reference(git_dir, name):
+    """The path a git directory's one-line file (gitdir, commondir) names, resolved against the git directory."""
+    try:
+        text = (git_dir / name).read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return Path("/nonexistent-unreadable")  # present but unreadable: never matches
+    location = git_output_path(text)
+    return (git_dir / os.fsdecode(location)).resolve() if location else Path("/nonexistent-unreadable")
+
+
+def repository_layout(top, git_dir, common_dir):
+    """Read the back references git's own setup writes, for reciprocal() to compare."""
+    try:
+        mode = os.lstat(top / ".git").st_mode
+        dot_git = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else None
+    except OSError:
+        dot_git = None
+    try:
+        worktree = core_worktree((git_dir / "config").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        worktree = None
+    return RepositoryLayout(top, git_dir, common_dir, dot_git, back_reference(git_dir, "gitdir"),
+                            (git_dir / worktree).resolve() if worktree else None, back_reference(git_dir, "commondir"))
+
+
+def borrowed_objects(common_dir):
+    """The resolved entries of the repository's objects/info/alternates; an unreadable file counts as outside."""
+    objects = common_dir / "objects"
+    try:
+        lines = (objects / "info" / "alternates").read_bytes().splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [Path("/nonexistent-unreadable")]
+    entries = [os.fsdecode(line).strip() for line in lines]
+    return [(objects / entry).resolve() for entry in entries if entry and not entry.startswith("#")]
+
+
+class RepositoryRedirected(ThreadUnavailable):
+    """The working tree's .git points at a git directory that does not point back."""
+
+
 def git_common_dir(directory):
-    """Return the repository's shared git directory, identical for all of its worktrees, or None."""
+    """Return the repository's shared git directory, identical for all of its worktrees, or None outside one.
+
+    Raises RepositoryRedirected when the working tree and its git directory do not point at each other."""
     # The bridge's isolated git environment: no inherited GIT_* variable, such as a GIT_TRACE file to append to, and
     # a PATH of absolute entries, so no git in the directory itself runs.
     environment = git_environment(os.environ)
     try:
-        result = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, timeout=10, env=environment, stdin=subprocess.DEVNULL,
-        )
+        result = subprocess.run(["git", "-C", str(directory), *LAYOUT_ARGUMENTS], capture_output=True, timeout=10,
+                                env=environment, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    location = None if result.returncode else git_output_path(result.stdout)
-    return Path(location).resolve() if location else None
+    paths = None if result.returncode else layout_paths(result.stdout)
+    if paths is None:
+        return None
+    if not reciprocal(repository_layout(*paths)):
+        raise RepositoryRedirected(REDIRECTED_REPOSITORY)
+    return paths[2]
 
 
 class ThreadReader:
@@ -282,9 +346,15 @@ class ThreadReader:
         repository = self.common_dir(working_directory)
         if repository is None:
             raise ThreadUnavailable("working_directory must be inside a git repository.")
+
         def include(cwd):
             # Only an absolute path: an empty or relative one would resolve against the server's own directory.
-            return Path(cwd).is_absolute() and Path(cwd).is_dir() and self.common_dir(cwd) == repository
+            if not (Path(cwd).is_absolute() and Path(cwd).is_dir()):
+                return False
+            try:
+                return self.common_dir(cwd) == repository
+            except RepositoryRedirected:
+                return False  # a folder that only claims to belong to this repository
 
         return include
 

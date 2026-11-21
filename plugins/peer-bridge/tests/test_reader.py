@@ -53,6 +53,31 @@ class ReaderTests(unittest.TestCase):
     def read(self, provider, thread, max_messages=3):
         return self.reader(provider).read(self.project, thread, max_messages)
 
+    def test_a_git_pointer_counts_only_when_its_git_directory_points_back(self):
+        # git's own layouts: a clone, a linked worktree and a submodule, each found from inside a subfolder.
+        main = git_repository(self.root / "main")
+        git(main, "worktree", "add", "--quiet", "--detach", str(self.root / "linked"))
+        outer = git_repository(self.root / "outer")
+        git(outer, "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", str(main), "sub")
+        for folder in (main, self.root / "linked", outer / "sub"):
+            (folder / "deep").mkdir()
+        self.assertEqual(thread_reader.git_common_dir(main / "deep"), main / ".git")
+        self.assertEqual(thread_reader.git_common_dir(self.root / "linked" / "deep"), main / ".git")
+        self.assertEqual(thread_reader.git_common_dir(outer / "sub" / "deep"), outer / ".git" / "modules" / "sub")
+        # What an unpacked archive can carry: a .git file aimed at another repository, and a .git folder whose
+        # commondir is.
+        planted = self.root / "planted"
+        planted.mkdir()
+        (planted / ".git").write_text(f"gitdir: {main / '.git'}\n")
+        borrowed = git_repository(self.root / "borrowed")
+        (borrowed / ".git" / "commondir").write_text(f"{main / '.git'}\n")
+        for folder in (planted, borrowed):
+            with self.subTest(folder=folder.name), self.assertRaises(thread_reader.RepositoryRedirected):
+                thread_reader.git_common_dir(folder)
+        with self.assertRaisesRegex(ThreadUnavailable, "does not record this folder"):
+            ThreadReader(CodexFilesSource()).list(planted, 20)
+        self.assertIsNone(thread_reader.git_common_dir(self.root))
+
     def assert_private_text_absent(self, result):
         serialised = json.dumps(result)
         for marker in PRIVATE_MARKERS:

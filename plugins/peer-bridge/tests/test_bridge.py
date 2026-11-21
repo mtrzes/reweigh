@@ -777,10 +777,19 @@ class ConsultationTests(BridgeTestCase):
         unpinned = await self.consult()
         (self.root / "not-a-repository").mkdir()
         injected = self.root / "injected"
+        # What a folder unpacked from an archive can carry: a .git file aimed at this repository, and a clone that
+        # borrows its objects from it.
+        planted = self.root / "planted"
+        planted.mkdir()
+        (planted / ".git").write_text(f"gitdir: {self.project / '.git'}\n")
+        borrowing = git_repository(self.root / "borrowing")
+        (borrowing / ".git" / "objects" / "info" / "alternates").write_text(f"{self.project / '.git' / 'objects'}\n")
         cases = (
             ({"ref": "no-such-ref"}, "does not name a commit"),
             ({"ref": f"--output={injected}"}, "does not name a commit"),
             ({"ref": first, "working_directory": str(self.root / "not-a-repository")}, "inside a git repository"),
+            ({"ref": first, "working_directory": str(planted)}, "does not record this folder"),
+            ({"ref": first, "working_directory": str(borrowing)}, "objects/info/alternates"),
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )
         for arguments, expected in cases:

@@ -39,7 +39,11 @@ from cleanup import run_to_completion
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
-from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable
+from thread_parsing import BORROWED_OBJECTS, REDIRECTED_REPOSITORY, alternates_inside, reciprocal
+from thread_reader import (
+    LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, borrowed_objects,
+    layout_paths, repository_layout,
+)
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -606,10 +610,19 @@ async def pinned_checkout(scope, directory, ref):
         yield directory, None
         return
     worktree, preparation = scope.worktree, scope.budget(CHECKOUT_PREPARATION_SECONDS)
-    repository = Path(await scope.git(
-        directory, "rev-parse", "--show-toplevel",
+    paths = layout_paths(os.fsencode(await scope.git(
+        directory, *LAYOUT_ARGUMENTS,
         failure="A ref needs a working_directory inside a git repository.", timeout=preparation.left(),
-    )).resolve()
+    )))
+    if paths is None:
+        raise BridgeError("A ref needs a working_directory inside a git repository.")
+    # Pinning writes a worktree record into the repository's git directory and reads its objects, so both must be the
+    # repository's own: a folder unpacked from an archive can aim either at another repository.
+    if not reciprocal(repository_layout(*paths)):
+        raise BridgeError(REDIRECTED_REPOSITORY)
+    if not alternates_inside(paths[2], borrowed_objects(paths[2])):
+        raise BridgeError(BORROWED_OBJECTS)
+    repository = paths[0]
     commit = validate_commit(await scope.git(
         directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
         failure="The ref does not name a commit in this repository.", timeout=preparation.left(),

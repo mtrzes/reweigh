@@ -9,6 +9,7 @@ import os
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 MAX_MESSAGE_CHARACTERS = 24_000
 MAX_TAIL_RECORDS = 128 * 1024
@@ -555,6 +556,77 @@ def git_output_path(stdout):
     if stdout.endswith(b"\n"):
         stdout = stdout[:-1]
     return os.fsdecode(stdout) if stdout else None
+
+
+# Repository layout
+
+# A working tree whose .git points at a git directory that does not point back: git sets both ends up for a linked
+# worktree or a submodule, and a folder unpacked from an archive can carry only one, aimed at another repository.
+REDIRECTED_REPOSITORY = ("working_directory's .git points at a git directory that does not record this folder as its "
+                         "working tree, as a folder unpacked from an archive can. Consult a clone instead.")
+BORROWED_OBJECTS = ("This repository reads objects from outside it (objects/info/alternates), so a pinned checkout "
+                    "could show another repository's files. Consult it without ref.")
+
+
+@dataclass(frozen=True)
+class RepositoryLayout:
+    """What git answered for a working tree, and the back references git's own setup would have written, each
+    resolved to an absolute path or None when absent or unreadable."""
+    top: Path
+    git_dir: Path
+    common_dir: Path
+    dot_git: str | None  # "directory", "file" or None, from lstat of top/.git
+    gitdir_back: Path | None  # the git directory's gitdir file: a linked worktree's .git
+    worktree_back: Path | None  # the git directory's core.worktree: a submodule's working tree
+    commondir: Path | None  # the git directory's commondir file
+
+
+def reciprocal(layout):
+    """Whether the working tree and its git directory point at each other the way git sets them up."""
+    dot = layout.top / ".git"
+    if layout.dot_git == "directory":
+        return layout.git_dir == dot and layout.commondir is None and layout.common_dir == layout.git_dir
+    if layout.dot_git != "file":
+        return False
+    if layout.gitdir_back is not None:  # a linked worktree, registered under its repository's worktrees/
+        return (layout.gitdir_back == dot and layout.commondir == layout.common_dir
+                and layout.git_dir.parent == layout.common_dir / "worktrees")
+    # A submodule whose git directory lives in its superproject's: git records the working tree as core.worktree.
+    return (layout.worktree_back == layout.top and layout.commondir is None
+            and layout.common_dir == layout.git_dir)
+
+
+def alternates_inside(common_dir, alternates):
+    """Whether every resolved objects/info/alternates entry stays inside the repository's own objects."""
+    objects = common_dir / "objects"
+    return all(entry.is_relative_to(objects) for entry in alternates)
+
+
+def core_worktree(config_text):
+    """The core.worktree value of a git config file git wrote for a submodule, or None when it has none or the file
+    uses syntax beyond plain sections and key = value lines, which git writes there."""
+    section, found = None, []
+    for raw in config_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("["):
+            if not line.endswith("]") or '"' in line:
+                section = line  # a subsection; core has none
+                continue
+            section = line[1:-1].strip().lower()
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        if section == "core" and key.strip().lower() == "worktree":
+            value = value.strip()
+            if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+                value = value[1:-1]
+            if not value or "\\" in value or '"' in value:
+                return None
+            found.append(value)
+    return found[0] if len(found) == 1 else None
 
 
 # Results
