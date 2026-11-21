@@ -624,6 +624,9 @@ def consultation_outcome(provider, return_code, output):
         raise PeerFailure(str(exc)) from exc
 
 
+SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
+
+
 def signed_in_from(provider, return_code, output):
     """Read the sign-in probe: Claude's loggedIn field, or the Codex status command's exit status. None if unclear."""
     if provider == "claude":

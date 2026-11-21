@@ -40,8 +40,6 @@ REPLY = "PEER-BRIDGE-CAPTURE-OK"
 PROMPT = f"Reply with exactly {REPLY} and nothing else. Do not read files or run commands."
 FOLLOW_UP = f"Reply with exactly {REPLY} again, and nothing else."
 UNKNOWN_MODEL = "reweigh-no-such-model"
-# bridge.py's SIGN_IN_PROBES; bridge.py needs the MCP package, which this tool does without.
-SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 KEPT = {"type", "subtype", "stop_reason", "visibility", "slug", "effort", "default_reasoning_level"}
 TIMEOUT_SECONDS = 300
 
@@ -170,7 +168,7 @@ def raw_captures(parent):
 
     # The sign-in probes, in an empty folder as the bridge runs them; signed out in an empty home.
     for provider, command in (("claude", claude), ("codex", codex)):
-        probe = [command, *SIGN_IN_PROBES[provider]]
+        probe = [command, *c.SIGN_IN_PROBES[provider]]
         raw[f"{provider}-{'auth' if provider == 'claude' else 'login'}-status-signed-in"] = (
             provider, *run(probe, empty_repository(parent), environment))
         home = Path(tempfile.mkdtemp(dir=parent))
