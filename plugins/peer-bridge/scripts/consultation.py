@@ -25,7 +25,7 @@ CLAUDE_HOST_SESSION_ENV = (
 )
 PROVIDERS = ("claude", "codex")
 CONSULTATION_INSTRUCTIONS = (
-    "This is a peer consultation. Follow the project's instructions. "
+    "This is a peer consultation. "
     "Inspect relevant files if needed and answer the specific question with evidence. "
     "Do not edit files, run tests, commit, push or contact people. "
     "The lead agent will decide how to use your advice."
@@ -73,8 +73,9 @@ CLOSED_INPUT = "The peer CLI closed its input. Check its installation and authen
 CLAUDE_UNRECOGNIZED_MODEL_TAG = "[claude-code:unrecognized_model]"
 DEFAULT_TIMEOUT_SECONDS = 600
 MAX_TIMEOUT_SECONDS = 3600
-# The only Codex configuration a consultation loads besides the command line: --ignore-user-config skips the
-# user's, and Codex loads no project configuration without the user's trust list.
+# The only Codex configuration file a consultation loads besides the command line: --ignore-user-config skips the
+# user's, and Codex reads a project's .codex/config.toml only for a directory on the user's trust list. It still
+# loads the project's AGENTS.md and skills.
 CODEX_SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 MAX_CONFIG_BYTES = 1024 * 1024
 THREAD_LIMITS = (1, 100)

@@ -129,7 +129,7 @@ consultation adds that the choice may be the cause, because Codex reports a reje
 A peer reading the working tree while the calling agent keeps editing it reviews a moving target. With `ref`, the
 bridge resolves the ref to a commit in the working directory's repository, checks that commit out as a detached
 worktree under the state directory, and runs the peer in the same subdirectory of that checkout. The response adds
-`commit`, the full hash the peer read. The handoff tells the peer to read only inside that checkout and to say when
+`commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells the peer to read only inside that checkout and to say when
 something is absent at the commit; this is an instruction, not a sandbox, because either peer can read outside it. The
 worktree is removed when the consultation ends, including on timeout or cancellation, and the peer stays read-only.
 
