@@ -5,6 +5,7 @@ true is left to review."""
 import ast
 import json
 import os
+import shlex
 import sys
 import tomllib
 import unicodedata
@@ -25,6 +26,7 @@ PURE_MODULES = {"consultation", "thread_parsing"}
 ADR_SECTIONS = ["Context", "Decision", "Consequences", "Reconsider if"]
 ADR_STATUSES = {"Proposed", "Accepted"}  # a replaced decision is deleted, not marked: history is in git
 PINNED_LINK = "https://github.com/mtrzes/peer-bridge/blob/"
+BRIDGE_SCRIPT = "scripts/bridge.py"  # relative to the plugin folder
 # Characters that end a URL in Markdown, JSON or code: a link's closing bracket, a quote, a space, an anchor.
 URL_END = set(')]>"\'` \t\n#')
 
@@ -111,6 +113,34 @@ def link_targets(line):
         targets.append(rest[:end])
         start = line.find("](", start + 2)
     return targets
+
+
+def fenced_commands(text):
+    """The lines of the fenced code blocks, each backslash-continued command joined into one."""
+    commands, fenced, pending = [], False, ""
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced, pending = not fenced, ""
+        elif fenced:
+            pending += line.removesuffix("\\")
+            if not line.endswith("\\"):
+                commands.append(pending)
+                pending = ""
+    return commands
+
+
+def bridge_launches(command):
+    """The arguments after each `uv` in a command that runs the bridge script: `uv … run … --script …/bridge.py`."""
+    if "uv" not in command.split():
+        return []
+    tokens = shlex.split(command)
+    launches = []
+    for index, token in enumerate(tokens):
+        arguments = tokens[index + 1:]
+        if (token == "uv" and "run" in arguments and "--script" in arguments[:-1]
+                and arguments[arguments.index("--script") + 1].endswith("/" + BRIDGE_SCRIPT)):
+            launches.append(arguments)
+    return launches
 
 
 class ReleaseTests(unittest.TestCase):
@@ -326,6 +356,39 @@ class LinkTests(unittest.TestCase):
                     self.assertEqual(ref, f"v{version}")
                     self.assertTrue((ROOT / linked).exists(), "no such file")
                 start = text.find(PINNED_LINK, start + 1)
+
+
+class LauncherTests(unittest.TestCase):
+    """Every way of starting the bridge points uv at the plugin folder, so uv never reads a project, a configuration
+    or a Python environment from the folder the host starts it in, and installs only the locked dependencies."""
+
+    def assert_launch(self, arguments, directory=None):
+        self.assertEqual(arguments[0:1] + arguments[2:3], ["--directory", "run"], arguments)
+        directory = directory or arguments[1]
+        self.assertEqual(arguments[1], directory)
+        options = arguments[3:arguments.index("--script")]
+        self.assertIn("--locked", options)
+        self.assertIn("--no-config", options)
+        self.assertEqual(arguments[arguments.index("--script") + 1], f"{directory}/{BRIDGE_SCRIPT}")
+
+    def test_the_plugin_configurations_launch_uv_from_the_plugin_folder(self):
+        # Claude Code expands CLAUDE_PLUGIN_ROOT and sets no working directory; Codex resolves "." from the plugin.
+        for name, directory, cwd in ((".mcp.json", "${CLAUDE_PLUGIN_ROOT}", None), ("codex-mcp.json", ".", ".")):
+            with self.subTest(configuration=name):
+                server = json.loads((PLUGIN / name).read_text(encoding="utf-8"))["mcpServers"]["peer-bridge"]
+                self.assertEqual(server["command"], "uv")
+                self.assert_launch(server["args"], directory)
+                self.assertEqual(server.get("cwd"), cwd)
+
+    def test_the_documented_launch_commands_launch_uv_from_the_plugin_folder(self):
+        found = 0
+        for path in markdown_files():
+            for command in fenced_commands(path.read_text(encoding="utf-8")):
+                for arguments in bridge_launches(command):
+                    found += 1
+                    with self.subTest(command=f"{path.relative_to(ROOT)}: {command.strip()[:80]}"):
+                        self.assert_launch(arguments)
+        self.assertGreater(found, 0, "no documented command launches the bridge, so nothing was checked")
 
 
 if __name__ == "__main__":
