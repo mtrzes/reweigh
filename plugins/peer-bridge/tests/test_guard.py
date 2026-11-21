@@ -35,41 +35,74 @@ PEER = textwrap.dedent("""\
 """)
 
 
-class GuardTests(unittest.TestCase):
+class OwnedDescriptors:
+    """Every descriptor a test opens is owned here until it is released, and closed exactly once."""
+
+    def own_descriptors(self):
+        self.owned = set()
+        self.addCleanup(self.close_owned)
+
+    def pipe(self):
+        read, write = os.pipe()
+        self.owned.update((read, write))
+        return read, write
+
+    def release(self, descriptor):
+        self.owned.discard(descriptor)  # first, so cleanup never closes a number the system has since reused
+        os.close(descriptor)
+
+    def close_owned(self):
+        for descriptor in self.owned:
+            os.close(descriptor)
+        self.owned.clear()
+
+
+class GuardTests(OwnedDescriptors, unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-guard-")
         self.addCleanup(temporary.cleanup)
         self.folder = Path(temporary.name)
         self.peer = self.folder / "peer.py"
         self.peer.write_text(PEER)
+        self.own_descriptors()
+        self.addCleanup(self.kill_peers)
+
+    def kill_peers(self):
+        path = self.folder / "pids"
+        try:
+            pids = [int(pid) for pid in path.read_text().split()]
+        except (FileNotFoundError, ValueError):  # no peer started, or it is still writing the file
+            return
+        for pid in pids:
+            if running(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    @staticmethod
+    def stop(process):
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=DEADLINE_SECONDS)
 
     def guard(self, mode, lifeline_fd=None, command=None, status_unread=False):
-        lifeline_read, lifeline_write = os.pipe()
-        status_read, status_write = os.pipe()
+        lifeline_read, lifeline_write = self.pipe()
+        status_read, status_write = self.pipe()
         if status_unread:  # closed before the guard starts, so its status write cannot win a race with the close
-            os.close(status_read)
+            self.release(status_read)
             status_read = None
         if lifeline_fd is not None:
             os.dup2(lifeline_read, lifeline_fd)
-            os.close(lifeline_read)
+            self.owned.add(lifeline_fd)
+            self.release(lifeline_read)
             lifeline_read = lifeline_fd
         command = command or [sys.executable, str(self.peer), str(self.folder), mode]
         process = subprocess.Popen(
             [sys.executable, "-I", str(GUARD), str(lifeline_read), str(status_write), "--", *command],
             pass_fds=(lifeline_read, status_write), start_new_session=True,
         )
-        os.close(lifeline_read)
-        os.close(status_write)
-        self.addCleanup(self.close_quietly, lifeline_write, *([] if status_read is None else [status_read]))
+        self.addCleanup(self.stop, process)
+        self.release(lifeline_read)
+        self.release(status_write)
         return process, lifeline_write, status_read
-
-    @staticmethod
-    def close_quietly(*descriptors):
-        for descriptor in descriptors:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
 
     def read_status(self, status):
         """The guard's status line, or a failure at the deadline instead of a hang."""
@@ -93,7 +126,7 @@ class GuardTests(unittest.TestCase):
         pids = self.pids()
         self.assertEqual(self.read_status(status), b"7\n")
         self.assertTrue(running(pids[1]))  # the descendant lives until the lifeline closes
-        os.close(lifeline)
+        self.release(lifeline)
         process.wait(timeout=10)
         self.assert_stopped(pids)
 
@@ -102,7 +135,7 @@ class GuardTests(unittest.TestCase):
         pids = self.pids()
         process.wait(timeout=10)  # the lifeline is still open: only the failed status write can stop the guard
         self.assert_stopped(pids)
-        os.close(lifeline)
+        self.release(lifeline)
 
     def test_a_high_numbered_lifeline_still_works(self):
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -119,14 +152,14 @@ class GuardTests(unittest.TestCase):
         pids = self.pids()
         # The status is written from inside the wait on the lifeline, which select() could not have watched.
         self.assertEqual(self.read_status(status), b"7\n")
-        os.close(lifeline)
+        self.release(lifeline)
         process.wait(timeout=10)
         self.assert_stopped(pids)
 
     def test_a_peer_that_cannot_start_is_reported_by_token(self):
         process, lifeline, status = self.guard("exit", command=[str(self.folder / "missing-peer")])
         self.assertEqual(self.read_status(status), b"start-failed\n")
-        os.close(lifeline)
+        self.release(lifeline)
         process.wait(timeout=10)
 
 
@@ -144,39 +177,49 @@ class UntimedSelector(selectors.DefaultSelector):
         return super().select()
 
 
-class GuardWaitTests(unittest.TestCase):
+class GuardWaitTests(OwnedDescriptors, unittest.TestCase):
     """The guard's waits, run in this process, wake on the peer's exit: a timer between checks would add its interval
     to every command the bridge runs."""
 
     def setUp(self):
+        self.own_descriptors()
         self.addCleanup(signal.signal, signal.SIGCHLD, signal.getsignal(signal.SIGCHLD))
         previous = signal.set_wakeup_fd(-1)
         self.exits = peer_guard.child_exits()
-        # Restoring the previous wakeup descriptor returns the guard's, which is closed with the one it wakes.
-        self.addCleanup(lambda: GuardTests.close_quietly(self.exits, signal.set_wakeup_fd(previous)))
+        self.owned.add(self.exits)
+        # Restoring the previous wakeup descriptor hands back the guard's, which is then owned like the one it wakes.
+        self.addCleanup(lambda: self.owned.add(signal.set_wakeup_fd(previous)))
 
     def peer(self, source):
         peer = subprocess.Popen([sys.executable, "-c", source])
-        self.addCleanup(lambda: peer.poll() is None and (peer.kill(), peer.wait()))
+        self.addCleanup(self.stop, peer)
         return peer
+
+    @staticmethod
+    def stop(peer):
+        if peer.poll() is None:
+            peer.kill()
+        peer.wait(timeout=DEADLINE_SECONDS)
 
     def test_the_peer_exit_is_reported_without_a_timer(self):
         peer = self.peer("raise SystemExit(7)")
-        lifeline, lifeline_write = os.pipe()
-        status_read, status = os.pipe()
-        self.addCleanup(GuardTests.close_quietly, lifeline, status_read, status)
+        lifeline, lifeline_write = self.pipe()
+        status_read, status = self.pipe()
+        stop, stopping = self.pipe()
         reported = []
 
         def bridge():
-            # Reads the status as the bridge does, then closes the lifeline, its only owner; at the deadline it closes
-            # it anyway.
-            if select.select([status_read], [], [], DEADLINE_SECONDS)[0]:
+            # Reads the status as the bridge does, then closes the lifeline. Cleanup ends the wait early when the
+            # guard's wait has failed, so the thread is done before cleanup closes what it uses.
+            ready, _, _ = select.select([status_read, stop], [], [], DEADLINE_SECONDS)
+            if status_read in ready:
                 reported.append(os.read(status_read, 64))
-            os.close(lifeline_write)
+            self.release(lifeline_write)
 
         thread = threading.Thread(target=bridge)
         thread.start()
         self.addCleanup(thread.join, DEADLINE_SECONDS)
+        self.addCleanup(self.release, stopping)
         with patch.object(peer_guard, "selectors", module_view(selectors, DefaultSelector=UntimedSelector)):
             peer_guard.wait_for_lifeline(lifeline, peer, status, self.exits)
         self.assertEqual(reported, [b"7\n"])

@@ -696,14 +696,16 @@ class ClaudeParsingTests(unittest.TestCase):
                                                              "stop_reason": stop_reason}, **fields}
 
     def test_turn_states(self):
-        cases = [(stop, status) for stop, status in t.CLAUDE_STOP_STATUSES.items()]
+        cases = (("end_turn", "completed"), ("stop_sequence", "completed"), ("max_tokens", "completed"),
+                 ("model_context_window_exceeded", "completed"), ("refusal", "failed"), ("tool_use", "inProgress"),
+                 ("pause_turn", "inProgress"), (None, "inProgress"))
         for stop_reason, status in cases:
             with self.subTest(stop_reason=stop_reason):
                 scan = self.scan([self.user("q"), self.assistant("a", stop_reason)])
                 snapshot = t.claude_snapshot(self.SUMMARY, scan, 3)
                 self.assertEqual(snapshot.latest_turn.status, status)
                 self.assertEqual(snapshot.latest_turn.liveness, "unknown" if status == "inProgress" else None)
-        for marker in sorted(t.CLAUDE_INTERRUPTION_MARKERS):
+        for marker in ("[Request interrupted by user]", "[Request interrupted by user for tool use]"):
             interrupted = self.scan([self.user("q"), self.user(marker, "u2")])
             self.assertEqual(interrupted.latest, t.TurnState("u1", "interrupted"))
         # A person typing text that only starts like the marker asks a new question.
