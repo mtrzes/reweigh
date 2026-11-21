@@ -34,14 +34,20 @@ class RequestFormatTests(unittest.TestCase):
     """The persisted request, written by start and read by the runner: pure, no files."""
 
     def test_job_request_round_trips_and_reads_requests_written_before_model_choices(self):
-        written = jobs.job_request("codex", "Why?", Path("/project"), "", "", None, "Review", "gpt-6-astra", "xhigh")
-        self.assertEqual(written, {"provider": "codex", "prompt": "Why?", "working_directory": "/project",
+        written = jobs.job_request("claude", "Why?", Path("/project"), "", "", None, "Review", "opus", "max",
+                                   (Path("/other"),))
+        self.assertEqual(written, {"provider": "claude", "prompt": "Why?", "working_directory": "/project",
                                    "context": "", "conversation_id": None, "ref": None, "seed_thread": "Review",
-                                   "model": "gpt-6-astra", "reasoning_effort": "xhigh"})
-        earlier = {key: value for key, value in written.items() if key not in {"model", "reasoning_effort"}}
+                                   "model": "opus", "reasoning_effort": "max", "extra_directories": ["/other"]})
+        earlier = {key: value for key, value in written.items()
+                   if key not in {"model", "reasoning_effort", "extra_directories"}}
         for name, saved, expected in (
             ("written", written, written),
-            ("before model choices", earlier, earlier | {"model": None, "reasoning_effort": None}),
+            ("before model choices", earlier,
+             earlier | {"model": None, "reasoning_effort": None, "extra_directories": None}),
+            ("no extra directories", written | {"extra_directories": None}, written | {"extra_directories": None}),
+            ("directory as text", written | {"extra_directories": "/other"}, None),
+            ("number as directory", written | {"extra_directories": [1]}, None),
             ("extra field", written | {"later": 1}, written),
             ("not an object", ["Why?"], None),
             ("unknown provider", written | {"provider": "other"}, None),
@@ -591,8 +597,8 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertEqual(received, [("gpt-6-astra", "xhigh")])
         done = await self.client.job(job_id, {"codex"})
         self.assertEqual((done["model"], done["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
-        with self.assertRaisesRegex(bridge.BridgeError, "Codex consultations only"):
-            await self.queued(provider="claude", reasoning_effort="xhigh")
+        with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
+            await self.queued(provider="codex", extra_directories=[str(self.root)])
 
     async def test_a_cancel_after_the_reply_but_before_its_outcome_keeps_the_result(self):
         job_id = await self.queued(prompt="PRIVATE QUESTION")

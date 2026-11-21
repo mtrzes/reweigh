@@ -74,8 +74,8 @@ class ConsultationTests(BridgeTestCase):
         self.assertIn('model_reasoning_effort="xhigh"', arguments)
         self.assertEqual((answer["model"], answer["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
         calls = len(self.calls())
-        with self.assertRaisesRegex(bridge.BridgeError, "Codex consultations only"):
-            await self.consult("claude", model="opus")
+        with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
+            await self.consult("codex", extra_directories=[str(self.root)])
         # With Codex's catalogue readable, a value it does not list is refused before Codex starts.
         self.codex_home.mkdir(parents=True, exist_ok=True)
         (self.codex_home / "models_cache.json").write_text(json.dumps({"models": [

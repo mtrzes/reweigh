@@ -7,8 +7,9 @@
       "cwd": ".",
       "startup_timeout_sec": 60,
       "tool_timeout_sec": 3900,
-      "env_vars": ["PEER_BRIDGE_THREADS", "PEER_BRIDGE_TIMEOUT_SECONDS", "PEER_BRIDGE_STATE_DIR", "PEER_BRIDGE_CLAUDE_BIN",
-                   "PEER_BRIDGE_SUBAGENTS", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"]
+      "env_vars": ["PEER_BRIDGE_THREADS", "PEER_BRIDGE_TIMEOUT_SECONDS", "PEER_BRIDGE_STATE_DIR",
+                   "PEER_BRIDGE_CLAUDE_BIN", "PEER_BRIDGE_SUBAGENTS", "PEER_BRIDGE_CLAUDE_MODEL",
+                   "PEER_BRIDGE_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"]
     }
   }
 }

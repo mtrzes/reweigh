@@ -73,7 +73,7 @@ For a host that needs both tools, launch the script with `--peer both`.
 
 ## Consultation requests
 
-`ask_codex` and `ask_claude` accept these arguments; `model` and `reasoning_effort` are Codex-only:
+`ask_codex` and `ask_claude` accept these arguments; `extra_directories` is Claude-only:
 
 | Argument | Meaning |
 |----------|---------|
@@ -83,8 +83,9 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `conversation_id` | Optional bridge UUID returned by an earlier request for this peer and directory. |
 | `ref` | Optional commit, branch or tag to consult instead of the working tree; see [Pinned refs](#pinned-refs). |
 | `seed_thread` | Optional ID or name of a thread in the peer's app (a Codex thread when asking Codex, a Claude Code session when asking Claude Code) whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
-| `model` | Codex only, optional: the model for this call, such as `gpt-6-astra`; overrides `PEER_BRIDGE_CODEX_MODEL`. |
-| `reasoning_effort` | Codex only, optional: the reasoning effort for this call, such as `low`, `medium`, `high` or `xhigh`; overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT`. |
+| `model` | Optional: the model for this call, such as `gpt-6-astra` for Codex or `opus` for Claude; overrides `PEER_BRIDGE_CODEX_MODEL` or `PEER_BRIDGE_CLAUDE_MODEL`. |
+| `reasoning_effort` | Optional: the reasoning effort for this call, such as `high` or `xhigh` (Codex) or `high` or `max` (Claude); overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT` or `PEER_BRIDGE_CLAUDE_REASONING_EFFORT`. |
+| `extra_directories` | Claude only, optional: absolute paths of other folders the peer may read, passed as `--add-dir`. A Codex peer already reads any file you can. |
 
 `list_codex_models` (and the `codex-models` command) lists the models this Codex account offers, with each model's
 reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue
@@ -276,6 +277,8 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI bundled with ChatGPT.app. A set value that does not resolve is an error, not a fallback. |
 | `PEER_BRIDGE_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
 | `PEER_BRIDGE_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The bridge refuses a model or effort missing from Codex's catalogue before Codex starts. |
+| `PEER_BRIDGE_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
+| `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` | Optional Claude effort, such as `high` or `max`, passed as `--effort`; a per-call `reasoning_effort` overrides it. |
 | `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
 | `PEER_BRIDGE_SUBAGENTS` | `0` stops a peer from starting sub-agents; any other value, or none, lets it start them. They keep its read-only sandbox, and each one adds to the consultation's cost and time. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |

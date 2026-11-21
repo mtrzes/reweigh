@@ -32,8 +32,8 @@ from consultation import (
     validate_session_id, with_seed,
 )
 from consultation import (
-    FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_codex_choices, check_wait, codex_choices,
-    failure_probes, git_entry_found, history_presence,
+    FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_choices, check_extra_directories, check_wait,
+    failure_probes, git_entry_found, history_presence, peer_choices,
 )
 from cleanup import run_to_completion
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
@@ -336,10 +336,12 @@ def codex_catalogue():
 
 
 def command_for(provider, working_directory, backend_session_id, conversation_id, model=None, reasoning_effort=None,
-                pinned=False):
+                pinned=False, extra_directories=()):
     executable = peer_executable(provider)
     if provider == "claude":
-        return build_command(provider, executable, conversation_id, backend_session_id)
+        return build_command(provider, executable, conversation_id, backend_session_id, model=model,
+                             reasoning_effort=reasoning_effort, subagents=subagents_enabled(os.environ),
+                             directories=(working_directory, *extra_directories))
     return build_command(
         provider, executable, conversation_id, backend_session_id, model=model,
         mcp_servers=codex_mcp_servers(), reasoning_effort=reasoning_effort, pinned=pinned,
@@ -655,30 +657,37 @@ class Bridge:
         # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
         self.probe = probe or FailureProbe
 
-    def checked_request(self, provider, prompt, working_directory, conversation_id, model=None, reasoning_effort=None):
-        """Check what can be checked before a consultation starts; return the canonical project directory and the
-        requested Codex model and reasoning effort."""
+    def checked_request(self, provider, prompt, working_directory, conversation_id, model=None, reasoning_effort=None,
+                        extra_directories=()):
+        """Check what can be checked before a consultation starts; return the canonical project directory, the
+        requested model and reasoning effort, and the resolved extra directories."""
         if os.environ.get(ACTIVE_ENV):
             raise BridgeError("Nested peer consultations are disabled. Return your answer to the lead agent.")
         check_prompt(prompt)
         directory = self.project_directory(provider, working_directory)
         if conversation_id:
             validate_session_id(conversation_id)
-        model, reasoning_effort = check_codex_choices(provider, model, reasoning_effort)
+        model, reasoning_effort = check_choices(model, reasoning_effort)
         if provider == "codex":
             # A model or effort Codex does not list would be ignored or refused only once Codex runs; refuse it now.
-            check_against_catalogue(codex_catalogue(), *codex_choices(os.environ, model, reasoning_effort))
-        return directory, model, reasoning_effort
+            check_against_catalogue(codex_catalogue(), *peer_choices(provider, os.environ, model, reasoning_effort))
+        extra = []
+        for given in check_extra_directories(provider, extra_directories):
+            resolved = Path(given).resolve()
+            if not resolved.is_dir():
+                raise BridgeError(f"extra_directories names {given}, which is not a directory.")
+            extra.append(resolved)
+        return directory, model, reasoning_effort, tuple(extra)
 
     async def start(self, provider, prompt, working_directory, context="", conversation_id=None, ref=None,
-                    seed_thread=None, model=None, reasoning_effort=None):
+                    seed_thread=None, model=None, reasoning_effort=None, extra_directories=None):
         """Start a consultation in a detached runner and return its job at once."""
-        directory, model, reasoning_effort = self.checked_request(provider, prompt, working_directory, conversation_id,
-                                                                  model, reasoning_effort)
+        directory, model, reasoning_effort, extra = self.checked_request(
+            provider, prompt, working_directory, conversation_id, model, reasoning_effort, extra_directories)
         if seed_thread:
             self.check_threads_enabled()  # refused now, not once the runner reads the thread
         request = job_request(provider, prompt, directory, context, conversation_id, ref, seed_thread, model,
-                              reasoning_effort)
+                              reasoning_effort, extra)
         return await start_job(self.jobs, request, self.spawn)
 
     async def job(self, job_id, providers, wait_seconds=0):
@@ -734,11 +743,10 @@ class Bridge:
             raise BridgeError("The thread reader failed unexpectedly.") from exc
 
     async def consult(self, provider, prompt, working_directory, context="", conversation_id=None, ref=None,
-                      seed_thread=None, model=None, reasoning_effort=None):
-        directory, model, reasoning_effort = self.checked_request(provider, prompt, working_directory, conversation_id,
-                                                                  model, reasoning_effort)
-        if provider == "codex":
-            model, reasoning_effort = codex_choices(os.environ, model, reasoning_effort)
+                      seed_thread=None, model=None, reasoning_effort=None, extra_directories=None):
+        directory, model, reasoning_effort, extra = self.checked_request(
+            provider, prompt, working_directory, conversation_id, model, reasoning_effort, extra_directories)
+        model, reasoning_effort = peer_choices(provider, os.environ, model, reasoning_effort)
         if seed_thread:
             seed = await self.thread(provider, directory, seed_thread, SEED_MESSAGES)
             context = with_seed(context, seed_context(seed))
@@ -752,7 +760,8 @@ class Bridge:
             ref = consulted_ref(conversation.record, ref)
             async with pinned_checkout(conversation, directory, ref) as (consulted, commit):
                 command = command_for(provider, consulted, conversation.record.get("backend_session_id"),
-                                      conversation.identifier, model, reasoning_effort, pinned=commit is not None)
+                                      conversation.identifier, model, reasoning_effort, pinned=commit is not None,
+                                      extra_directories=extra)
                 depth = len(consulted.relative_to(conversation.worktree).parts) if commit else 0
                 handoff = build_handoff(provider, prompt, context, commit, depth)
                 failure = None
@@ -860,25 +869,28 @@ def create_server(peer):
         @server.tool(annotations=starting)
         async def start_claude_consultation(
             prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
-            ref: str | None = None, seed_thread: str | None = None,
+            ref: str | None = None, seed_thread: str | None = None, model: str | None = None,
+            reasoning_effort: str | None = None, extra_directories: list[str] | None = None,
         ) -> dict[str, Any]:
             """Start an ask_claude consultation in the background and return its job_id at once; read it with
             get_consultation. Takes the same arguments as ask_claude; suits reviews that take minutes. Use this, never
             the Claude desktop app, to reach Claude."""
             return await bridge.start("claude", prompt, working_directory, context, conversation_id, ref,
-                                      seed_thread)
+                                      seed_thread, model, reasoning_effort, extra_directories)
 
         @server.tool(annotations=consulting)
         async def ask_claude(
             prompt: str, working_directory: str, context: str = "", conversation_id: str | None = None,
-            ref: str | None = None, seed_thread: str | None = None,
+            ref: str | None = None, seed_thread: str | None = None, model: str | None = None,
+            reasoning_effort: str | None = None, extra_directories: list[str] | None = None,
         ) -> dict[str, str]:
             """Ask Claude Code a scoped question; reuse conversation_id for a follow-up; pin a commit with ref;
-            seed_thread names a Claude Code session whose recent agent messages become context. Use this, never the
-            Claude desktop app, to reach Claude; it starts a new consultation and cannot write into an existing
-            session."""
+            seed_thread names a Claude Code session whose recent agent messages become context. model (such as opus
+            or sonnet) and reasoning_effort (such as high or max) choose what Claude runs for this call;
+            extra_directories, absolute paths, are other folders it may read. Use this, never the Claude desktop app,
+            to reach Claude; it starts a new consultation and cannot write into an existing session."""
             return await bridge.consult("claude", prompt, working_directory, context, conversation_id, ref,
-                                        seed_thread)
+                                        seed_thread, model, reasoning_effort, extra_directories)
 
         @server.tool(annotations=reading)
         async def list_claude_threads(working_directory: str, limit: int = 20) -> dict[str, Any]:
@@ -965,7 +977,8 @@ def run_command_line(arguments):
             except (OSError, ValueError) as exc:
                 raise BridgeError("Cannot read the prompt from standard input as UTF-8 text.") from exc
             request = (arguments.provider, prompt, arguments.working_directory, context, arguments.conversation_id,
-                       arguments.ref, arguments.seed_thread, arguments.model, arguments.reasoning_effort)
+                       arguments.ref, arguments.seed_thread, arguments.model, arguments.reasoning_effort,
+                       arguments.extra_directory)
             if arguments.command == "start":
                 result = asyncio.run(until_terminated(lambda: Bridge().start(*request)))
             else:
@@ -1023,9 +1036,12 @@ def main():
         command.add_argument("--conversation-id", help="bridge conversation ID from an earlier consultation")
         command.add_argument("--ref", help="consult a detached checkout of this commit instead of the working tree")
         command.add_argument("--seed-thread", help="thread ID or name whose recent agent messages become context")
-        command.add_argument("--model", help="Codex only: the model to run, over PEER_BRIDGE_CODEX_MODEL")
-        command.add_argument("--reasoning-effort",
-                             help="Codex only: the reasoning effort, over PEER_BRIDGE_CODEX_REASONING_EFFORT")
+        command.add_argument("--model",
+                             help="the model to run, over PEER_BRIDGE_CODEX_MODEL or PEER_BRIDGE_CLAUDE_MODEL")
+        command.add_argument("--reasoning-effort", help="the reasoning effort, over PEER_BRIDGE_CODEX_REASONING_EFFORT "
+                                                        "or PEER_BRIDGE_CLAUDE_REASONING_EFFORT")
+        command.add_argument("--extra-directory", action="append", default=None,
+                             help="Claude only, repeatable: an absolute path to another folder the peer may read")
     for command in (job_parser, cancel_parser, runner_parser):
         command.add_argument("--job-id", required=True)
     job_parser.add_argument("--wait", type=float, default=0, help="seconds to wait for the job to finish, at most 60")

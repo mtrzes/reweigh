@@ -51,7 +51,18 @@ CODEX_EXTRA_DISABLED_FEATURES = ("skill_mcp_dependency_install",)
 SUBAGENTS_ENV = "PEER_BRIDGE_SUBAGENTS"
 CODEX_NO_SUBAGENTS = ("--disable", "multi_agent", "-c", "features.multi_agent_v2.disable_native_tools=true")
 PROVIDER_NAMES = {"claude": "Claude Code", "codex": "Codex"}
-MODEL_SETTINGS = {"claude": "the model in Claude Code's settings", "codex": "PEER_BRIDGE_CODEX_MODEL"}
+MODEL_SETTINGS = {"claude": "the model requested, PEER_BRIDGE_CLAUDE_MODEL, or the model in Claude Code's settings",
+                  "codex": "PEER_BRIDGE_CODEX_MODEL"}
+# The environment defaults for a consultation's model and reasoning effort, per provider.
+CHOICE_ENV = {"claude": ("PEER_BRIDGE_CLAUDE_MODEL", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT"),
+              "codex": ("PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT")}
+# Claude Code loads CLAUDE.md from a directory given with --add-dir only when this is set; the consulted directory is
+# passed that way, so its CLAUDE.md loads while its .claude settings, which can run commands, do not.
+CLAUDE_MD_ENV = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
+MAX_EXTRA_DIRECTORIES = 20
+# The Claude peer's tools: reading, Anthropic's web search, skills, and sub-agents unless they are switched off.
+CLAUDE_TOOLS = ("Read", "Glob", "Grep", "WebSearch", "Skill")
+CLAUDE_SUBAGENT_TOOL = "Agent"
 # Failure messages. Only these fixed messages reach the caller, never the CLI's own output.
 WRITER_HELD = (
     "{name} has this conversation open elsewhere, such as in Codex Desktop, which allows one writer. Start a new "
@@ -141,10 +152,11 @@ def check_prompt(prompt):
     return prompt
 
 
-def check_codex_choices(provider, model=None, reasoning_effort=None):
-    """Return the requested Codex model and reasoning effort, each None when not chosen.
+def check_choices(model=None, reasoning_effort=None):
+    """Return the requested model and reasoning effort, each None when not chosen.
 
-    Each must be one token of letters, digits, dots, dashes or underscores; Codex decides which values it accepts.
+    Each must be one token of letters, digits, dots, dashes or underscores; the peer CLI decides which values it
+    accepts.
     """
     choices = []
     for name, value in (("model", model), ("reasoning_effort", reasoning_effort)):
@@ -152,8 +164,6 @@ def check_codex_choices(provider, model=None, reasoning_effort=None):
         if value in (None, ""):
             choices.append(None)
             continue
-        if provider != "codex":
-            raise BridgeError(f"{name} applies to Codex consultations only.")
         if (not isinstance(value, str) or len(value) > CODEX_CHOICE_MAX_LENGTH
                 or not set(value) <= CODEX_CHOICE_CHARACTERS):
             raise BridgeError(f"{name} must be one word of letters, digits, dots, dashes or underscores.")
@@ -194,10 +204,25 @@ def check_against_catalogue(models, model=None, reasoning_effort=None):
         raise BridgeError(f"{model} takes reasoning_effort {', '.join(efforts)}, not {reasoning_effort}.")
 
 
-def codex_choices(environ, model=None, reasoning_effort=None):
-    """The model and reasoning effort a Codex consultation runs with: the request's, else the environment's."""
-    return (model or environ.get("PEER_BRIDGE_CODEX_MODEL") or None,
-            reasoning_effort or environ.get("PEER_BRIDGE_CODEX_REASONING_EFFORT") or None)
+def peer_choices(provider, environ, model=None, reasoning_effort=None):
+    """The model and reasoning effort a consultation runs with: the request's, else the environment's."""
+    model_env, effort_env = CHOICE_ENV[provider]
+    return model or environ.get(model_env) or None, reasoning_effort or environ.get(effort_env) or None
+
+
+def check_extra_directories(provider, directories):
+    """The extra directories a Claude peer may read, as given: absolute paths, at most MAX_EXTRA_DIRECTORIES.
+
+    A Codex peer already reads any file the user can, so it takes none."""
+    if not directories:
+        return ()
+    if provider != "claude":
+        raise BridgeError("extra_directories applies to Claude consultations only; Codex reads any file you can.")
+    if not isinstance(directories, (list, tuple)) or len(directories) > MAX_EXTRA_DIRECTORIES:
+        raise BridgeError(f"extra_directories must be a list of at most {MAX_EXTRA_DIRECTORIES} absolute paths.")
+    if any(not isinstance(directory, str) or not os.path.isabs(directory) for directory in directories):
+        raise BridgeError("Each of extra_directories must be an absolute path.")
+    return tuple(directories)
 
 
 def check_limit(limit):
@@ -330,7 +355,7 @@ def peer_environment(environ, pinned=False):
 
     Git location variables would point the peer's git commands at another checkout than the one consulted.
     """
-    environment = {**environ, ACTIVE_ENV: "1", "PATH": safe_path(environ.get("PATH"))}
+    environment = {**environ, ACTIVE_ENV: "1", CLAUDE_MD_ENV: "1", "PATH": safe_path(environ.get("PATH"))}
     if pinned:
         environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     for name in (*CLAUDE_HOST_SESSION_ENV, *GIT_LOCATION_ENV):
@@ -352,21 +377,28 @@ def codex_mcp_server_names(config):
 
 
 def build_command(provider, executable, conversation_id, backend_session_id=None, model=None, mcp_servers=(),
-                  reasoning_effort=None, pinned=False, subagents=True):
-    """The peer CLI's argument list. model, mcp_servers, reasoning_effort, pinned and subagents apply to Codex only."""
+                  reasoning_effort=None, pinned=False, subagents=True, directories=()):
+    """The peer CLI's argument list. mcp_servers and pinned apply to Codex only; directories, the consulted directory
+    and any extra ones, to Claude only."""
     if provider == "claude":
+        tools = [*CLAUDE_TOOLS, CLAUDE_SUBAGENT_TOOL] if subagents else list(CLAUDE_TOOLS)
         command = [
             executable, "--print", "--output-format", "json",
             "--name", f"peer-bridge {conversation_id}",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            # No --allowed-tools: allow rules would let Read reach any path; without them, dontAsk keeps reads inside
-            # the working directory and the user's own additional directories.
-            "--tools", "Read,Glob,Grep", "--disallowed-tools", "mcp__*", "--strict-mcp-config",
-            "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-chrome",
+            # No --allowed-tools: the user's own allow rules decide what else Read may reach, as in their sessions.
+            "--tools", ",".join(tools), "--disallowed-tools", "mcp__*", "--strict-mcp-config",
+            "--mcp-config", '{"mcpServers":{}}', "--no-chrome",
             # Only the user's own settings: a consulted repository's .claude settings can run commands.
             "--setting-sources", "user", "--settings", '{"disableAllHooks":true}',
             "--append-system-prompt", CONSULTATION_INSTRUCTIONS,
         ]
+        for directory in directories:
+            command.extend(["--add-dir", str(directory)])
+        if model:
+            command.extend(["--model", model])
+        if reasoning_effort:
+            command.extend(["--effort", reasoning_effort])
         if backend_session_id:
             command.extend(["--resume", backend_session_id])
         return command
@@ -438,7 +470,7 @@ def completed_record(record, backend_session_id, commit):
 
 
 def consultation_result(provider, conversation_id, reply, commit, model=None, reasoning_effort=None):
-    """The reply and what produced it: the pinned commit, and the Codex model and effort when chosen."""
+    """The reply and what produced it: the pinned commit, and the model and effort when chosen."""
     result = {"provider": provider, "conversation_id": conversation_id, "reply": reply}
     for key, value in (("commit", commit), ("model", model), ("reasoning_effort", reasoning_effort)):
         if value:

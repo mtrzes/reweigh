@@ -96,7 +96,7 @@ class EnvironmentTests(unittest.TestCase):
         result = c.peer_environment(environ)
         # Empty and relative PATH entries would search the consulted repository.
         self.assertEqual(result, {"PATH": "/usr/bin:/bin", "CLAUDE_CODE_OAUTH_TOKEN": "kept",
-                                  "ANTHROPIC_API_KEY": "kept", c.ACTIVE_ENV: "1"})
+                                  "ANTHROPIC_API_KEY": "kept", c.ACTIVE_ENV: "1", c.CLAUDE_MD_ENV: "1"})
         self.assertEqual(environ, original)
         self.assertEqual(c.peer_environment(environ, pinned=True)["GIT_NO_REPLACE_OBJECTS"], "1")
         defaults = [entry for entry in os.defpath.split(os.pathsep) if entry.startswith("/")]
@@ -125,32 +125,41 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(c.filter_overrides(""), [])
 
 
-class CodexChoiceTests(unittest.TestCase):
-    def test_choices_are_one_token_and_codex_only(self):
-        accepted = ((("codex", "gpt-6-astra", "xhigh")), ("gpt-6-astra", "xhigh")), \
-                   ((("codex", " gpt-5.1 ", "")), ("gpt-5.1", None)), \
-                   ((("claude", None, "")), (None, None))
+class ChoiceTests(unittest.TestCase):
+    def test_choices_are_one_token(self):
+        accepted = ((("gpt-6-astra", "xhigh")), ("gpt-6-astra", "xhigh")), ((("opus", "max")), ("opus", "max")), \
+                   (((" gpt-5.1 ", "")), ("gpt-5.1", None)), (((None, "")), (None, None))
         for arguments, expected in accepted:
             with self.subTest(arguments=arguments):
-                self.assertEqual(c.check_codex_choices(*arguments), expected)
-        refused = (("claude", "opus", None, "Codex consultations only"),
-                   ("claude", None, "high", "Codex consultations only"),
-                   ("codex", "gpt x", None, "one word"), ("codex", None, 'high"\nsandbox_mode="x', "one word"),
-                   ("codex", "a" * 65, None, "one word"), ("codex", None, 3, "one word"))
-        for provider, model, effort, reason in refused:
-            with self.subTest(provider=provider, model=model, effort=effort):
-                with self.assertRaisesRegex(c.BridgeError, reason):
-                    c.check_codex_choices(provider, model, effort)
+                self.assertEqual(c.check_choices(*arguments), expected)
+        for model, effort in (("gpt x", None), (None, 'high"\nsandbox_mode="x'), ("a" * 65, None), (None, 3)):
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaisesRegex(c.BridgeError, "one word"):
+                    c.check_choices(model, effort)
 
-    def test_a_call_overrides_the_environment(self):
-        environ = {"PEER_BRIDGE_CODEX_MODEL": "env-model", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "low"}
-        cases = (({}, None, None, (None, None)), (environ, None, None, ("env-model", "low")),
-                 (environ, "gpt-6-astra", None, ("gpt-6-astra", "low")),
-                 (environ, None, "xhigh", ("env-model", "xhigh")),
-                 ({"PEER_BRIDGE_CODEX_MODEL": ""}, None, None, (None, None)))
-        for environment, model, effort, expected in cases:
-            with self.subTest(environment=environment, model=model, effort=effort):
-                self.assertEqual(c.codex_choices(environment, model, effort), expected)
+    def test_a_call_overrides_the_environment_of_its_provider(self):
+        environ = {"PEER_BRIDGE_CODEX_MODEL": "env-model", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "low",
+                   "PEER_BRIDGE_CLAUDE_MODEL": "sonnet", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT": "high"}
+        cases = (("codex", {}, None, None, (None, None)), ("codex", environ, None, None, ("env-model", "low")),
+                 ("codex", environ, "gpt-6-astra", None, ("gpt-6-astra", "low")),
+                 ("codex", environ, None, "xhigh", ("env-model", "xhigh")),
+                 ("codex", {"PEER_BRIDGE_CODEX_MODEL": ""}, None, None, (None, None)),
+                 ("claude", environ, None, None, ("sonnet", "high")),
+                 ("claude", environ, "opus", None, ("opus", "high")),
+                 ("claude", {"PEER_BRIDGE_CODEX_MODEL": "env-model"}, None, None, (None, None)))
+        for provider, environment, model, effort, expected in cases:
+            with self.subTest(provider=provider, environment=environment, model=model, effort=effort):
+                self.assertEqual(c.peer_choices(provider, environment, model, effort), expected)
+
+    def test_extra_directories_are_absolute_and_for_claude_only(self):
+        self.assertEqual(c.check_extra_directories("claude", None), ())
+        self.assertEqual(c.check_extra_directories("claude", ["/a", "/b"]), ("/a", "/b"))
+        for provider, directories, reason in (("codex", ["/a"], "Claude consultations only"),
+                                              ("claude", ["relative"], "absolute path"),
+                                              ("claude", "/a", "a list"), ("claude", ["/a"] * 21, "a list")):
+            with self.subTest(provider=provider, directories=directories):
+                with self.assertRaisesRegex(c.BridgeError, reason):
+                    c.check_extra_directories(provider, directories)
 
     def test_the_result_names_what_ran(self):
         self.assertEqual(c.consultation_result("codex", "conv", "hi", None, "gpt-6-astra", "xhigh"),
@@ -203,15 +212,21 @@ class CommandTests(unittest.TestCase):
         policy = [
             "/bin/claude", "--print", "--output-format", "json", "--name", "peer-bridge conv",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
-            "--tools", "Read,Glob,Grep", "--disallowed-tools", "mcp__*",
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disable-slash-commands", "--no-chrome",
+            "--tools", "Read,Glob,Grep,WebSearch,Skill,Agent", "--disallowed-tools", "mcp__*",
+            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--no-chrome",
             "--setting-sources", "user", "--settings", '{"disableAllHooks":true}',
             "--append-system-prompt", c.CONSULTATION_INSTRUCTIONS,
         ]
-        fresh = c.build_command("claude", "/bin/claude", "conv", model="ignored", mcp_servers={"ignored"},
-                                reasoning_effort="ignored")
+        fresh = c.build_command("claude", "/bin/claude", "conv", mcp_servers={"ignored"}, pinned=True)
         self.assertEqual(fresh, policy)
-        self.assertEqual(c.build_command("claude", "/bin/claude", "conv", SESSION), [*policy, "--resume", SESSION])
+        # The consulted directory comes in with --add-dir, so its CLAUDE.md loads without its .claude settings.
+        chosen = c.build_command("claude", "/bin/claude", "conv", SESSION, model="opus", reasoning_effort="max",
+                                 directories=("/repo", "/other"))
+        self.assertEqual(chosen, [*policy, "--add-dir", "/repo", "--add-dir", "/other", "--model", "opus",
+                                  "--effort", "max", "--resume", SESSION])
+        # Without sub-agents, only the Agent tool goes.
+        without = c.build_command("claude", "/bin/claude", "conv", subagents=False)
+        self.assertEqual(without[without.index("--tools") + 1], "Read,Glob,Grep,WebSearch,Skill")
 
     def test_codex_command(self):
         sandbox = ["/bin/codex", "--no-daemon", "--sandbox", "read-only", "--ask-for-approval", "never"]
@@ -446,7 +461,8 @@ class OutcomeTests(unittest.TestCase):
             ("claude", F(resuming=True, history_present=False), "no longer has this conversation's history"),
             ("claude", F(resuming=False, history_present=False), "GENERIC"),
             ("claude", F(resuming=True, history_present=None), "GENERIC"),
-            ("claude", F(unrecognized_model=True), "Check the model in Claude Code's settings"),
+            ("claude", F(unrecognized_model=True),
+             "Check the model requested, PEER_BRIDGE_CLAUDE_MODEL, or the model in Claude Code's settings"),
             ("codex", F(in_git_repository=False, model_setting=True), "not inside a git repository"),
             ("claude", F(in_git_repository=False), "GENERIC"),
             ("codex", F(model_setting=True), "GENERIC" + c.MODEL_HINT),

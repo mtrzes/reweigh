@@ -57,19 +57,21 @@ STAGING_RETENTION_SECONDS = 3600
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("bridge.py")
 
 
-# The request a job's runner consults with, as start writes it to request.json. model and reasoning_effort came later:
-# a request written without them asks for neither.
+# The request a job's runner consults with, as start writes it to request.json. model, reasoning_effort and
+# extra_directories came later: a request written without them asks for none.
 REQUEST_TEXT_FIELDS = ("prompt", "working_directory", "context")
 REQUEST_OPTIONAL_FIELDS = ("conversation_id", "ref", "seed_thread", "model", "reasoning_effort")
-REQUEST_ADDED_FIELDS = ("model", "reasoning_effort")
+REQUEST_LIST_FIELDS = ("extra_directories",)
+REQUEST_ADDED_FIELDS = ("model", "reasoning_effort", "extra_directories")
 
 
 def job_request(provider, prompt, working_directory, context="", conversation_id=None, ref=None, seed_thread=None,
-                model=None, reasoning_effort=None):
+                model=None, reasoning_effort=None, extra_directories=()):
     """The request to persist for a checked consultation; empty optional values are stored as null."""
     request = {"provider": provider, "prompt": prompt, "working_directory": str(working_directory), "context": context}
     values = (conversation_id, ref, seed_thread, model, reasoning_effort)
-    return request | {key: value or None for key, value in zip(REQUEST_OPTIONAL_FIELDS, values)}
+    request |= {key: value or None for key, value in zip(REQUEST_OPTIONAL_FIELDS, values)}
+    return request | {"extra_directories": [str(directory) for directory in extra_directories] or None}
 
 
 def read_job_request(saved):
@@ -79,9 +81,13 @@ def read_job_request(saved):
     saved = {key: None for key in REQUEST_ADDED_FIELDS} | saved
     if (any(not isinstance(saved.get(key), str) for key in REQUEST_TEXT_FIELDS)
             or any(key not in saved or not isinstance(saved[key], (str, type(None)))
-                   for key in REQUEST_OPTIONAL_FIELDS)):
+                   for key in REQUEST_OPTIONAL_FIELDS)
+            or any(saved.get(key) is not None and (not isinstance(saved[key], list)
+                                                   or not all(isinstance(item, str) for item in saved[key]))
+                   for key in REQUEST_LIST_FIELDS)):
         return None
-    return {key: saved[key] for key in ("provider", *REQUEST_TEXT_FIELDS, *REQUEST_OPTIONAL_FIELDS)}
+    return {key: saved[key] for key in ("provider", *REQUEST_TEXT_FIELDS, *REQUEST_OPTIONAL_FIELDS,
+                                        *REQUEST_LIST_FIELDS)}
 
 
 class JobBusy(BridgeError):

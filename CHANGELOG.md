@@ -4,6 +4,10 @@
 
 - CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
   when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version.
+- The Claude peer gets WebSearch, Skill and Agent (Agent unless `PEER_BRIDGE_SUBAGENTS=0`), your Claude skills, and
+  the consulted repository's `CLAUDE.md`, passed with `--add-dir` so the repository's `.claude` settings still do
+  not apply. `ask_claude` and `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`;
+  `PEER_BRIDGE_CLAUDE_MODEL` and `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` set defaults.
 - The Codex peer has cached web search (`web_search="cached"`): results from OpenAI's index, no page fetched.
 - `ask_*` and `start_*` are no longer marked read-only: they send repository content to the other provider, so a host
   that skips approval for read-only tools asks first. The sign-in probe that explains a failure runs in an empty
