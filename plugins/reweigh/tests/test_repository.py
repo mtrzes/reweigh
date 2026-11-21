@@ -25,7 +25,7 @@ SUITES = (TESTS, ROOT / "dev" / "tests")
 PURE_MODULES = {"consultation", "thread_parsing"}
 ADR_SECTIONS = ["Context", "Decision", "Consequences", "Reconsider if"]
 ADR_STATUSES = {"Proposed", "Accepted"}  # a replaced decision is deleted, not marked: history is in git
-PINNED_LINK = "https://github.com/mtrzes/peer-bridge/blob/"
+PINNED_LINK = "https://github.com/mtrzes/reweigh/blob/"
 BRIDGE_SCRIPT = "scripts/bridge.py"  # relative to the plugin folder
 # Characters that end a URL in Markdown, JSON or code: a link's closing bracket, a quote, a space, an anchor.
 URL_END = set(')]>"\'` \t\n#')
@@ -171,13 +171,45 @@ class CodexPluginTests(unittest.TestCase):
     def test_the_codex_plugin_forwards_the_variables_its_claude_server_reads(self):
         # Codex passes an MCP server only the variables it names; the nesting mark must reach the bridge it starts.
         server = json.loads((PLUGIN / "codex-mcp.json").read_text(encoding="utf-8"))
-        forwarded = set(server["mcpServers"]["peer-bridge"]["env_vars"])
-        for name in ("PEER_BRIDGE_ACTIVE", "PEER_BRIDGE_THREADS", "PEER_BRIDGE_TIMEOUT_SECONDS",
-                     "PEER_BRIDGE_STATE_DIR", "PEER_BRIDGE_CLAUDE_BIN", "PEER_BRIDGE_SUBAGENTS",
-                     "PEER_BRIDGE_CLAUDE_MODEL",
-                     "PEER_BRIDGE_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"):
+        forwarded = set(server["mcpServers"]["reweigh"]["env_vars"])
+        for name in ("REWEIGH_ACTIVE", "REWEIGH_THREADS", "REWEIGH_TIMEOUT_SECONDS",
+                     "REWEIGH_STATE_DIR", "REWEIGH_CLAUDE_BIN", "REWEIGH_SUBAGENTS",
+                     "REWEIGH_CLAUDE_MODEL",
+                     "REWEIGH_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"):
             with self.subTest(name=name):
                 self.assertIn(name, forwarded)
+
+
+class PackagingTests(unittest.TestCase):
+    def test_the_marketplaces_plugins_and_mcp_servers_share_one_name(self):
+        # A rename that misses one of these fails here, not at install: the MCP key names every tool's prefix. The
+        # server's handshake name is checked against the plugin folder in test_contracts, where the server runs.
+        def load(*parts):
+            return json.loads(ROOT.joinpath(*parts).read_text(encoding="utf-8"))
+
+        def only_server(config):
+            [name] = config["mcpServers"]
+            return name
+
+        claude_market = load(".claude-plugin", "marketplace.json")
+        codex_market = load(".agents", "plugins", "marketplace.json")
+        codex_plugin = load("plugins", PLUGIN.name, ".codex-plugin", "plugin.json")
+        names = {
+            "plugin folder": PLUGIN.name,
+            "Claude marketplace": claude_market["name"],
+            "Claude marketplace entry": claude_market["plugins"][0]["name"],
+            "Codex marketplace": codex_market["name"],
+            "Codex marketplace entry": codex_market["plugins"][0]["name"],
+            "Claude plugin": load("plugins", PLUGIN.name, ".claude-plugin", "plugin.json")["name"],
+            "Codex plugin": codex_plugin["name"],
+            "Codex display name": codex_plugin["interface"]["displayName"],
+            "Claude MCP server": only_server(load("plugins", PLUGIN.name, ".mcp.json")),
+            # The file the Codex manifest points at, so a dangling pointer fails too.
+            "Codex MCP server": only_server(load("plugins", PLUGIN.name, codex_plugin["mcpServers"])),
+        }
+        self.assertEqual(len(set(names.values())), 1, names)
+        self.assertEqual(claude_market["plugins"][0]["source"], f"./plugins/{PLUGIN.name}")
+        self.assertEqual(codex_market["plugins"][0]["source"]["path"], f"./plugins/{PLUGIN.name}")
 
 
 class ScriptImportTests(unittest.TestCase):
@@ -375,7 +407,7 @@ class LauncherTests(unittest.TestCase):
         # Claude Code expands CLAUDE_PLUGIN_ROOT and sets no working directory; Codex resolves "." from the plugin.
         for name, directory, cwd in ((".mcp.json", "${CLAUDE_PLUGIN_ROOT}", None), ("codex-mcp.json", ".", ".")):
             with self.subTest(configuration=name):
-                server = json.loads((PLUGIN / name).read_text(encoding="utf-8"))["mcpServers"]["peer-bridge"]
+                server = json.loads((PLUGIN / name).read_text(encoding="utf-8"))["mcpServers"]["reweigh"]
                 self.assertEqual(server["command"], "uv")
                 self.assert_launch(server["args"], directory)
                 self.assertEqual(server.get("cwd"), cwd)

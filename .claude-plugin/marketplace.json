@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "peer-bridge",
+  "name": "reweigh",
   "description": "Peer consultations between Claude Code and Codex that do not edit your project.",
   "owner": {
     "name": "mtrzes",
@@ -8,8 +8,8 @@
   },
   "plugins": [
     {
-      "name": "peer-bridge",
-      "source": "./plugins/peer-bridge",
+      "name": "reweigh",
+      "source": "./plugins/reweigh",
       "description": "Consult Codex from Claude Code or Claude Code from Codex through resumable CLI sessions that do not edit your project, pinned to a commit when needed, and read each other's recent threads in the same repository.",
       "author": { "name": "mtrzes", "url": "https://github.com/mtrzes" },
       "category": "development"

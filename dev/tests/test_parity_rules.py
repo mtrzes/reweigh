@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT / "dev"), str(ROOT / "plugins" / "peer-bridge" / "scripts")]
+sys.path[:0] = [str(ROOT / "dev"), str(ROOT / "plugins" / "reweigh" / "scripts")]
 import parity_rules as p  # noqa: E402
 import thread_parsing as t  # noqa: E402
 

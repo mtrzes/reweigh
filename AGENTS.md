@@ -1,22 +1,22 @@
-# Agent rules (peer-bridge)
+# Agent rules (reweigh)
 
 ## Before you change
 
 | Area | Read first | Enforced by |
 |---|---|---|
-| a tool, argument or job state | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md) tables, the [plugin README](plugins/peer-bridge/README.md) section, `plugins/peer-bridge/tests/fixtures/mcp_input_schemas.json` | `test_repository`, `test_contracts` |
+| a tool, argument or job state | [HOW-IT-WORKS](plugins/reweigh/HOW-IT-WORKS.md) tables, the [plugin README](plugins/reweigh/README.md) section, `plugins/reweigh/tests/fixtures/mcp_input_schemas.json` | `test_repository`, `test_contracts` |
 | a peer's command line, environment or sandbox | [SECURITY](SECURITY.md), [ADR 0003](docs/adr/0003-peers-only-read.md) | `test_core`, `test_preflight`, `test_contracts` |
 | failure diagnosis or any probe | [ADR 0004](docs/adr/0004-causes-from-exact-facts.md) | `test_core`, `test_bridge` |
 | which module holds a rule | [ADR 0005](docs/adr/0005-module-boundaries.md) | `test_repository` |
-| thread reading | [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md#thread-reading), [ADR 0001](docs/adr/0001-codex-thread-reader-source.md) | `test_reader` |
+| thread reading | [HOW-IT-WORKS](plugins/reweigh/HOW-IT-WORKS.md#thread-reading), [ADR 0001](docs/adr/0001-codex-thread-reader-source.md) | `test_reader` |
 | tests or CI | [ADR 0002](docs/adr/0002-test-architecture.md) | review |
 | a release or stored state | [ADR 0006](docs/adr/0006-releases-and-stored-state.md), [CHANGELOG](CHANGELOG.md) | `test_repository`, `test_jobs`, `test_core`, CI by hand |
 
-Run both suites before each commit: [Verification](plugins/peer-bridge/README.md#verification).
+Run both suites before each commit: [Verification](plugins/reweigh/README.md#verification).
 
 ## Rules
 
-- Each fact has one home: behaviour in `plugins/peer-bridge/HOW-IT-WORKS.md`, arguments and setup in the plugin README,
+- Each fact has one home: behaviour in `plugins/reweigh/HOW-IT-WORKS.md`, arguments and setup in the plugin README,
   trust and retention in `SECURITY.md`; other files link to it. A change to the tools, job states, components or
   boundaries updates HOW-IT-WORKS in the same commit; `test_repository` fails when its Tools or job-state table differs
   from the tools and states the code has.
@@ -40,8 +40,8 @@ Run both suites before each commit: [Verification](plugins/peer-bridge/README.md
 - Ask the operator before changing `AGENTS.md`, an ADR, the CI workflow or the test design, and before merging a branch
   that leaves a design question open.
 - Commit a file only when something uses it: code, a test or its fixture, a user doc, an ADR, the changelog. Only
-  `plugins/peer-bridge/` ships; `dev/` holds public maintainer tools. Session artifacts (plans, review transcripts,
+  `plugins/reweigh/` ships; `dev/` holds public maintainer tools. Session artifacts (plans, review transcripts,
   parity reports, scratch notes) stay out; what they settled goes in the commit message, an ADR, `HOW-IT-WORKS.md` or
   the backlog.
-- The backlog, `plugins/peer-bridge/TODO.md`, is local only: it is gitignored and never committed, and a fresh clone or
+- The backlog, `plugins/reweigh/TODO.md`, is local only: it is gitignored and never committed, and a fresh clone or
   worktree does not have it.

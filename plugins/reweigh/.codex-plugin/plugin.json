@@ -1,21 +1,21 @@
 {
-  "name": "peer-bridge",
+  "name": "reweigh",
   "version": "1.0.0-beta.2",
   "description": "Consult Claude Code from Codex through resumable sessions that do not edit your project, pinned to a commit when needed, run in the background for long reviews, and read Claude Code's recent sessions in the same repository.",
   "author": {
     "name": "mtrzes",
     "url": "https://github.com/mtrzes"
   },
-  "homepage": "https://github.com/mtrzes/peer-bridge",
-  "repository": "https://github.com/mtrzes/peer-bridge",
+  "homepage": "https://github.com/mtrzes/reweigh",
+  "repository": "https://github.com/mtrzes/reweigh",
   "license": "Apache-2.0",
   "keywords": ["claude-code", "consultation", "code-review", "mcp"],
   "skills": "./skills/",
   "mcpServers": "./codex-mcp.json",
   "interface": {
-    "displayName": "peer-bridge",
+    "displayName": "reweigh",
     "shortDescription": "Consult Claude Code without driving its app",
-    "longDescription": "Ask Claude Code a scoped question, follow up in the same conversation, pin it to a commit, run long reviews in the background, and read Claude Code's recent sessions in this repository. Claude only reads, unless one of your own agent types it starts creates a worktree (PEER_BRIDGE_SUBAGENTS=0 prevents it); nothing is written to an existing session.",
+    "longDescription": "Ask Claude Code a scoped question, follow up in the same conversation, pin it to a commit, run long reviews in the background, and read Claude Code's recent sessions in this repository. Claude only reads, unless one of your own agent types it starts creates a worktree (REWEIGH_SUBAGENTS=0 prevents it); nothing is written to an existing session.",
     "developerName": "mtrzes",
     "category": "Developer Tools",
     "capabilities": ["Interactive"]

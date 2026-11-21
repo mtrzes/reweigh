@@ -21,8 +21,8 @@ CHECK_SECONDS = 20
 # signal, says nothing about the names.
 REJECTED = (1, 2)
 # Wrong-type values: Codex refuses each while it knows the key, and accepts it silently once it does not.
-CANARIES = {"mcp_servers.enabled": ("-c", 'mcp_servers.peer-bridge-canary={command="/usr/bin/true"}',
-                                    "-c", "mcp_servers.peer-bridge-canary.enabled=1")}
+CANARIES = {"mcp_servers.enabled": ("-c", 'mcp_servers.reweigh-canary={command="/usr/bin/true"}',
+                                    "-c", "mcp_servers.reweigh-canary.enabled=1")}
 
 
 class Inconclusive(Exception):
@@ -75,7 +75,7 @@ async def preflight(provider, command, runner):
     if provider != "codex":
         return []
     try:
-        with tempfile.TemporaryDirectory(prefix="peer-bridge-check-", ignore_cleanup_errors=True) as home:
+        with tempfile.TemporaryDirectory(prefix="reweigh-check-", ignore_cleanup_errors=True) as home:
             await codex_check(runner, command, home)
     except (Inconclusive, OSError, ValueError, UnicodeError) as exc:
         reason = str(exc) if isinstance(exc, Inconclusive) else "the check failed"

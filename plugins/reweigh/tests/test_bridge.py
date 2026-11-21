@@ -86,7 +86,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(runs, check_timeouts)  # the check's own command was held to what was left
 
     def test_the_sub_agent_switch_reaches_both_commands(self):
-        with patch.dict(os.environ, {"PEER_BRIDGE_SUBAGENTS": "0"}):
+        with patch.dict(os.environ, {"REWEIGH_SUBAGENTS": "0"}):
             claude = bridge.command_for("claude", self.project, None, "conv")
             codex = bridge.command_for("codex", self.project, None, "conv")
         self.assertEqual(claude[claude.index("--tools") + 1], "Read,Glob,Grep,WebSearch")
@@ -119,7 +119,7 @@ class ConsultationTests(BridgeTestCase):
         project_config.parent.mkdir()
         project_config.write_text('[mcp_servers.project-peer]\ncommand = "never-run-me"\n', encoding="utf-8")
         consultation.CODEX_SYSTEM_CONFIG.write_text('[mcp_servers."system peer"]\ncommand = "x"\n', encoding="utf-8")
-        settings = {"PEER_BRIDGE_CODEX_MODEL": "gpt-x", "PEER_BRIDGE_CODEX_REASONING_EFFORT": "high"}
+        settings = {"REWEIGH_CODEX_MODEL": "gpt-x", "REWEIGH_CODEX_REASONING_EFFORT": "high"}
         with patch.dict(os.environ, settings):
             await self.consult("codex")
         arguments = self.calls()[-1]["arguments"]
@@ -174,7 +174,7 @@ class ConsultationTests(BridgeTestCase):
             patch.object(bridge, "MACOS_APPLICATION_DIRECTORIES", directories),
             patch.object(bridge.sys, "platform", "darwin"),
         ):
-            del os.environ["PEER_BRIDGE_CODEX_BIN"]
+            del os.environ["REWEIGH_CODEX_BIN"]
             await self.consult("codex")
         self.assertEqual([call["executable"] for call in self.calls()], [str(bundled)])
 
@@ -190,7 +190,7 @@ class ConsultationTests(BridgeTestCase):
             (folder / name).chmod(0o755)
         self.addCleanup(os.chdir, os.getcwd())
         os.chdir(self.project)
-        del os.environ["PEER_BRIDGE_CLAUDE_BIN"]
+        del os.environ["REWEIGH_CLAUDE_BIN"]
         with patch.dict(os.environ, {"PATH": os.pathsep.join(["", ".", "bin", str(trusted)])}):
             await self.consult()
         self.assertEqual(len(self.calls()), 1)
@@ -198,10 +198,10 @@ class ConsultationTests(BridgeTestCase):
 
     async def test_missing_peer_cli_is_reported_without_starting_a_peer(self):
         with self.without_peer_on_path(), patch.object(bridge, "MACOS_APPLICATION_DIRECTORIES", (str(self.root),)):
-            os.environ["PEER_BRIDGE_CODEX_BIN"] = str(self.root / "missing-codex")
-            with self.assertRaisesRegex(bridge.BridgeError, "PEER_BRIDGE_CODEX_BIN does not name an executable"):
+            os.environ["REWEIGH_CODEX_BIN"] = str(self.root / "missing-codex")
+            with self.assertRaisesRegex(bridge.BridgeError, "REWEIGH_CODEX_BIN does not name an executable"):
                 await self.consult("codex")
-            del os.environ["PEER_BRIDGE_CODEX_BIN"]
+            del os.environ["REWEIGH_CODEX_BIN"]
             for platform, expected in (("darwin", "bundles it at /Applications/ChatGPT.app/"),
                                        ("linux", "Install it and sign in")):
                 with (
@@ -217,7 +217,7 @@ class ConsultationTests(BridgeTestCase):
         broken.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
         broken.chmod(0o700)
         with (
-            patch.dict(os.environ, {"PEER_BRIDGE_CLAUDE_BIN": str(broken)}),
+            patch.dict(os.environ, {"REWEIGH_CLAUDE_BIN": str(broken)}),
             self.assertRaisesRegex(bridge.BridgeError, "Cannot start claude"),
         ):
             await self.consult()
@@ -445,7 +445,7 @@ class ConsultationTests(BridgeTestCase):
              "Claude Code is not signed in"),
             ("claude", {"SIMULATED_FAILURE_TEXT": '[claude-code:unrecognized_model] {"model":"x"}'}, {},
              "Claude Code rejected the requested model."),
-            ("codex", {"PEER_BRIDGE_CODEX_MODEL": "gpt-x"}, {}, "codex consultation failed (exit 1). Check CLI "
+            ("codex", {"REWEIGH_CODEX_MODEL": "gpt-x"}, {}, "codex consultation failed (exit 1). Check CLI "
              "login, version, and permissions." + consultation.MODEL_HINT),
             ("codex", {}, {"reasoning_effort": "ultra"}, "codex consultation failed (exit 1). Check CLI "
              "login, version, and permissions." + consultation.MODEL_HINT),
@@ -1079,14 +1079,14 @@ class ConsultationTests(BridgeTestCase):
         self.client.spawn = spawned.append
         request = {"prompt": "Explain the query.", "working_directory": str(self.project), "seed_thread": "t1"}
         for value in (None, "true", "0"):
-            with self.subTest(value=value), patch.dict(os.environ, {"PEER_BRIDGE_THREADS": value or ""}):
+            with self.subTest(value=value), patch.dict(os.environ, {"REWEIGH_THREADS": value or ""}):
                 if value is None:
-                    del os.environ["PEER_BRIDGE_THREADS"]
+                    del os.environ["REWEIGH_THREADS"]
                 for call in (lambda: self.client.threads("codex", str(self.project)),
                              lambda: self.client.thread("codex", str(self.project), "t1"),
                              lambda: self.client.consult("codex", **request),
                              lambda: self.client.start("codex", **request)):
-                    with self.assertRaisesRegex(bridge.BridgeError, "PEER_BRIDGE_THREADS=1"):
+                    with self.assertRaisesRegex(bridge.BridgeError, "REWEIGH_THREADS=1"):
                         await call()
         self.assertEqual((self.calls(), spawned, list((self.state / "jobs").glob("*"))), ([], [], []))
 

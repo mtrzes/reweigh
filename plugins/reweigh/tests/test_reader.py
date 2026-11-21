@@ -34,10 +34,10 @@ from thread_reader import ClaudeSessionsSource, CodexFilesSource, ThreadReader, 
 
 class ReaderTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-threads-")
+        temporary = tempfile.TemporaryDirectory(prefix="reweigh-threads-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        isolate(self, self.root, PEER_BRIDGE_THREADS="1")
+        isolate(self, self.root, REWEIGH_THREADS="1")
         self.codex_home, self.claude_home = self.root / "codex-home", self.root / "claude-home"
         self.project, self.worktree, self.other = (self.root / name for name in ("project", "worktree", "other"))
         repositories = {self.project: "repository", self.worktree: "repository", self.other: "other"}

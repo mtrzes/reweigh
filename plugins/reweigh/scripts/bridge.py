@@ -294,7 +294,7 @@ class FailureProbe:
             return None
         try:
             command = [peer_executable(self.provider), *SIGN_IN_PROBES[self.provider]]
-            with tempfile.TemporaryDirectory(prefix="peer-bridge-probe-") as empty:
+            with tempfile.TemporaryDirectory(prefix="reweigh-probe-") as empty:
                 return_code, output, _ = await self.scope.run(command, None, empty, timeout)
         except (BridgeError, OSError):
             return None
@@ -891,7 +891,7 @@ def create_server(peer):
     from mcp.server.fastmcp import FastMCP
     from mcp.types import ToolAnnotations
 
-    server = FastMCP("peer-bridge", instructions=server_instructions(peer), log_level="WARNING")
+    server = FastMCP("reweigh", instructions=server_instructions(peer), log_level="WARNING")
     bridge = Bridge()
     # A consultation sends repository content to the other provider, so a host that trusts read-only hints still asks.
     consulting = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
@@ -972,7 +972,7 @@ def create_server(peer):
             """Ask Codex a scoped question; reuse conversation_id for a follow-up; pin a commit with ref;
             seed_thread names a Codex thread whose recent agent messages become context. model (such as
             gpt-6-astra) and reasoning_effort (such as low, medium, high or xhigh) choose what Codex runs for this
-            call, over PEER_BRIDGE_CODEX_MODEL and PEER_BRIDGE_CODEX_REASONING_EFFORT. list_codex_models gives the
+            call, over REWEIGH_CODEX_MODEL and REWEIGH_CODEX_REASONING_EFFORT. list_codex_models gives the
             values Codex offers, and a value it does not list is refused before Codex starts. The reply names the
             model and effort when one was chosen."""
             return await bridge.consult("codex", prompt, working_directory, context, conversation_id, ref,
@@ -1084,9 +1084,9 @@ def main():
         command.add_argument("--ref", help="consult a detached checkout of this commit instead of the working tree")
         command.add_argument("--seed-thread", help="thread ID or name whose recent agent messages become context")
         command.add_argument("--model",
-                             help="the model to run, over PEER_BRIDGE_CODEX_MODEL or PEER_BRIDGE_CLAUDE_MODEL")
-        command.add_argument("--reasoning-effort", help="the reasoning effort, over PEER_BRIDGE_CODEX_REASONING_EFFORT "
-                                                        "or PEER_BRIDGE_CLAUDE_REASONING_EFFORT")
+                             help="the model to run, over REWEIGH_CODEX_MODEL or REWEIGH_CLAUDE_MODEL")
+        command.add_argument("--reasoning-effort", help="the reasoning effort, over REWEIGH_CODEX_REASONING_EFFORT "
+                                                        "or REWEIGH_CLAUDE_REASONING_EFFORT")
         command.add_argument("--extra-directory", action="append", default=None,
                              help="Claude only, repeatable: an absolute path to another folder the peer may read")
     for command in (job_parser, cancel_parser, runner_parser):

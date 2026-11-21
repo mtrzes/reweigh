@@ -1,4 +1,4 @@
-# ADR-0003: peer-bridge only reads; split work runs in each app's own worktree
+# ADR-0003: reweigh only reads; split work runs in each app's own worktree
 
 - Status: Accepted
 - Enforced by: test_core `test_claude_command` and `test_codex_command` (read-only tools and sandbox);
@@ -17,7 +17,7 @@ add about a quarter to the code and a second mode to every review. Both CLIs alr
 worktree of their own (`claude --worktree`, `codex --worktree`).
 
 ## Decision
-- Every peer peer-bridge starts is restricted to reading by its own CLI: Claude to read and search tools, Codex to its
+- Every peer reweigh starts is restricted to reading by its own CLI: Claude to read and search tools, Codex to its
   read-only sandbox, where it can run commands that cannot write. SECURITY.md names the one known exception and how to
   turn it off.
 - A tool that consults or starts a consultation is not marked read-only, though the peer only reads: it sends repository
@@ -28,10 +28,10 @@ worktree of their own (`claude --worktree`, `codex --worktree`).
   app in its own worktree; the lead follows it with `read_codex_thread` or `read_claude_thread` and reviews the
   resulting branch with `ask_*` and `ref`.
 - If writing delegation is ever built, it is a separate tool with its own repository and tests, sharing at most
-  `peer_guard.py` and the environment rules, and peer-bridge does not depend on it.
+  `peer_guard.py` and the environment rules, and reweigh does not depend on it.
 
 ## Consequences
-peer-bridge stays small. Splitting work costs the operator one step: starting the other app with the handoff.
+reweigh stays small. Splitting work costs the operator one step: starting the other app with the handoff.
 
 ## Reconsider if
 A host can prove that a person, not an agent, confirmed a specific job; or either app gains a supported interface for

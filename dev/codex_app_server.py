@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path[:0] = [str(Path(__file__).resolve().parent),
-                str(Path(__file__).resolve().parents[1] / "plugins" / "peer-bridge" / "scripts")]
+                str(Path(__file__).resolve().parents[1] / "plugins" / "reweigh" / "scripts")]
 from consultation import state_directory  # noqa: E402
 from parity_rules import (  # noqa: E402
     app_server_agent_messages, app_server_snapshot, app_server_summary, parity_differences, parity_passed,
@@ -67,7 +67,7 @@ DESKTOP_TEAM = "2DC432GLL2"
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 
-REFUSAL = {"code": -32601, "message": "Rejected by peer-bridge."}
+REFUSAL = {"code": -32601, "message": "Rejected by reweigh."}
 
 
 class AppServerError(Exception):
@@ -130,7 +130,7 @@ class AppServerClient:
             os.set_blocking(self.process.stdout.fileno(), False)
             self.selector = selectors.DefaultSelector()
             self.selector.register(self.process.stdout, selectors.EVENT_READ)
-            self.request("initialize", {"clientInfo": {"name": "peer-bridge", "version": "parity"},
+            self.request("initialize", {"clientInfo": {"name": "reweigh", "version": "parity"},
                                         "capabilities": {"experimentalApi": True}})
             self.notify("initialized")
         except BaseException:

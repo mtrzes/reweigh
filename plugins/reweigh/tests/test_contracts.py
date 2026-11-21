@@ -48,7 +48,7 @@ class InstalledCliTests(unittest.TestCase):
     pre-launch check the bridge runs, Claude Code signed out, so no model is called, through a canary of its own."""
 
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-installed-")
+        temporary = tempfile.TemporaryDirectory(prefix="reweigh-installed-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
 
@@ -70,8 +70,8 @@ class InstalledCliTests(unittest.TestCase):
         executable = self.installed("codex")
         # Control: the behaviours the check rests on, so a Codex that refuses every key cannot pass it silently.
         environment = {"PATH": os.environ["PATH"], "HOME": str(self.root), "CODEX_HOME": str(self.root)}
-        for arguments, status in ((["-c", "web_search=1"], 1), (["-c", "peer_bridge_no_such_key=1"], 0),
-                                  (["--disable", "peer_bridge_no_such_feature"], 1)):
+        for arguments, status in ((["-c", "web_search=1"], 1), (["-c", "reweigh_no_such_key=1"], 0),
+                                  (["--disable", "reweigh_no_such_feature"], 1)):
             with self.subTest(control=arguments):
                 code, _, _ = asyncio.run(runner([executable, *arguments, "features", "list"], None, self.root,
                                                 DEADLINE_SECONDS, environment))
@@ -95,7 +95,7 @@ class InstalledCliTests(unittest.TestCase):
         (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [hook]}]}}))
         (home / ".claude.json").write_text(json.dumps(
             {"mcpServers": {"canary": {"command": "/usr/bin/touch", "args": [str(self.root / "mcp")]}}}))
-        (project / ".claude" / "settings.json").write_text(json.dumps({"model": "peer-bridge-canary-model"}))
+        (project / ".claude" / "settings.json").write_text(json.dumps({"model": "reweigh-canary-model"}))
         environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
         status = subprocess.run([command[0], "auth", "status", "--json"], cwd=project, env=environment,
                                 capture_output=True, text=True, timeout=DEADLINE_SECONDS)
@@ -115,7 +115,7 @@ class InstalledCliTests(unittest.TestCase):
         streamed = ["--output-format", "stream-json", "--verbose"]
         # Control: without the bridge's restrictions, each planted signal fires.
         control = [executable, "--print", *streamed, "--tools", "Read", "--setting-sources", "user,project"]
-        self.assertEqual(self.claude_canary(control), ({"user-hook", "mcp"}, "peer-bridge-canary-model", ["Read"]))
+        self.assertEqual(self.claude_canary(control), ({"user-hook", "mcp"}, "reweigh-canary-model", ["Read"]))
         # The bridge's command, as it runs a consultation, with streamed output: none fires, and every tool is there,
         # Agent under the name Task.
         command = consultation.build_command("claude", executable, "conv", directories=(str(self.root / "project"),))
@@ -123,14 +123,14 @@ class InstalledCliTests(unittest.TestCase):
         command[at:at + 2] = streamed
         markers, model, tools = self.claude_canary(command)
         self.assertEqual(markers, set())
-        self.assertNotEqual(model, "peer-bridge-canary-model")
+        self.assertNotEqual(model, "reweigh-canary-model")
         self.assertEqual(tools, ["Glob", "Grep", "Read", "Skill", "Task", "WebSearch"])
 
 
 class McpResultTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_result_with_warnings_passes_the_tool_s_output_schema(self):
         # A consultation's result carries the pre-launch check's warnings, a list, beside its text fields.
-        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-result-")
+        temporary = tempfile.TemporaryDirectory(prefix="reweigh-result-")
         self.addCleanup(temporary.cleanup)
         isolate(self, Path(temporary.name))
 
@@ -191,7 +191,10 @@ class McpTests(BridgeTestCase):
                 async with self.session(peer) as session:
                     listing = await session.list_tools()
                     given = session.started.instructions
+                    server = session.started.serverInfo.name
                 offered(listing, peer)
+                # The handshake carries the name test_repository checks the manifests and MCP keys against.
+                self.assertEqual(server, TESTS.parent.name)
                 for part in instructions[peer]:
                     self.assertIn(part, given)
         await asyncio.to_thread(git_repository, self.project)
