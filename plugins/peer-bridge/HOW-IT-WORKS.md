@@ -48,6 +48,7 @@ Each app reaches the bridge through its own plugin; the shell uses the same scri
 | Bridge | the MCP server, the CLI, consultations, probes, pinned checkouts | `scripts/bridge.py` |
 | Jobs | the job store, its locks and request file, the detached runner | `scripts/jobs.py` |
 | Thread reader | finding history files, the repository check made on the bytes it returns, read budgets | `scripts/thread_reader.py`, `scripts/history_capture.py` |
+| Pre-launch check | whether the installed Codex still honours the names the command depends on | `scripts/preflight.py` |
 | Guard | the peer's process group | `scripts/peer_guard.py` |
 | State files | private files and folders under the state directory | `scripts/state_files.py`, `scripts/cleanup.py` |
 
@@ -66,12 +67,11 @@ flowchart TB
     outcome["Reply, or a fixed error<br/>cause named only from exact facts"]
 ```
 
-- **The peer only reads.** Claude runs as `claude -p` with Read, Glob, Grep, WebSearch, Skill and Agent, and the
-  repository's CLAUDE.md; Codex as `codex exec` in its read-only sandbox. A peer may start sub-agents unless
-  `PEER_BRIDGE_SUBAGENTS=0` is set; that also prevents the one known write, a worktree created by one of the user's
-  own Claude agent types with worktree isolation. Neither peer can start another consultation.
-  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read
-  and what the bridge does not cover.
+- **The peer only reads.** Claude runs as `claude -p` with the read and search tools the
+  [README](README.md#runtime-boundaries) lists, and the repository's CLAUDE.md; Codex as `codex exec` in its read-only
+  sandbox. Neither peer can start another consultation.
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read,
+  the one known write a sub-agent can make, and what the bridge does not cover.
 - **Where the two peers differ.** Claude applies the user's Claude settings and allow rules; Codex ignores the user's
   config.toml and command rules, since an allowed command runs outside its sandbox. Codex loads the repository's skills
   and can run read-only commands; Claude loads the user's own skills and the repository's CLAUDE.md, not its skills,
@@ -81,10 +81,12 @@ flowchart TB
 - **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
   readable, a Codex model it does not list, or an effort its model does not list, is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
-- **A renamed name never crashes a consultation.** Before a Codex peer starts, `preflight.py` checks in an empty home,
-  under the consultation's guard and within its timeout, that Codex still honours the names the command depends on;
-  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md#what-the-bridge-enforces) says
-  what happens when one is gone.
+- **A lost restriction refuses the call before the peer starts.** `preflight.py` runs Codex in an empty home with only
+  `PATH` and `HOME`, under the consultation's guard and within its timeout. Each disabled feature must be listed and
+  off; each restricting `-c` key must refuse a wrong-type value, as Codex does for a key it knows; and Codex must
+  accept the command's top-level options. A lost name refuses the call. A check that cannot tell adds `warnings` to a
+  successful result. The command is never changed. The `exec` options are not checked: Codex refuses one it does not
+  know, so the consultation fails. Claude Code is checked only by the contract tests.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the group and stops all of it
   when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL; sign-in probes and
   git commands run under a guard too. Each guard holds the conversation's lock until its group has stopped. The git

@@ -138,8 +138,7 @@ worktree under the state directory, and runs the peer in the same subdirectory o
 `commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells
 the peer to read only inside that checkout and to say when something is absent at the commit; this is an instruction,
 not a sandbox, because either peer can read outside it. The worktree is removed when the consultation ends, including
-on timeout or cancellation. The peer keeps its restrictions; SECURITY.md says when pinning is refused, and names the
-one known write a Claude peer can make, which `PEER_BRIDGE_SUBAGENTS=0` prevents.
+on timeout or cancellation. The peer keeps its restrictions; SECURITY.md says when pinning is refused.
 
 Claude resumes a session only from the directory it ran in, so each conversation keeps one checkout path,
 `worktrees/<conversation_id>`, recreated on every call. A follow-up without `ref` reads the conversation's pinned commit

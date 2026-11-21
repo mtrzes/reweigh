@@ -28,8 +28,9 @@
   (`preflight.py`). A lost restriction, or options Codex rejects, refuses the call; a check without a verdict adds
   `warnings` to a successful result. The command is never changed. Claude Code is checked by the contract tests.
 - A folder whose `.git` points at a git directory that does not point back, as an unpacked archive's can, no longer
-  counts as that repository: thread reads refuse it and leave out threads recorded there, and pinning refuses it, and
-  a repository whose `worktrees/` registry, under its common git directory, exists and is not a real folder inside it.
+  counts as that repository: thread reads refuse it and leave out threads recorded there, and pinning refuses it, as
+  it does a repository whose `worktrees/` registry, under its common git directory, exists but is not a real folder
+  inside it.
   A repository whose working tree or git directory path holds a newline is not read: thread reads and pinning treat
   it as outside a repository.
 
