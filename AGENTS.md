@@ -11,6 +11,7 @@
 | thread reading | [HOW-IT-WORKS](plugins/reweigh/HOW-IT-WORKS.md#thread-reading), [ADR 0001](docs/adr/0001-codex-thread-reader-source.md) | `test_reader` |
 | tests or CI | [ADR 0002](docs/adr/0002-test-architecture.md) | review |
 | a release or stored state | [ADR 0006](docs/adr/0006-releases-and-stored-state.md), [CHANGELOG](CHANGELOG.md) | `test_repository`, `test_jobs`, `test_core`, CI by hand |
+| a security item, a review round or a check of a peer CLI | [ADR 0007](docs/adr/0007-managing-complexity.md) | review |
 
 Run both suites before each commit: [Verification](plugins/reweigh/README.md#verification).
 
@@ -31,7 +32,10 @@ Run both suites before each commit: [Verification](plugins/reweigh/README.md#ver
 - Before committing a review fix, find every site with the same pattern (other callers, sibling except lists, other
   modes of a reused helper); fix each or name it in the commit body.
 - A new helper, class, parameter or constant needs a non-test caller; a parameter only a test passes is refused. The
-  commit body gives net production and test lines.
+  commit body gives net production and test lines; an approved item over about 100 net production lines stops for the
+  operator's sign-off, with the count and what the lines buy ([ADR 0007](docs/adr/0007-managing-complexity.md)).
+- Stop a review loop when most of a round's findings are in code the previous round added; take the design back to the
+  operator to cut or simplify.
 - A `dev/` tool imports what the plugin defines, never a copy, and does not restate what a test proves.
 - A user-visible change adds a line under `## Unreleased` in `CHANGELOG.md` in the same commit; a release renames the
   heading.
