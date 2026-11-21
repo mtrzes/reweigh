@@ -6,19 +6,18 @@ line runs.
 
 ## What the bridge enforces
 
-- **The peer cannot write.** Claude runs with Read, Glob, Grep, WebSearch, Skill and Agent, in `dontAsk` mode, with
-  no MCP servers or project settings, and ordinary hooks disabled; administrator-managed hooks follow Claude Code's
-  managed policy. Codex runs in its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers,
-  skills' MCP installs or apps, and with web search limited to cached results from OpenAI's index. A peer that tries to
-  edit, run a command that writes, or reach the network other than through its search tool is refused by its own
-  CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in its tests. The one
-  known write, a Claude agent type with worktree isolation, is under Sub-agents below.
-- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, the bridge checks, in
-  an empty home, that Codex still honours the names the command depends on. It refuses the call when a restriction is
-  lost, naming the setting, and when Codex rejects the command's top-level options but runs without them. When the
-  check cannot reach a verdict, the peer starts if time remains, and a successful result carries a warning. The
-  `exec` options are not checked before the start: Codex rejects an unknown one, so the consultation fails. Claude
-  Code's restrictions are checked against the installed Claude Code by the test suite, not before each start.
+- **The peer cannot write.** Claude runs with the read and search tools the
+  [README](plugins/peer-bridge/README.md#runtime-boundaries) lists, in `dontAsk` mode, with no MCP servers or project
+  settings, and ordinary hooks disabled; administrator-managed hooks follow Claude Code's managed policy. Codex runs in
+  its read-only sandbox, without the user's "always allow" rules, plugins, MCP servers, skills' MCP installs or apps,
+  and with web search limited to cached results from OpenAI's index. A peer that tries to edit, run a command that
+  writes, or reach the network other than through its search tool is refused by its own CLI's restrictions; the bridge
+  chooses those restrictions and checks the exact command line in its tests. The one known write, a Claude agent type
+  with worktree isolation, is under Sub-agents below.
+- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, a lost restriction
+  refuses the call; [HOW-IT-WORKS](plugins/peer-bridge/HOW-IT-WORKS.md#one-consultation) says how it is checked. When
+  the check cannot tell, the peer starts if time remains and a successful result carries a warning. Claude Code's
+  restrictions are checked only by the contract tests, not before each start.
 - **What a consulted repository can and cannot do.** It cannot make the bridge run its code (a Codex peer may run it
   inside its read-only sandbox), or point it at another repository on your machine. It can still influence what the
   peer answers, and the hints the bridge gives when a consultation fails. This assumes the `PATH` the app starts the
@@ -70,8 +69,8 @@ line runs.
   third party.
 - **Sub-agents.** A peer may start sub-agents unless `PEER_BRIDGE_SUBAGENTS=0`. Each reads the repository's
   instructions too, and each adds to the consultation's cost and time. That they keep the peer's restrictions is an
-  observation, not a tested guarantee: a Codex sub-agent was seen with the read-only sandbox, and Claude Code's
-  `--tools` bounds its sub-agents by inspection of its code. One of your own Claude agent types that sets
+  observation, not a tested guarantee: a Codex sub-agent was seen with the read-only sandbox, and, from reading
+  Claude Code's code, `--tools` also bounds its sub-agents. One of your own Claude agent types that sets
   `isolation: worktree` creates a git worktree in the consulted repository when the peer starts it: a write, which
   `PEER_BRIDGE_SUBAGENTS=0` avoids, as it also removes Skill, since a skill can fork a sub-agent.
 - **Codex threads continued elsewhere.** A Codex thread is placed in a repository by the working directory its session
