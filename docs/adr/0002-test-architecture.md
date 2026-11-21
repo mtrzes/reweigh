@@ -26,6 +26,7 @@ spent waiting. One maintainer runs the suites on macOS; users run the bridge on 
   outcomes to the tests below it.
 - A test that asserts something did not happen also proves that the code under test had the chance to make it happen.
 - An interleaving is produced with hooks or locks, never with timing; every wait has a deadline.
+- A wait that must wake on an event is proved with its timers made to fail the test, never with a time bound.
 - Every child process, descriptor and lock a test acquires has one owner that releases it when the test fails.
 - Tests run on temporary homes, isolated git config and fakes, never the user's CLIs, history or network.
 - Shared fixtures and fakes live in `tests/support.py`; test files never import each other.

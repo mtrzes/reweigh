@@ -25,7 +25,7 @@ import anyio
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
     BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, RecordingProbe, bridge, codex_thread, codex_turn,
-    consultation, eventually_async, git, git_repository, read_pid, running,
+    consultation, eventually_async, git, git_repository, module_view, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
 from thread_parsing import HistoryLookup  # noqa: E402
@@ -617,11 +617,11 @@ class ConsultationTests(BridgeTestCase):
         events = []
 
         class Guard:
-            """Stands in for the guard's Popen: poll() reaps it, as only the bridge's own poll() does."""
+            """Stands in for the guard's Popen: wait() reaps it, as only the bridge's own wait() does."""
             pid = 2 ** 22 + 7
             returncode = None
 
-            def poll(self):
+            def wait(self):
                 if self.returncode is None:
                     events.append("reap")
                     self.returncode = -signal.SIGKILL
@@ -649,6 +649,16 @@ class ConsultationTests(BridgeTestCase):
             ):
                 await bridge.stop_peer(Guard(), lifeline, status)
                 self.assertEqual(events, [("signal", Guard.pid, signal.SIGKILL), "reap"])
+
+    async def test_a_guarded_command_is_waited_for_without_a_timer(self):
+        # Each wait on the guard, for the peer's status, for the guard's exit and for its reaping, wakes when the guard
+        # acts: a wait that slept between checks would add its interval to every command the bridge runs.
+        async def timer(delay, result=None):
+            raise AssertionError("A wait on the guard slept on a timer.")
+
+        with patch.object(bridge, "asyncio", module_view(asyncio, sleep=timer)):
+            result = await bridge.run_command([sys.executable, "-c", "pass"], None, self.project, DEADLINE_SECONDS)
+        self.assertEqual(result, (0, b"", b""))
 
     @staticmethod
     def close_quietly(*descriptors):

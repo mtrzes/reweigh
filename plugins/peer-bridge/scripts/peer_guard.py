@@ -22,13 +22,35 @@ import sys
 import time
 
 GRACE_SECONDS = 2
-POLL_SECONDS = 0.05
 # Exact tokens on the status descriptor: the peer's exit status as an integer, or this when it could not start.
 START_FAILED = b"start-failed"
 
 
 def ignore(signal_number, frame):
     """The guard's own group signal must not stop it early. A handler, unlike SIG_IGN, is reset for the peer."""
+
+
+def child_exits():
+    """A descriptor that turns readable when a child of the guard exits, so the guard's waits wake on the peer's exit
+    instead of checking it on a timer. Read it empty with drain() before checking the peer, so no exit goes unseen.
+
+    SIGCHLD gets a handler, which writes to the descriptor. Unlike an inherited SIG_IGN, a handler keeps the kernel
+    from reaping the peer, which would make poll() report exit status 0.
+    """
+    read, write = os.pipe()
+    os.set_blocking(read, False)
+    os.set_blocking(write, False)
+    signal.set_wakeup_fd(write, warn_on_full_buffer=False)
+    signal.signal(signal.SIGCHLD, ignore)
+    return read
+
+
+def drain(descriptor):
+    try:
+        while os.read(descriptor, 512):
+            pass
+    except BlockingIOError:
+        pass
 
 
 def release_standard_streams():
@@ -50,15 +72,22 @@ def report(status, token):
         return False
 
 
-def stop_group(peer):
+def stop_group(peer, exits):
+    """Signal the group to stop, wait for the peer to exit or the grace period to end, then kill the group."""
     os.killpg(0, signal.SIGTERM)
     deadline = time.monotonic() + GRACE_SECONDS
-    while peer is not None and peer.poll() is None and time.monotonic() < deadline:
-        time.sleep(POLL_SECONDS)
+    with selectors.DefaultSelector() as selector:
+        selector.register(exits, selectors.EVENT_READ)
+        while True:
+            drain(exits)
+            remaining = deadline - time.monotonic()
+            if peer is None or peer.poll() is not None or remaining <= 0:
+                break
+            selector.select(remaining)
     os.killpg(0, signal.SIGKILL)
 
 
-def wait_for_lifeline(lifeline, peer, status):
+def wait_for_lifeline(lifeline, peer, status, exits):
     """Report the peer's exit status when it exits, until the lifeline closes or the status cannot be reported.
 
     A selector, unlike select(), accepts any descriptor number the bridge passes.
@@ -66,12 +95,15 @@ def wait_for_lifeline(lifeline, peer, status):
     reported = peer is None
     with selectors.DefaultSelector() as selector:
         selector.register(lifeline, selectors.EVENT_READ)
+        selector.register(exits, selectors.EVENT_READ)
         while True:
-            if selector.select(POLL_SECONDS) and not os.read(lifeline, 1):
-                return
+            drain(exits)
             if not reported and peer.poll() is not None:
                 reported = True
                 if not report(status, b"%d" % peer.returncode):
+                    return
+            for key, _ in selector.select():
+                if key.fd == lifeline and not os.read(lifeline, 1):
                     return
 
 
@@ -80,8 +112,7 @@ def main():
     if sys.argv[3] != "--" or len(sys.argv) < 5:
         sys.exit(2)
     command = sys.argv[4:]
-    # An inherited SIG_IGN would let the kernel reap the peer, and poll() would then report exit status 0.
-    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    exits = child_exits()
     for signal_number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
         signal.signal(signal_number, ignore)
     peer = None
@@ -92,9 +123,9 @@ def main():
         except OSError:
             report(status, START_FAILED)
         release_standard_streams()
-        wait_for_lifeline(lifeline, peer, status)
+        wait_for_lifeline(lifeline, peer, status, exits)
     finally:
-        stop_group(peer)
+        stop_group(peer, exits)
 
 
 if __name__ == "__main__":

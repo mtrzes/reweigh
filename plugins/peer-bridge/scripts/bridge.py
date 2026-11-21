@@ -351,6 +351,17 @@ async def read_output(stream, chunks):
         chunks.append(chunk)
 
 
+async def readable(descriptor):
+    """Wait until a descriptor is readable. The event loop wakes on it, so the wait adds no latency of its own."""
+    loop = asyncio.get_running_loop()
+    ready = loop.create_future()
+    loop.add_reader(descriptor, lambda: ready.done() or ready.set_result(None))
+    try:
+        await ready
+    finally:
+        loop.remove_reader(descriptor)
+
+
 async def peer_exit_status(status):
     """Return the peer's exit status from the guard's status descriptor, as soon as the guard reports it."""
     data = b""
@@ -358,7 +369,7 @@ async def peer_exit_status(status):
         try:
             chunk = os.read(status, 64)
         except BlockingIOError:
-            await asyncio.sleep(0.05)
+            await readable(status)
             continue
         if not chunk:
             raise BridgeError("The peer CLI stopped unexpectedly. Check its installation.")
@@ -376,24 +387,25 @@ async def guard_exit_status(guard):
     """Reap the guard and return its exit status. Called only after the bridge's last signal to its group: reaping
     frees the group's ID for reuse.
 
-    The guard is a subprocess.Popen, so nothing else reaps it: only Popen.poll(), called from this event loop's thread,
-    does. (asyncio's child watcher would reap on another thread, ahead of what the bridge can see.)
+    The guard is a subprocess.Popen, so nothing else reaps it: only this wait does, and it starts only when this is
+    called. (asyncio's child watcher would reap whenever the guard exits, ahead of the bridge's last signal.) No
+    descriptor tells the event loop that the guard has exited, so a worker thread waits for it.
     """
-    while guard.poll() is None:
-        await asyncio.sleep(0.05)
-    return guard.returncode
+    return await asyncio.to_thread(guard.wait)
 
 
 async def status_closed(status, deadline):
     """Wait until the guard's status descriptor reaches its end, which happens only when the guard has exited, or
     until the deadline; True at the end. Reading it, unlike poll(), leaves the guard unreaped."""
-    while time.monotonic() < deadline:
+    while True:
         try:
             if not os.read(status, 64):
                 return True
         except BlockingIOError:
-            await asyncio.sleep(0.05)
-    return False
+            try:
+                await asyncio.wait_for(readable(status), deadline - time.monotonic())
+            except asyncio.TimeoutError:
+                return False
 
 
 def kill_group(group):
