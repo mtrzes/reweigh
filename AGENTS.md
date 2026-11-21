@@ -36,7 +36,7 @@ Run both suites before each commit: [Verification](plugins/reweigh/README.md#ver
   operator's sign-off, with the count and what the lines buy ([ADR 0007](docs/adr/0007-managing-complexity.md)).
 - Stop a review loop when most of a round's findings are in code the previous round added; take the design back to the
   operator to cut or simplify.
-- A `dev/` tool imports from the plugin's modules and does not restate what a test proves.
+- A `dev/` tool imports what the plugin defines, never a copy, and does not restate what a test proves.
 - A user-visible change adds a line under `## Unreleased` in `CHANGELOG.md` in the same commit; a release renames the
   heading.
 - A rejected proposal likely to come back gets a why-comment at the site naming the test that holds it, or an ADR if
