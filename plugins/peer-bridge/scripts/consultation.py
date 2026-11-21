@@ -373,12 +373,11 @@ def peer_environment(environ, pinned=False):
 # Pre-launch checks
 #
 # Before a Codex peer starts, the bridge checks that Codex still honours every name the bridge's command depends on.
-# A lost restriction refuses the call; a lost capability, and a check that cannot reach a verdict, become warnings,
-# and the peer starts. The command is never changed. The checks read exit statuses and exact tokens only.
+# A lost restriction refuses the call; a check that cannot reach a verdict becomes a warning, and the peer starts.
+# The command is never changed. The checks read exit statuses and exact tokens only.
 
 RESTRICTION_LOST = ("{name} no longer accepts {setting}, which the bridge passes to {purpose}. The consultation was "
                     "not started; update peer-bridge or check {name}'s release notes.")
-CAPABILITY_LOST = "{name} no longer accepts {capability} under that name; the peer ran without it."
 UNVERIFIED = "{name}'s restrictions could not be checked before the start ({reason}); the peer ran unchecked."
 CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
 # Codex keys whose wrong-type value Codex refuses while it knows the key, and accepts silently once it does not.
@@ -390,23 +389,6 @@ CODEX_RESTRICTION_KEYS = {
     "web_search": "limit the peer's web search to OpenAI's index",
     "features.multi_agent_v2.disable_native_tools": "keep the peer from starting sub-agents",
 }
-CODEX_CAPABILITY_KEYS = {"model_reasoning_effort": "the chosen reasoning effort"}
-CODEX_EXEC_PURPOSE = "keep the user's configuration and command rules out of the peer"
-# Codex's top-level options that take a value; each other option stands alone.
-CODEX_VALUE_OPTIONS = ("--disable", "-c", "--sandbox", "--ask-for-approval", "--model")
-
-
-def codex_options(flags):
-    """A Codex command's top-level options, each with its value, in order."""
-    options, index = [], 0
-    while index < len(flags):
-        if flags[index] in CODEX_VALUE_OPTIONS and index + 1 < len(flags):
-            options.append(tuple(flags[index:index + 2]))
-            index += 2
-        else:
-            options.append((flags[index],))
-            index += 1
-    return options
 
 
 def codex_feature_names(command):
@@ -427,11 +409,6 @@ def codex_feature_rows(listing):
     # A row in another shape keeps its name, with a state nothing reads as on or off.
     return {words[0]: (" ".join(words[1:-1]), words[-1]) if len(words) >= 3 else ("", "")
             for words in rows if words}
-
-
-def codex_feature_off(name, rows):
-    """Whether Codex lists the feature, not as removed, and reports it off."""
-    return name in rows and rows[name][0] != "removed" and rows[name][1] == "false"
 
 
 def codex_key_names(command):

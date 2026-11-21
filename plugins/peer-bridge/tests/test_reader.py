@@ -54,22 +54,38 @@ class ReaderTests(unittest.TestCase):
     def read(self, provider, thread, max_messages=3):
         return self.reader(provider).read(self.project, thread, max_messages)
 
-    def test_a_git_pointer_counts_only_when_its_git_directory_points_back(self):
-        # git's own layouts: a clone, a linked worktree and a submodule, each found from inside a subfolder.
+    def layouts(self):
+        """git's own layouts: a clone, a linked worktree and a submodule, each with a subfolder."""
         main = git_repository(self.root / "main")
         git(main, "worktree", "add", "--quiet", "--detach", str(self.root / "linked"))
         outer = git_repository(self.root / "outer")
         git(outer, "-c", "protocol.file.allow=always", "submodule", "add", "--quiet", str(main), "sub")
         for folder in (main, self.root / "linked", outer / "sub"):
             (folder / "deep").mkdir()
-        self.assertEqual(thread_reader.git_common_dir(main / "deep"), main / ".git")
-        self.assertEqual(thread_reader.git_common_dir(self.root / "linked" / "deep"), main / ".git")
-        self.assertEqual(thread_reader.git_common_dir(outer / "sub" / "deep"), outer / ".git" / "modules" / "sub")
-        # What an unpacked archive can carry: a .git file aimed at another repository, and a .git folder whose
-        # commondir is.
+        return main, outer
+
+    def planted(self, main):
+        """What an unpacked archive can carry: a .git file aimed at another repository."""
         planted = self.root / "planted"
         planted.mkdir()
         (planted / ".git").write_text(f"gitdir: {main / '.git'}\n")
+        return planted
+
+    def test_git_s_own_layouts_give_their_shared_git_directory(self):
+        main, outer = self.layouts()
+        self.assertEqual(thread_reader.git_common_dir(main / "deep"), main / ".git")
+        self.assertEqual(thread_reader.git_common_dir(self.root / "linked" / "deep"), main / ".git")
+        self.assertEqual(thread_reader.git_common_dir(outer / "sub" / "deep"), outer / ".git" / "modules" / "sub")
+        self.assertIsNone(thread_reader.git_common_dir(self.root))
+        # A bare repository's own folder scopes its linked worktrees' threads.
+        bare = self.root / "bare.git"
+        git(self.root, "init", "--quiet", "--bare", str(bare))
+        self.assertEqual(thread_reader.git_common_dir(bare), bare)
+        self.assertEqual(thread_reader.git_common_dir(bare / "hooks"), bare)
+
+    def test_a_git_pointer_counts_only_when_its_git_directory_points_back(self):
+        main, outer = self.layouts()
+        # A .git folder whose commondir names another repository.
         borrowed = git_repository(self.root / "borrowed")
         (borrowed / ".git" / "commondir").write_text(f"{main / '.git'}\n")
         # A .git file aimed at a real submodule's git directory: git follows its core.worktree to the real checkout,
@@ -77,31 +93,23 @@ class ReaderTests(unittest.TestCase):
         into_module = self.root / "into-module"
         into_module.mkdir()
         (into_module / ".git").write_text(f"gitdir: {outer / '.git' / 'modules' / 'sub'}\n")
-        for folder in (planted, borrowed, into_module):
+        for folder in (self.planted(main), borrowed, into_module):
             with self.subTest(folder=folder.name), self.assertRaises(thread_reader.RepositoryRedirected):
                 thread_reader.git_common_dir(folder)
+
+    def test_a_thread_in_a_redirected_folder_is_left_out_of_the_listing(self):
+        main = git_repository(self.root / "main")
+        (main / "deep").mkdir()
+        planted = self.planted(main)
         with self.assertRaisesRegex(ThreadUnavailable, "does not record this folder"):
             ThreadReader(CodexFilesSource()).list(planted, 20)
-        self.assertIsNone(thread_reader.git_common_dir(self.root))
-        # A bare repository's own folder scopes its linked worktrees' threads, as before.
-        bare = self.root / "bare.git"
-        git(self.root, "init", "--quiet", "--bare", str(bare))
-        self.assertEqual(thread_reader.git_common_dir(bare), bare)
-        self.assertEqual(thread_reader.git_common_dir(bare / "hooks"), bare)
-        # A thread recorded in a redirected folder is left out of a real repository's listing, which still lists its
-        # own.
         codex_thread(self.codex_home, main / "deep", codex_turn("t1", "Real."), name="Real review")
         codex_thread(self.codex_home, planted, codex_turn("t2", "Planted."), name="Planted review")
         listing = ThreadReader(CodexFilesSource()).list(main, 20)
         self.assertEqual([thread["name"] for thread in listing["threads"]], ["Real review"])
-        # A path holding a newline is still found, one path per git call, also for a linked worktree, whose gitdir
-        # back reference holds the newline too.
-        unusual = git_repository(self.root / "new\nline")
-        self.assertEqual(thread_reader.git_common_dir(unusual), unusual / ".git")
-        git(main, "worktree", "add", "--quiet", "--detach", str(self.root / "linked\nworktree"))
-        self.assertEqual(thread_reader.git_common_dir(self.root / "linked\nworktree"), main / ".git")
-        # A FIFO in place of a metadata file is refused at once, never waited on; the read runs in a child with a
-        # deadline, so a regression fails instead of hanging the suite.
+
+    def test_a_fifo_in_place_of_a_metadata_file_is_refused_at_once(self):
+        # The read runs in a child with a deadline, so a regression fails instead of hanging the suite.
         fifo = self.root / "fifo"
         os.mkfifo(fifo)
         probe = ("import sys; sys.path.insert(0, sys.argv[1]); import thread_reader as r; "

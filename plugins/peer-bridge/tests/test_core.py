@@ -1051,24 +1051,6 @@ class RepositoryLayoutTests(unittest.TestCase):
             with self.subTest(layout=name):
                 self.assertIs(t.reciprocal(self.layout(**changes)), expected)
 
-    def test_core_worktree_is_read_from_the_plain_config_git_writes(self):
-        cases = (
-            ("[core]\n\tworktree = ../../../sub\n", "../../../sub"),
-            ('[core]\n\tWorkTree = "../../../sub"\n', "../../../sub"),
-            ("[core]\n\tbare = false\n[remote \"origin\"]\n\tworktree = x\n", None),
-            ("[core]\n\tworktree = a\n\tworktree = b\n", None),
-            ("[core]\n\tworktree = ../../../lib # relative to gitdir\n", "../../../lib"),
-            ('[core]\n\tworktree = "../../../lib" # relative to gitdir\n', "../../../lib"),
-            ("[core] # submodule settings\n\tworktree = ../lib\n", "../lib"),
-            ("[core] ; submodule settings\n\tworktree = ../lib\n", "../lib"),
-            ("[core]\n\tworktree = a\\\\b\n", None),
-            ("", None),
-        )
-        for text, expected in cases:
-            with self.subTest(text=text):
-                self.assertEqual(t.core_worktree(text), expected)
-
-
 
 if __name__ == "__main__":
     unittest.main()

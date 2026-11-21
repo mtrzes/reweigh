@@ -600,40 +600,6 @@ def reciprocal(layout):
             and layout.common_dir == layout.git_dir)
 
 
-def core_worktree(config_text):
-    """The core.worktree value of a git config file git wrote for a submodule, or None when it has none or the file
-    uses syntax beyond plain sections and key = value lines, which git writes there."""
-    section, found = None, []
-    for raw in config_text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        if line.startswith("[") and "]" in line and line[line.index("]") + 1:].strip()[:1] in ("", "#", ";"):
-            line = line[:line.index("]") + 1]  # a comment after a section header
-        if line.startswith("["):
-            if not line.endswith("]") or '"' in line:
-                section = line  # a subsection; core has none
-                continue
-            section = line[1:-1].strip().lower()
-            continue
-        key, separator, value = line.partition("=")
-        if not separator:
-            continue
-        if section == "core" and key.strip().lower() == "worktree":
-            value = value.strip()
-            if value.startswith('"'):
-                closing = value.find('"', 1)
-                rest = value[closing + 1:].strip() if closing > 0 else "?"
-                # A quoted value, then nothing or a comment.
-                value = value[1:closing] if closing > 0 and (not rest or rest[0] in "#;") else ""
-            else:
-                value = value.split("#", 1)[0].split(";", 1)[0].strip()  # a comment after an unquoted value
-            if not value or "\\" in value or '"' in value:
-                return None
-            found.append(value)
-    return found[0] if len(found) == 1 else None
-
-
 # Results
 
 

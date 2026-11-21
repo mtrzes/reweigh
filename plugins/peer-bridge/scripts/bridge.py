@@ -36,7 +36,7 @@ from consultation import (
     failure_probes, git_entry_found, history_presence, peer_choices,
 )
 from cleanup import run_to_completion
-from preflight import Preflight
+from preflight import preflight
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
@@ -357,10 +357,6 @@ def conversation_runner(conversation, budget):
     return run
 
 
-# One cache per server process: a verdict holds until the CLI's version changes.
-PREFLIGHT = Preflight()
-
-
 def command_for(provider, working_directory, backend_session_id, conversation_id, model=None, reasoning_effort=None,
                 pinned=False, extra_directories=()):
     executable = peer_executable(provider)
@@ -636,12 +632,13 @@ async def pinned_checkout(scope, directory, ref):
     paths = layout_paths(os.fsencode(await scope.git(
         directory, *LAYOUT_ARGUMENTS, failure=outside, timeout=preparation.left())))
     if paths is None:
-        # A path holding a newline: one path per call is unambiguous.
-        paths = tuple([Path(await scope.git(directory, *LAYOUT_ARGUMENTS[:2], flag, failure=outside,
-                                            timeout=preparation.left())).resolve() for flag in LAYOUT_ARGUMENTS[2:]])
+        raise BridgeError(outside)  # a path holding a newline is not read
+    configured = await scope.git(directory, "config", "--file", str(paths[1] / "config"), "--get", "core.worktree",
+                                 failure="Cannot read the repository's git configuration.", allowed=(1,),
+                                 timeout=preparation.left())
     # Pinning writes a worktree record into the repository's git directory, so both must be the repository's own: a
     # folder unpacked from an archive can aim its .git at another repository. These checks come before any write.
-    if not reciprocal(repository_layout(directory, *paths)):
+    if not reciprocal(repository_layout(directory, *paths, configured or None)):
         raise BridgeError(REDIRECTED_REPOSITORY)
     if not worktrees_inside(paths[2]):
         raise BridgeError(FOREIGN_WORKTREES)
@@ -682,7 +679,7 @@ async def pinned_checkout(scope, directory, ref):
 
 
 class Bridge:
-    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None, preflight=None):
+    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None):
         self.store = store or SessionStore(state_directory())
         self.readers = readers or {
             "claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource()),
@@ -693,7 +690,7 @@ class Bridge:
         # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
         self.probe = probe or FailureProbe
         # Checks, before a peer starts, that its CLI still knows the names the command depends on.
-        self.preflight = preflight or PREFLIGHT
+        self.preflight = preflight
 
     def checked_request(self, provider, prompt, working_directory, conversation_id, model=None, reasoning_effort=None,
                         extra_directories=()):

@@ -27,7 +27,7 @@ from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
     GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout,
     TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, UUID_PATTERN, claude_cwd_search,
-    core_worktree, reciprocal, claude_head, claude_snapshot, claude_title_search,
+    reciprocal, claude_head, claude_snapshot, claude_title_search,
     claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
     is_supported_history, listing_result, match_thread, newest_first, parse_session_index, rollout_identifier,
     scan_codex, search_tail, snapshot_result, turns_search,
@@ -289,7 +289,7 @@ def read_metadata(path):
 
 def layout_paths(stdout):
     """The three paths LAYOUT_ARGUMENTS prints, or None when git printed anything else, such as a path holding a
-    newline; the caller then asks for each path on its own."""
+    newline, which the bridge does not read."""
     lines = stdout.split(b"\n")
     if lines[-1:] == [b""]:
         lines = lines[:-1]
@@ -330,15 +330,14 @@ def nearest_git_entry(directory):
     return None
 
 
-def repository_layout(directory, top, git_dir, common_dir):
-    """Read the back references git's own setup writes, for reciprocal() to compare."""
+def repository_layout(directory, top, git_dir, common_dir, worktree):
+    """Read the back references git's own setup writes, for reciprocal() to compare; worktree is the git directory's
+    core.worktree as `git config --file <git_dir>/config --get core.worktree` printed it, or None."""
     try:
         mode = os.lstat(top / ".git").st_mode
         dot_git = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else None
     except OSError:
         dot_git = None
-    config = read_metadata(git_dir / "config")
-    worktree = core_worktree(config.decode("utf-8", errors="replace")) if isinstance(config, bytes) else None
     return RepositoryLayout(nearest_git_entry(Path(directory).resolve()), top, git_dir, common_dir, dot_git,
                             back_reference(git_dir, "gitdir"), resolved(git_dir, worktree) if worktree else None,
                             back_reference(git_dir, "commondir"))
@@ -386,14 +385,10 @@ def git_common_dir(directory):
         common = Path(location).resolve() if location else None
         return common if common and Path(directory).resolve().is_relative_to(common) else None
     paths = layout_paths(result.stdout)
-    if paths is None:
-        # A path holding a newline: one path per call is unambiguous.
-        answers = [ask(*LAYOUT_ARGUMENTS[:2], flag) for flag in LAYOUT_ARGUMENTS[2:]]
-        locations = [git_output_path(answer.stdout) if answer and not answer.returncode else None for answer in answers]
-        if not all(locations):
-            return None
-        paths = tuple(Path(location).resolve() for location in locations)
-    if not reciprocal(repository_layout(directory, *paths)):
+    worktree = paths and ask("config", "--file", str(paths[1] / "config"), "--get", "core.worktree")
+    if not worktree or worktree.returncode not in (0, 1):
+        return None
+    if not reciprocal(repository_layout(directory, *paths, git_output_path(worktree.stdout))):
         raise RepositoryRedirected(REDIRECTED_REPOSITORY)
     return paths[2]
 

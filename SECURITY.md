@@ -13,16 +13,12 @@ line runs.
   edit, run a command that writes, or reach the network other than through its search tool is refused by its own
   CLI's restrictions; the bridge chooses those restrictions and checks the exact command line in its tests. The one
   known write, a Claude agent type with worktree isolation, is under Sub-agents below.
-- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, the bridge reads
-  Codex's version; for each new version and command shape it checks, in an empty home, that Codex still honours the
-  names the command depends on, and keeps the verdict in the process that runs the consultation, so each
-  background job checks afresh. It refuses the call, naming the setting (for an `exec` option, the options it
-  checked together), when a restriction is lost or Codex rejects an option or value on its own; top-level
-  options Codex rejects only together leave the check without a verdict, as below, unless another probe proves a
-  restriction lost, while `exec` options rejected together refuse; when Codex silently ignores the reasoning-effort
-  key, or the check cannot reach a verdict, the peer starts if time remains, and a successful result carries a
-  warning. Claude Code's restrictions are checked against the installed Claude Code by the test suite, not before
-  each start.
+- **The restrictions are checked against the installed CLIs.** Before each Codex consultation, the bridge checks, in
+  an empty home, that Codex still honours the names the command depends on. It refuses the call when a restriction is
+  lost, naming the setting, and when Codex rejects the command's top-level options but runs without them. When the
+  check cannot reach a verdict, the peer starts if time remains, and a successful result carries a warning. The
+  `exec` options are not checked before the start: Codex rejects an unknown one, so the consultation fails. Claude
+  Code's restrictions are checked against the installed Claude Code by the test suite, not before each start.
 - **What a consulted repository can and cannot do.** It cannot make the bridge run its code (a Codex peer may run it
   inside its read-only sandbox), or point it at another repository on your machine. It can still influence what the
   peer answers, and the hints the bridge gives when a consultation fails. This assumes the `PATH` the app starts the

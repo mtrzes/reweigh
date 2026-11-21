@@ -68,11 +68,19 @@ class InstalledCliTests(unittest.TestCase):
             return result.returncode, result.stdout, result.stderr
 
         executable = self.installed("codex")
+        # Control: the behaviours the check rests on, so a Codex that refuses every key cannot pass it silently.
+        environment = {"PATH": os.environ["PATH"], "HOME": str(self.root), "CODEX_HOME": str(self.root)}
+        for arguments, status in ((["-c", "web_search=1"], 1), (["-c", "peer_bridge_no_such_key=1"], 0),
+                                  (["--disable", "peer_bridge_no_such_feature"], 1)):
+            with self.subTest(control=arguments):
+                code, _, _ = asyncio.run(runner([executable, *arguments, "features", "list"], None, self.root,
+                                                DEADLINE_SECONDS, environment))
+                self.assertEqual(code, status)
         for session, subagents in ((None, True), (None, False), (str(uuid.uuid4()), True)):
             command = consultation.build_command("codex", executable, "conv", session, reasoning_effort="high",
                                                  subagents=subagents)
             with self.subTest(resumed=bool(session), subagents=subagents):
-                self.assertEqual(asyncio.run(preflight.Preflight()("codex", command, runner)), [])
+                self.assertEqual(asyncio.run(preflight.preflight("codex", command, runner)), [])
 
     def claude_canary(self, command):
         """Run a Claude command signed out in an empty home, beside a user hook and a user MCP server that each touch

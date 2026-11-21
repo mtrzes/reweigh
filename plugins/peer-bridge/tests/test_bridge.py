@@ -997,18 +997,19 @@ class ConsultationTests(BridgeTestCase):
             clock.now += step
             return await bridge.run_command(command, prompt, directory, timeout, **options)
 
-        third = prepare / 3
+        quarter = prepare / 4
         for step, leftover, expected in (
-            (10, False, [("rev-parse", prepare), ("rev-parse", prepare - 10), ("worktree", prepare - 20),
-                         ("worktree", prepare - 30), ("config", prepare - 40), ("read-tree", prepare - 50),
-                         ("peer", self.client.timeout), ("worktree", remove)]),
+            (10, False, [("rev-parse", prepare), ("config", prepare - 10), ("rev-parse", prepare - 20),
+                         ("worktree", prepare - 30), ("worktree", prepare - 40), ("config", prepare - 50),
+                         ("read-tree", prepare - 60), ("peer", self.client.timeout), ("worktree", remove)]),
             # Out of time before the checkout is added: nothing more starts, and the removal still runs.
-            (third, False, [("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
-                            ("worktree", remove)]),
+            (quarter, False, [("rev-parse", prepare), ("config", 3 * quarter), ("rev-parse", 2 * quarter),
+                              ("worktree", quarter), ("worktree", remove)]),
             # Out of time while removing a checkout left in place, after the sweep's own call: the final removal, with
             # its own allowance, removes it.
-            (third, True, [("rev-parse", remove), ("rev-parse", prepare), ("rev-parse", 2 * third), ("worktree", third),
-                           ("worktree", remove), ("worktree", remove - third)]),
+            (quarter, True, [("rev-parse", remove), ("rev-parse", prepare), ("config", 3 * quarter),
+                             ("rev-parse", 2 * quarter), ("worktree", quarter), ("worktree", remove),
+                             ("worktree", remove - quarter)]),
         ):
             arguments = {"ref": "HEAD"}
             if leftover:

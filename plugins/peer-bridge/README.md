@@ -94,8 +94,7 @@ For a host that needs both tools, launch the script with `--peer both`.
 reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue is
 readable, a consultation whose model, or whose model's effort, it does not list is refused before Codex starts, with the
 values it does list. Without a catalogue, without a named model to check an effort against, or for a model whose
-catalogue entry lists no efforts, the catalogue check is skipped. The pre-launch check then tries to verify the effort;
-if it cannot reach a verdict and time remains, the consultation goes ahead and a successful result carries `warnings`.
+catalogue entry lists no efforts, the catalogue check is skipped and the effort reaches Codex unchecked.
 
 For example, ask the available peer tool:
 
@@ -109,10 +108,10 @@ For example, ask the available peer tool:
 
 A successful response contains `provider`, `conversation_id` and `reply`; `model` and `reasoning_effort` when the
 consultation chose them, from the request or the environment: the values the bridge passed to the peer CLI, which does
-not report back what it ran with; and `warnings` when Codex's pre-launch check found a capability it no longer
-accepts, or could not reach a verdict. Pass the returned ID on follow-ups, with the same peer and project directory.
-Bridge metadata binds each ID to the provider and canonical directory; it does not accept a peer CLI's raw session ID. A
-per-conversation file lock prevents overlapping resumes.
+not report back what it ran with; and `warnings` when Codex's pre-launch check could not reach a verdict. Pass the
+returned ID on follow-ups, with the same peer and project directory. Bridge metadata binds each ID to the provider and
+canonical directory; it does not accept a peer CLI's raw session ID. A per-conversation file lock prevents overlapping
+resumes.
 
 A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The bridge names a
 cause only when an exact field or a check establishes it, and never by reading the CLI's or the model's text:
@@ -127,10 +126,9 @@ cause only when an exact field or a check establishes it, and never by reading t
 
 The bridge runs the sign-in check and the history lookup only while time remains from the consultation timeout, and
 gives up looking for a `.git` entry after 10 seconds. If the checks and result fields establish no cause, the bridge
-returns a generic error. A reasoning effort Codex rejects before the start is refused with a message saying to correct
-or unset it. When a Codex consultation that chose a model or reasoning effort, per call or by environment, fails after
-the start with no other cause established, the message adds that the choice may be the cause, because Codex reports a
-rejected choice only in prose.
+returns a generic error. When a Codex consultation that chose a model or reasoning effort, per call or by environment,
+fails after the start with no other cause established, the message adds that the choice may be the cause, because Codex
+reports a rejected choice only in prose.
 
 ### Pinned refs
 
