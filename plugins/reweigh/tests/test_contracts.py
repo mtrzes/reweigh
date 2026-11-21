@@ -191,7 +191,10 @@ class McpTests(BridgeTestCase):
                 async with self.session(peer) as session:
                     listing = await session.list_tools()
                     given = session.started.instructions
+                    server = session.started.serverInfo.name
                 offered(listing, peer)
+                # The handshake carries the name test_repository checks the manifests and MCP keys against.
+                self.assertEqual(server, TESTS.parent.name)
                 for part in instructions[peer]:
                     self.assertIn(part, given)
         await asyncio.to_thread(git_repository, self.project)

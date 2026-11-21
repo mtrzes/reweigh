@@ -180,6 +180,38 @@ class CodexPluginTests(unittest.TestCase):
                 self.assertIn(name, forwarded)
 
 
+class PackagingTests(unittest.TestCase):
+    def test_the_marketplaces_plugins_and_mcp_servers_share_one_name(self):
+        # A rename that misses one of these fails here, not at install: the MCP key names every tool's prefix. The
+        # server's handshake name is checked against the plugin folder in test_contracts, where the server runs.
+        def load(*parts):
+            return json.loads(ROOT.joinpath(*parts).read_text(encoding="utf-8"))
+
+        def only_server(config):
+            [name] = config["mcpServers"]
+            return name
+
+        claude_market = load(".claude-plugin", "marketplace.json")
+        codex_market = load(".agents", "plugins", "marketplace.json")
+        codex_plugin = load("plugins", PLUGIN.name, ".codex-plugin", "plugin.json")
+        names = {
+            "plugin folder": PLUGIN.name,
+            "Claude marketplace": claude_market["name"],
+            "Claude marketplace entry": claude_market["plugins"][0]["name"],
+            "Codex marketplace": codex_market["name"],
+            "Codex marketplace entry": codex_market["plugins"][0]["name"],
+            "Claude plugin": load("plugins", PLUGIN.name, ".claude-plugin", "plugin.json")["name"],
+            "Codex plugin": codex_plugin["name"],
+            "Codex display name": codex_plugin["interface"]["displayName"],
+            "Claude MCP server": only_server(load("plugins", PLUGIN.name, ".mcp.json")),
+            # The file the Codex manifest points at, so a dangling pointer fails too.
+            "Codex MCP server": only_server(load("plugins", PLUGIN.name, codex_plugin["mcpServers"])),
+        }
+        self.assertEqual(len(set(names.values())), 1, names)
+        self.assertEqual(claude_market["plugins"][0]["source"], f"./plugins/{PLUGIN.name}")
+        self.assertEqual(codex_market["plugins"][0]["source"]["path"], f"./plugins/{PLUGIN.name}")
+
+
 class ScriptImportTests(unittest.TestCase):
     """What the shipped scripts import, read from their source: the packages they declare and the way they depend."""
 

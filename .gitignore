@@ -5,5 +5,5 @@ __pycache__/
 .ruff_cache/
 .claude/worktrees/
 .claude/settings.local.json
-# The backlog is kept locally only.
-plugins/reweigh/TODO.md
+# The backlog is kept locally only, under any plugin folder name (a rename leaves the old folder's copy behind).
+/plugins/*/TODO.md
