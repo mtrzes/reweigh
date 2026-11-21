@@ -39,9 +39,9 @@ indirect: a writer-lock file can outlive a crashed app, and a `.git` entry is th
 undocumented behaviour; if Codex changes it, the message can name a wrong cause until the standing duty catches it,
 since no test exercises the installed Codex's repository check. If Codex's system configuration trusts a directory
 outside any repository, Codex runs there, and another failure there is reported as outside git; the message names that
-case. A consulted repository can shape the `.git` and writer-lock facts, which changes only which message a failure
-gets. The sign-in probe runs in an empty folder of its own, because `claude auth status` applies the settings of the
-folder it runs in.
+case. A consulted repository can shape the `.git` fact, which changes only which message a failure gets; the
+writer-lock fact comes from Codex's own state. The sign-in probe runs in an empty folder of its own, because
+`claude auth status` applies the settings of the folder it runs in.
 
 ## Reconsider if
 A CLI reports a cause as a field, event or distinct exit status (add the fact); Codex changes how it finds a
