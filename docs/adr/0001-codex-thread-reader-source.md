@@ -49,5 +49,5 @@ can break it until a fix or the app-server takes over.
 ## Reconsider if
 A Codex release breaks the file reader and no parser fix restores it; Codex Desktop's own app-server becomes reachable
 without starting a second one; or forked threads must become readable. The thread tools stay experimental, off unless
-`PEER_BRIDGE_THREADS=1`; they graduate once the reader binds each Codex turn to the directory it ran in, not only the
+`REWEIGH_THREADS=1`; they graduate once the reader binds each Codex turn to the directory it ran in, not only the
 session's, and the parity check has passed on two consecutive Codex releases.

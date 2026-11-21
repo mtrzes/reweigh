@@ -19,9 +19,9 @@
   (`skill_mcp_dependency_install`).
 - The Claude peer gets WebSearch, Skill and Agent, your Claude skills, and the consulted repository's `CLAUDE.md`,
   passed with `--add-dir` so the repository's `.claude` settings still do not apply. `ask_claude` and
-  `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`; `PEER_BRIDGE_CLAUDE_MODEL` and
-  `PEER_BRIDGE_CLAUDE_REASONING_EFFORT` set defaults.
-- Either peer may start sub-agents; `PEER_BRIDGE_SUBAGENTS=0` stops it, for Claude by removing Agent and Skill. For
+  `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`; `REWEIGH_CLAUDE_MODEL` and
+  `REWEIGH_CLAUDE_REASONING_EFFORT` set defaults.
+- Either peer may start sub-agents; `REWEIGH_SUBAGENTS=0` stops it, for Claude by removing Agent and Skill. For
   Codex that means `--disable multi_agent` and `features.multi_agent_v2.disable_native_tools=true`, since `--disable
   multi_agent` alone never did.
 - Before a Codex peer starts, the bridge checks that Codex still honours every name the command depends on

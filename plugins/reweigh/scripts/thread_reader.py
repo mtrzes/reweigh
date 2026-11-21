@@ -266,7 +266,7 @@ CORE_WORKTREE_ARGUMENTS = ("config", "--local", "--get", "core.worktree")
 # Git metadata files are small; a larger one, or one that is not a regular file, such as a FIFO, is not read.
 METADATA_LIMIT = 64 * 1024
 # Stands for a back reference that is present but cannot be read: it never equals a real path.
-UNREADABLE = Path("/nonexistent/peer-bridge-unreadable")
+UNREADABLE = Path("/nonexistent/reweigh-unreadable")
 
 
 def read_metadata(path):

@@ -1,6 +1,6 @@
-# peer-bridge
+# reweigh
 
-[![Tests](https://github.com/mtrzes/peer-bridge/actions/workflows/tests.yml/badge.svg)](https://github.com/mtrzes/peer-bridge/actions/workflows/tests.yml)
+[![Tests](https://github.com/mtrzes/reweigh/actions/workflows/tests.yml/badge.svg)](https://github.com/mtrzes/reweigh/actions/workflows/tests.yml)
 
 Ask Codex for a second opinion from Claude Code, or ask Claude Code from Codex. The peer only reads: it inspects the
 code and returns advice to the app you asked from. You decide what to change.
@@ -19,7 +19,7 @@ hash, so you can keep editing meanwhile. You can ask a follow-up in the same con
 background and collect it later.
 
 Already have a review open in the other app? The experimental thread reader, off unless you set
-`PEER_BRIDGE_THREADS=1`, brings that thread's latest agent replies into a new consultation. It reads interactive
+`REWEIGH_THREADS=1`, brings that thread's latest agent replies into a new consultation. It reads interactive
 threads from the same Git repository. The bridge never posts into the original chat.
 
 ## What the peer can read
@@ -40,25 +40,25 @@ in. Install the plugin in the app you want to ask from; install it in both for b
 **From Claude Code to Codex**: enter this in Claude Code 2.1.275 or later.
 
 ```text
-/plugin install peer-bridge --marketplace mtrzes/peer-bridge
+/plugin install reweigh --marketplace mtrzes/reweigh
 ```
 
 If the server is missing from `/mcp`, restart Claude Code.
-[Earlier Claude Code versions](plugins/peer-bridge/README.md#claude-code-to-codex)
+[Earlier Claude Code versions](plugins/reweigh/README.md#claude-code-to-codex)
 
 **From Codex to Claude Code**: run these in your shell, then restart Codex.
 
 ```sh
-codex plugin marketplace add mtrzes/peer-bridge
+codex plugin marketplace add mtrzes/reweigh
 ```
 
 ```sh
-codex plugin add peer-bridge@peer-bridge
+codex plugin add reweigh@reweigh
 ```
 
 ## Documentation
 
-- [Plugin reference](plugins/peer-bridge/README.md): every tool, argument and setting, and how to run the tests.
-- [How it works](plugins/peer-bridge/HOW-IT-WORKS.md): the bridge's parts and the paths a request takes.
+- [Plugin reference](plugins/reweigh/README.md): every tool, argument and setting, and how to run the tests.
+- [How it works](plugins/reweigh/HOW-IT-WORKS.md): the bridge's parts and the paths a request takes.
 - [Security](SECURITY.md): what the bridge enforces, what it does not, and how to report a problem.
 - [Changelog](CHANGELOG.md) and [design decisions](docs/adr/).

@@ -8,14 +8,14 @@
 
 ## Context
 Users install the plugin from this repository's marketplaces, or from another marketplace that pins a `v*` tag, and the
-installed copy holds only `plugins/peer-bridge/`. One user's state directory outlives each upgrade: conversation
+installed copy holds only `plugins/reweigh/`. One user's state directory outlives each upgrade: conversation
 records, background jobs and their requests, written by whichever release ran them. Between releases, changes collect on
 `main`.
 
 ## Decision
 - The two `plugin.json` files and the newest `CHANGELOG.md` release heading, `## <version>`, name one version; no
-  other document states it. Links from `plugins/peer-bridge/` to files outside it go through
-  `https://github.com/mtrzes/peer-bridge/blob/v<version>/`, so an installed copy reads its own release's documents.
+  other document states it. Links from `plugins/reweigh/` to files outside it go through
+  `https://github.com/mtrzes/reweigh/blob/v<version>/`, so an installed copy reads its own release's documents.
 - Between releases, each user-visible change adds a line under `## Unreleased`, above the newest release.
 - A release, in order: set the version in both manifests and in those links, rename `## Unreleased` to
   `## <version>`, run both suites locally, start CI by hand on that commit ([ADR 0002](0002-test-architecture.md)),
@@ -24,7 +24,7 @@ records, background jobs and their requests, written by whichever release ran th
   today that covers `pinned_commit`, the result's optional fields, and a request's `model` and `reasoning_effort`.
   Readers check the fields they use and ignore others; a missing or malformed field they need stops the resume or job
   with a fixed message, never a guess.
-- Only `plugins/peer-bridge/` ships. Techniques that work with any peer, such as review modes and prompts, live outside
+- Only `plugins/reweigh/` ships. Techniques that work with any peer, such as review modes and prompts, live outside
   this repository.
 
 ## Consequences

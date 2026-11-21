@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 
 # Lets a single test file run on its own, as well as through discover.
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT / "dev"), str(ROOT / "plugins" / "peer-bridge" / "tests")]
+sys.path[:0] = [str(ROOT / "dev"), str(ROOT / "plugins" / "reweigh" / "tests")]
 from support import codex_thread, codex_turn  # noqa: E402  (support adds the plugin's scripts to the path)
 import codex_app_server as app  # noqa: E402
 from thread_reader import CodexFilesSource  # noqa: E402
@@ -71,7 +71,7 @@ FAKE_SERVER = textwrap.dedent('''\
 
 class AppServerTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(prefix="peer-bridge-app-server-")
+        temporary = tempfile.TemporaryDirectory(prefix="reweigh-app-server-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.home = self.root / "codex-home"
