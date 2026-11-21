@@ -45,6 +45,7 @@ When the consultation is a code review, give the request this shape so reviews c
   the working tree may change while the peer reads; the reply's `commit` names the checkout the bridge prepared, not
   every file the peer read.
 - **Pull request**: for a PR, its description and review comments in `context`; the peer cannot reach GitHub.
+- **Process skills**: a Codex peer loads no plugins, so put the text of a review skill it needs in `context`.
 - **Already run**: the checks the lead ran and their results.
 - **Accepted limits**: limitations the operator already accepted, so the peer reviews around them.
 - **Findings**: one per item, each with a priority, a `file:line`, the evidence and a concrete fix.

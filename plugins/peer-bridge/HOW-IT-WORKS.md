@@ -71,8 +71,14 @@ flowchart TB
   restrictions, unless `PEER_BRIDGE_SUBAGENTS=0` is set. Neither peer can start another consultation.
   [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md) lists what each peer can read
   and what the bridge does not cover.
-- **Codex's model is chosen per call.** A Codex consultation can choose its `model` and `reasoning_effort`. When
-  Codex's catalogue is readable, a value it does not list is refused before Codex starts; the
+- **Where the two peers differ.** Claude applies the user's Claude settings and allow rules; Codex ignores the user's
+  config.toml and command rules, since an allowed command runs outside its sandbox. Codex loads the repository's skills
+  and can run read-only commands; Claude loads the user's own skills and the repository's CLAUDE.md, not its skills,
+  and has no shell, since Claude Code's sandbox cannot keep a command from writing. Codex's plugins stay off. Where
+  each reads is in
+  [SECURITY.md](https://github.com/mtrzes/peer-bridge/blob/v1.0.0-beta.2/SECURITY.md#what-it-does-not-protect-against).
+- **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
+  readable, a Codex value it does not list is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
 - **A renamed name never crashes a consultation.** Before a peer starts, `preflight.py` checks in an empty home that
   its CLI still honours the names the command depends on; SECURITY.md says which, and what happens when one is gone.
