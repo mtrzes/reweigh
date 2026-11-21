@@ -16,7 +16,7 @@ from urllib.parse import unquote
 
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from support import SCRIPTS, TESTS, consultation  # noqa: E402
+from support import SCRIPTS, TESTS, bridge, consultation  # noqa: E402
 
 PLUGIN = TESTS.parent
 ROOT = PLUGIN.parents[1]
@@ -178,6 +178,20 @@ class CodexPluginTests(unittest.TestCase):
                      "REWEIGH_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"):
             with self.subTest(name=name):
                 self.assertIn(name, forwarded)
+
+    def test_the_registered_tool_timeout_outlasts_a_pinned_consultation_at_the_longest_timeout(self):
+        # Past the peer's timeout a blocking call can spend a pinned checkout's preparation and removal, a guard's stop
+        # after each of the three deadlines, and the .git probe; a host that drops the call loses a finished reply.
+        stop = bridge.peer_guard.GRACE_SECONDS + bridge.GUARD_MARGIN_SECONDS
+        longest = (consultation.MAX_TIMEOUT_SECONDS + bridge.CHECKOUT_PREPARATION_SECONDS
+                   + bridge.CHECKOUT_REMOVAL_SECONDS + 3 * stop + bridge.GIT_ENTRY_PROBE_SECONDS)
+        seconds = json.loads((PLUGIN / "codex-mcp.json").read_text(encoding="utf-8"))["mcpServers"]["reweigh"][
+            "tool_timeout_sec"]
+        self.assertGreater(seconds, longest)
+        readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
+        for setting in (f"`tool_timeout_sec = {seconds}`", f"`MCP_TOOL_TIMEOUT={seconds * 1000}`"):
+            with self.subTest(setting=setting):
+                self.assertIn(setting, readme)
 
 
 class PackagingTests(unittest.TestCase):

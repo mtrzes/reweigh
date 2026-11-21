@@ -57,7 +57,7 @@ Codex installs a copy of the plugin; after updating the repository, run `codex p
 and add the plugin again. Restart Codex to load it.
 
 Without the plugin, register the script directly and give it the same timeouts in the generated
-`[mcp_servers.reweigh]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`),
+`[mcp_servers.reweigh]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 4200`),
 and the `env_vars` list from the plugin's `codex-mcp.json`: Codex passes an MCP server only the environment variables
 it names. Settings Claude Code needs from the environment, such as a Bedrock or Vertex backend, go in the `env` of
 `~/.claude/settings.json`, which the Claude peer loads. `--directory` points `uv` at the plugin, so it never runs a
@@ -69,7 +69,7 @@ codex mcp add reweigh -- uv --directory /absolute/path/plugins/reweigh run --loc
 ```
 
 The startup allowance covers the first `uv` dependency installation. For Claude Code versions that support
-`MCP_TOOL_TIMEOUT`, launch Claude Code with `MCP_TOOL_TIMEOUT=3900000` to give consultations the same tool-call
+`MCP_TOOL_TIMEOUT`, launch Claude Code with `MCP_TOOL_TIMEOUT=4200000` to give consultations the same tool-call
 allowance. The bridge's own timeout defaults to 600 seconds and goes up to 3600.
 
 For a host that needs both tools, launch the script with `--peer both`.
@@ -298,7 +298,9 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 
-After increasing the bridge timeout, increase the host's MCP tool timeout to leave room for shutdown and result delivery.
+The tool-call timeouts the setup gives cover the longest bridge timeout plus the time a pinned checkout's timed steps
+add, which [HOW-IT-WORKS](HOW-IT-WORKS.md#one-consultation) gives. A host given a shorter one needs at least the bridge
+timeout plus that time.
 
 ## State retention
 
