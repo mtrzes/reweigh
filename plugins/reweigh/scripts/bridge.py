@@ -32,8 +32,8 @@ from consultation import (
     validate_session_id, with_seed,
 )
 from consultation import (
-    FINISHED_JOB_STATES, catalogue_models, check_against_catalogue, check_choices, check_extra_directories, check_wait,
-    failure_probes, git_entry_found, history_presence, peer_choices,
+    FINISHED_JOB_STATES, SIGN_IN_PROBES, catalogue_models, check_against_catalogue, check_choices,
+    check_extra_directories, check_wait, failure_probes, git_entry_found, history_presence, peer_choices,
 )
 from cleanup import run_to_completion
 from preflight import preflight
@@ -59,7 +59,6 @@ GIT_LATE = "git did not finish in time while preparing the pinned ref."
 SIGN_IN_PROBE_SECONDS = 30
 # How long the lookup of a .git entry above working_directory may take, on a volume that has stopped answering.
 GIT_ENTRY_PROBE_SECONDS = 10
-SIGN_IN_PROBES = {"claude": ("auth", "status", "--json"), "codex": ("login", "status")}
 GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
 # How long past the guard's own grace period to wait for it to stop the peer's group.
 GUARD_MARGIN_SECONDS = 3
