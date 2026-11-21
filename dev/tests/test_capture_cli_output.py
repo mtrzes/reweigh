@@ -32,6 +32,12 @@ class ScrubTests(unittest.TestCase):
         self.assertEqual(scrub.json_lines(json.dumps({"session_id": THREAD.upper()}) + "\n"),
                          '{"session_id": "00000000-0000-0000-0000-000000000001"}\n')
 
+    def test_the_keys_of_a_data_keyed_object_are_replaced_and_other_keys_stay(self):
+        scrub = capture.Scrubber()
+        model = {"slug": "m", "available_access_programs": {"cyber": ["x"], "other": []}, "cyber": "x"}
+        self.assertEqual(scrub.json_lines(json.dumps({"models": [model]})), json.dumps({"models": [
+            {"slug": "m", "available_access_programs": {"TEXT-1": ["TEXT-2"], "TEXT-3": []}, "cyber": "TEXT-2"}]}))
+
     def test_stderr_keeps_only_the_tag_the_bridge_reads(self):
         tag = "[claude-code:unrecognized_model]"
         self.assertEqual(capture.Scrubber().errors(f"warning /Users/me\n{tag} model x\n x {tag}\n"),
