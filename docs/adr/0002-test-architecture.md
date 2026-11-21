@@ -34,6 +34,9 @@ spent waiting. One maintainer runs the suites on macOS; users run the bridge on 
   bridge's command for a fresh and a resumed Codex call and a fresh Claude call. Each skips where its CLI is absent; the
   run started by hand on a release commit installs the newest of both and fails without them, so a red run there can
   come from an upstream release rather than from the change under test. Pull requests run without them.
+- The stand-in CLI models only process behaviour (exit status, signals, timing), accepts any command line and prints
+  only the fields the parsers read; the parsers are also tested on output captured from the real CLIs, recaptured
+  before each release.
 - Shared fixtures and fakes live in `tests/support.py`; test files never import each other.
 - A test that repeats what another proves, at the same or a lower level, is deleted.
 - A passing run prints nothing beyond the test runner's summary, so any warning it shows is new.
