@@ -13,8 +13,9 @@ each in the account's history, as a consultation does.
 
 Every string in the output is replaced by TEXT-<n>, and every UUID by a fixed one, except the fixed reply and the
 string values of the keys in KEPT, which name kinds of things, never content; the same original always maps to the
-same replacement. A stderr line keeps only the tag the bridge reads. The capture is refused when an exact private
-token (the home directory, the host name, the git identity, the account's email) is still in it. Each fixture records
+same replacement. Keys stay, except inside the objects in DATA_KEYED, whose keys are data and are replaced too. A
+stderr line keeps only the tag the bridge reads. The capture is refused when an exact private token (the home
+directory, the host name, the git identity, the account's email) is still in it. Each fixture records
 the CLI's version and exit status. Read the diff before committing it; the tests in test_core's CapturedOutputTests
 show which parser a changed capture breaks.
 
@@ -41,6 +42,9 @@ PROMPT = f"Reply with exactly {REPLY} and nothing else. Do not read files or run
 FOLLOW_UP = f"Reply with exactly {REPLY} again, and nothing else."
 UNKNOWN_MODEL = "reweigh-no-such-model"
 KEPT = {"type", "subtype", "stop_reason", "visibility", "slug", "effort", "default_reasoning_level"}
+# Objects whose own keys are data, not structure, and are replaced like strings: Codex's catalogue names the access
+# programs the account is enrolled in as the keys of available_access_programs.
+DATA_KEYED = {"available_access_programs"}
 TIMEOUT_SECONDS = 300
 
 
@@ -70,6 +74,8 @@ class Scrubber:
         return self.ids.setdefault(original, str(uuid.UUID(int=len(self.ids) + 1)))
 
     def value(self, value, key=None):
+        if isinstance(value, dict) and key in DATA_KEYED:
+            return {self.text(name): self.value(item) for name, item in value.items()}
         if isinstance(value, dict):
             return {name: self.value(item, name) for name, item in value.items()}
         if isinstance(value, list):
