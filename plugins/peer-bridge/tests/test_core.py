@@ -166,6 +166,8 @@ class ChoiceTests(unittest.TestCase):
                          {"provider": "codex", "conversation_id": "conv", "reply": "hi", "model": "gpt-6-astra",
                           "reasoning_effort": "xhigh"})
         self.assertNotIn("model", c.consultation_result("claude", "conv", "hi", None))
+        self.assertEqual(c.consultation_result("claude", "conv", "hi", None, warnings=["w"])["warnings"], ["w"])
+        self.assertNotIn("warnings", c.consultation_result("claude", "conv", "hi", None, warnings=[]))
 
 
 class CatalogueTests(unittest.TestCase):
@@ -512,6 +514,8 @@ class JobRuleTests(unittest.TestCase):
         self.assertEqual(c.job_view("j", self.RECORD, done, "completed"),
                          {"job_id": "j", "provider": "codex", "state": "completed", "conversation_id": "conv",
                           "reply": "hi"})
+        warned = c.job_outcome("completed", 1.0, result={"conversation_id": "conv", "reply": "hi", "warnings": ["w"]})
+        self.assertEqual(c.job_view("j", self.RECORD, warned, "completed")["warnings"], ["w"])
         failed = c.job_outcome("failed", 1.0, error="Nope.")
         self.assertEqual(c.job_view("j", self.RECORD, failed, "failed")["error"], "Nope.")
         lost = c.job_outcome("lost", 1.0, error=c.LOST_JOB)
@@ -539,12 +543,15 @@ class JobRuleTests(unittest.TestCase):
         done = {"conversation_id": "conv", "reply": "x"}
         outcomes_valid = (c.job_outcome("completed", 1.0, result=done),
                           c.job_outcome("completed", 1.0, result=done | {"commit": "a" * 40}),
+                          c.job_outcome("completed", 1.0, result=done | {"warnings": ["w"]}),
                           c.job_outcome("lost", 2, error="e"), c.job_outcome("failed", 2, error="e"))
         outcomes_invalid = ({}, {"state": "completed"}, {"state": "queued", "finished_at": 1},
                             {"state": "failed", "finished_at": 1, "error": 3}, {"state": "failed", "finished_at": 1},
                             {"state": "completed", "finished_at": 1, "result": "x"},
                             c.job_outcome("completed", 1, result={"reply": "x"}),
                             c.job_outcome("completed", 1, result=done | {"commit": 4}),
+                            c.job_outcome("completed", 1, result=done | {"warnings": "w"}),
+                            c.job_outcome("completed", 1, result=done | {"warnings": [3]}),
                             c.job_outcome("completed", 1, result=done, error="e"),
                             c.job_outcome("failed", 1, result=done, error="e"))
         for outcome in outcomes_valid:
@@ -999,9 +1006,6 @@ class ResultTests(unittest.TestCase):
         self.assertNotIn("unreadable_history_directories_machine_wide", empty)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class RepositoryLayoutTests(unittest.TestCase):
     """Whether a working tree and its git directory point at each other, as git sets up a clone, a linked worktree or
@@ -1009,8 +1013,8 @@ class RepositoryLayoutTests(unittest.TestCase):
 
     def layout(self, **changes):
         top = Path("/work/repo")
-        fields = {"top": top, "git_dir": top / ".git", "common_dir": top / ".git", "dot_git": "directory",
-                  "gitdir_back": None, "worktree_back": None, "commondir": None}
+        fields = {"nearest": top, "top": top, "git_dir": top / ".git", "common_dir": top / ".git",
+                  "dot_git": "directory", "gitdir_back": None, "worktree_back": None, "commondir": None}
         return t.RepositoryLayout(**(fields | changes))
 
     def test_only_git_s_own_layouts_are_reciprocal(self):
@@ -1031,6 +1035,9 @@ class RepositoryLayoutTests(unittest.TestCase):
             ("submodule for another folder", module | {"worktree_back": Path("/work/other")}, False),
             ("submodule with a commondir", module | {"commondir": main}, False),
             ("no .git entry", {"dot_git": None}, False),
+            # A planted .git whose submodule git directory names a real checkout elsewhere through core.worktree: git
+            # reports that checkout, which is not where the requested folder's .git is.
+            ("core.worktree elsewhere", module | {"nearest": Path("/work/planted")}, False),
         )
         for name, changes, expected in cases:
             with self.subTest(layout=name):
@@ -1049,8 +1056,22 @@ class RepositoryLayoutTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(t.core_worktree(text), expected)
 
-    def test_alternates_must_stay_in_the_repository_s_objects(self):
+    def test_every_object_store_must_stay_in_the_repository_s_objects(self):
         common = Path("/work/repo/.git")
-        self.assertTrue(t.alternates_inside(common, []))
-        self.assertTrue(t.alternates_inside(common, [common / "objects" / "pack"]))
-        self.assertFalse(t.alternates_inside(common, [Path("/work/other/.git/objects")]))
+        own = common / "objects"
+        cases = (
+            ("own objects only", [own], True),
+            ("an alternate inside", [own, own / "pack"], True),
+            ("an alternate outside", [own, Path("/work/other/.git/objects")], False),
+            ("objects folder resolving elsewhere", [Path("/work/other/.git/objects")], False),
+            ("an unreadable alternates file", [own, None], False),
+            ("too many stores", [own / str(index) for index in range(t.MAX_OBJECT_STORES + 1)], False),
+            ("none read", [], False),
+        )
+        for name, stores, expected in cases:
+            with self.subTest(stores=name):
+                self.assertIs(t.alternates_inside(common, stores), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

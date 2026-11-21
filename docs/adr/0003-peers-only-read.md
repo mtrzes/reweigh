@@ -15,7 +15,8 @@ add about a quarter to the code and a second mode to every review. Both CLIs alr
 worktree of their own (`claude --worktree`, `codex --worktree`).
 
 ## Decision
-- Every peer peer-bridge starts only reads: Claude with Read, Glob and Grep, Codex in its read-only sandbox. Codex can
+- Every peer peer-bridge starts only reads: Claude with Read, Glob, Grep, WebSearch, Skill and Agent, none of which
+  writes, Codex in its read-only sandbox. Codex can
   run commands, which its sandbox keeps from writing. No tool, flag or command lets a peer edit, write files or write to
   a session.
 - A tool that consults or starts a consultation is not marked read-only, though the peer only reads: it sends

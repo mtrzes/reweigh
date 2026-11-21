@@ -41,9 +41,9 @@ PINNED_INSTRUCTIONS = (
 # The features a consultation's restrictions depend on, disabled with --disable: Codex refuses to start when it no
 # longer knows one, so a consultation never runs without them.
 CODEX_DISABLED_FEATURES = ("apps", "plugins", "hooks", "computer_use", "browser_use", "browser_use_external")
-# Features disabled only as a second layer, set as configuration, which Codex ignores when it no longer knows the name:
-# a rename loses that layer without stopping consultations. A skill's MCP dependency cannot install in `codex exec`,
-# which cannot ask the user, and would otherwise change the user's Codex configuration.
+# Features disabled as a second layer, set as configuration, which Codex itself ignores when it no longer knows the
+# name; the pre-launch check refuses the consultation then, as for any restriction. A skill's MCP dependency cannot
+# install in `codex exec`, which cannot ask the user, and would otherwise change the user's Codex configuration.
 CODEX_EXTRA_DISABLED_FEATURES = ("skill_mcp_dependency_install",)
 # A peer may start sub-agents, which keep its restrictions, unless this is set to exactly 0. Neither
 # --disable multi_agent nor --disable multi_agent_v2 stops them; removing v2's native tools does, and Codex refuses
@@ -220,7 +220,8 @@ def check_extra_directories(provider, directories):
         raise BridgeError("extra_directories applies to Claude consultations only; Codex reads any file you can.")
     if not isinstance(directories, (list, tuple)) or len(directories) > MAX_EXTRA_DIRECTORIES:
         raise BridgeError(f"extra_directories must be a list of at most {MAX_EXTRA_DIRECTORIES} absolute paths.")
-    if any(not isinstance(directory, str) or not os.path.isabs(directory) for directory in directories):
+    if any(not isinstance(directory, str) or "\0" in directory or not os.path.isabs(directory)
+           for directory in directories):
         raise BridgeError("Each of extra_directories must be an absolute path.")
     return tuple(directories)
 
@@ -365,30 +366,38 @@ def peer_environment(environ, pinned=False):
 
 # Pre-launch checks
 #
-# Before a peer starts, the bridge checks that its CLI still knows every name the bridge's command depends on. A name
-# that restricts the peer and is gone refuses the call; a name that only gives the peer a capability and is gone adds
-# a warning to the result. The checks read exit statuses, exact tokens and file existence only.
+# Before a peer starts, the bridge checks that its CLI still honours every name the bridge's command depends on. A
+# lost restriction refuses the call; a lost capability is dropped from the command and reported as a warning; a check
+# that cannot reach a verdict is reported as a warning too, and the peer starts. The checks read exit statuses, exact
+# tokens and file existence only.
 
 RESTRICTION_LOST = ("{name} no longer accepts {setting}, which the bridge passes to {purpose}. The consultation was "
                     "not started; update peer-bridge or check {name}'s release notes.")
 CAPABILITY_LOST = "{name} no longer offers {capability} under that name; the peer ran without it."
 UNVERIFIED = "{name}'s restrictions could not be checked before the start ({reason}); the peer ran unchecked."
+CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
 # Codex keys whose wrong-type value Codex refuses while it knows the key, and accepts silently once it does not.
 CODEX_RESTRICTION_KEYS = {
     "shell_environment_policy.inherit": "keep the peer's commands to the core environment",
     f"shell_environment_policy.set.{ACTIVE_ENV}": "mark the peer's commands as a consultation",
+    "mcp_servers.enabled": "keep MCP servers out of the peer",
 }
 CODEX_CAPABILITY_KEYS = {"web_search": "cached web search", "model_reasoning_effort": "the chosen reasoning effort"}
-CODEX_FEATURE_PURPOSE = "keep the peer from using that feature"
+# The `codex exec` options the consultation relies on, checked with --help, which fails on an unknown one.
+CODEX_EXEC_PURPOSE = "keep the user's configuration and command rules out of the peer"
 # The names Claude Code reports in its system/init tools list for each tool the bridge requests.
 CLAUDE_REPORTED_TOOLS = {"Read": "Read", "Glob": "Glob", "Grep": "Grep", "WebSearch": "WebSearch", "Skill": "Skill",
                          "Agent": "Task"}
 # Markers a planted canary writes when a protection fails, and what the protection is.
 CLAUDE_CANARY_MARKERS = {
     "user-hook": ('--settings {"disableAllHooks":true}', "keep the user's hooks from running in the peer"),
-    "project-hook": ("--setting-sources user", "keep a repository's .claude settings out of the peer"),
     "mcp": ("--strict-mcp-config", "keep MCP servers out of the peer"),
 }
+# A model name only the canary repository's own .claude/settings.json names: system/init reports it only when Claude
+# Code loaded that file, which --setting-sources user must prevent.
+CLAUDE_CANARY_MODEL = "peer-bridge-canary-model"
+CLAUDE_PROJECT_SETTINGS = ("--setting-sources user", "keep a repository's .claude settings out of the peer")
+CLAUDE_TOOLS_PURPOSE = "keep the peer to the tools it lists"
 
 
 def codex_feature_names(command):
@@ -396,20 +405,57 @@ def codex_feature_names(command):
     names = [command[index + 1] for index, word in enumerate(command[:-1]) if word == "--disable"]
     for index, word in enumerate(command[:-1]):
         if word == "-c" and command[index + 1].startswith("features.") and command[index + 1].endswith("=false"):
-            names.append(command[index + 1][len("features."):-len("=false")])
+            name = command[index + 1][len("features."):-len("=false")]
+            if "." not in name:
+                names.append(name)
     return names
 
 
-def codex_feature_stages(listing):
-    """Each feature's stage from `codex features list`: the first word of a row, then a stage of one or more words,
-    then the effective state."""
+def codex_feature_rows(listing):
+    """Each feature's stage and effective state from `codex features list`: the first word of a row, a stage of one
+    or more words, then the state."""
     rows = (line.split() for line in listing.splitlines())
-    return {words[0]: " ".join(words[1:-1]) for words in rows if len(words) >= 3}
+    return {words[0]: (" ".join(words[1:-1]), words[-1]) for words in rows if len(words) >= 3}
+
+
+def codex_feature_off(name, rows):
+    """Whether Codex lists the feature, not as removed, and reports it off."""
+    return name in rows and rows[name][0] != "removed" and rows[name][1] == "false"
 
 
 def codex_key_names(command):
-    """The `-c` keys a Codex command sets, in order."""
-    return [command[index + 1].partition("=")[0] for index, word in enumerate(command[:-1]) if word == "-c"]
+    """The `-c` keys a Codex command sets, in order, with each MCP server's own name folded into one key."""
+    keys = []
+    for index, word in enumerate(command[:-1]):
+        if word == "-c":
+            key = command[index + 1].partition("=")[0]
+            if key.startswith("mcp_servers.") and key.endswith(".enabled"):
+                key = "mcp_servers.enabled"
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def without_setting(command, key):
+    """A Codex command without the `-c` override for key."""
+    kept, skip = [], False
+    for index, word in enumerate(command):
+        if skip:
+            skip = False
+            continue
+        if word == "-c" and index + 1 < len(command) and command[index + 1].partition("=")[0] == key:
+            skip = True
+            continue
+        kept.append(word)
+    return kept
+
+
+def without_option(command, option):
+    """A command without an option and its value."""
+    if option not in command:
+        return list(command)
+    index = command.index(option)
+    return command[:index] + command[index + 2:]
 
 
 def claude_tool_names(command):
@@ -420,6 +466,12 @@ def claude_tool_names(command):
 def missing_claude_tools(requested, reported):
     """The requested tools whose reported name system/init does not list."""
     return [name for name in requested if CLAUDE_REPORTED_TOOLS.get(name, name) not in reported]
+
+
+def unexpected_claude_tools(requested, reported):
+    """The tools system/init lists that the command did not request."""
+    allowed = {CLAUDE_REPORTED_TOOLS.get(name, name) for name in requested}
+    return sorted(set(reported) - allowed)
 
 
 # Commands

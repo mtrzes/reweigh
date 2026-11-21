@@ -13,7 +13,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -37,36 +36,6 @@ def canonical_json(value):
     return json.dumps(value, indent=2, sort_keys=True)
 
 
-class CodexContractTests(unittest.TestCase):
-    def test_codex_knows_every_feature_the_bridge_disables(self):
-        # A name Codex drops stops every consultation (--disable) or silently loses a layer (configuration), so the
-        # release run installs Codex and fails here first. Elsewhere it runs when codex is on PATH, in an empty home,
-        # so Codex reads none of the user's configuration or history.
-        executable = shutil.which("codex")
-        if executable is None:
-            self.assertNotEqual(os.environ.get("GITHUB_ACTIONS"), "true", "The release run must install Codex.")
-            self.skipTest("codex is not on PATH.")
-        with tempfile.TemporaryDirectory() as home:
-            listing = subprocess.run(
-                [executable, "features", "list"], cwd=home, env={"PATH": os.environ["PATH"], "HOME": home,
-                                                                  "CODEX_HOME": home},
-                capture_output=True, text=True, timeout=DEADLINE_SECONDS, check=True,
-            ).stdout
-        # Each row is a name, a stage of one or more words, and the effective state.
-        stages = {words[0]: " ".join(words[1:-1]) for words in map(str.split, listing.splitlines()) if len(words) >= 3}
-        for feature in (*consultation.CODEX_DISABLED_FEATURES, *consultation.CODEX_EXTRA_DISABLED_FEATURES):
-            with self.subTest(feature=feature):
-                self.assertTrue(feature in stages, "Codex no longer knows this feature; find what replaced it.")
-                self.assertNotEqual(stages[feature], "removed", "Codex removed this feature; find what replaced it.")
-        # Codex refuses to start on a key it does not know, so the sub-agent switch fails closed; this finds a rename
-        # before a release instead of at an operator's next consultation.
-        with tempfile.TemporaryDirectory() as home:
-            result = subprocess.run(
-                [executable, *consultation.CODEX_NO_SUBAGENTS, "features", "list"], cwd=home,
-                env={"PATH": os.environ["PATH"], "HOME": home, "CODEX_HOME": home},
-                capture_output=True, text=True, timeout=DEADLINE_SECONDS,
-            )
-        self.assertEqual(result.returncode, 0, "Codex no longer accepts the sub-agent switch: " + result.stderr[-300:])
 
 
 class InstalledCliTests(unittest.TestCase):
@@ -93,14 +62,15 @@ class InstalledCliTests(unittest.TestCase):
             command = consultation.build_command("codex", executable, "conv", reasoning_effort="high",
                                                  subagents=subagents)
             with self.subTest(subagents=subagents):
-                self.assertEqual(self.check("codex", command), [])
+                self.assertEqual(self.check("codex", command), ([], command))
 
     def test_the_installed_claude_keeps_every_restriction_and_offers_every_tool(self):
         executable = shutil.which("claude")
         if executable is None:
             self.skipTest("claude is not on PATH.")
-        command = consultation.build_command("claude", executable, "conv", directories=("/",))
-        self.assertEqual(self.check("claude", command), [])
+        command = consultation.build_command("claude", executable, "conv", model="sonnet", reasoning_effort="low",
+                                             directories=("/",))
+        self.assertEqual(self.check("claude", command), ([], command))
 
 
 class McpTests(BridgeTestCase):

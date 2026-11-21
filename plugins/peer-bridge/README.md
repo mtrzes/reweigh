@@ -85,7 +85,7 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `seed_thread` | Optional ID or name of a thread in the peer's app (a Codex thread when asking Codex, a Claude Code session when asking Claude Code) whose latest agent messages join the context; see [Reading desktop threads](#reading-desktop-threads). |
 | `model` | Optional: the model for this call, such as `gpt-6-astra` for Codex or `opus` for Claude; overrides `PEER_BRIDGE_CODEX_MODEL` or `PEER_BRIDGE_CLAUDE_MODEL`. |
 | `reasoning_effort` | Optional: the reasoning effort for this call, such as `high` or `xhigh` (Codex) or `high` or `max` (Claude); overrides `PEER_BRIDGE_CODEX_REASONING_EFFORT` or `PEER_BRIDGE_CLAUDE_REASONING_EFFORT`. |
-| `extra_directories` | Claude only, optional: absolute paths of other folders the peer may read, passed as `--add-dir`. A Codex peer already reads any file you can. |
+| `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`. A Codex peer already reads any file you can. |
 
 `list_codex_models` (and the `codex-models` command) lists the models this Codex account offers, with each model's
 reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue
@@ -103,10 +103,11 @@ For example, ask the available peer tool:
 }
 ```
 
-A successful response contains `provider`, `conversation_id` and `reply`, and `model` and `reasoning_effort` when a
-Codex consultation chose them, from the request or the environment: the values the bridge passed to Codex, which does
-not report back what it ran with. Pass the returned ID on follow-ups, with the same peer and project directory. Bridge
-metadata binds each ID to the provider and canonical directory; it does not accept a peer CLI's raw session ID. A
+A successful response contains `provider`, `conversation_id` and `reply`; `model` and `reasoning_effort` when the
+consultation chose them, from the request or the environment: the values the bridge passed to the peer CLI, which does
+not report back what it ran with; and `warnings` when the pre-launch check dropped a capability the CLI no longer
+offers, or could not reach a verdict. Pass the returned ID on follow-ups, with the same peer and project directory.
+Bridge metadata binds each ID to the provider and canonical directory; it does not accept a peer CLI's raw session ID. A
 per-conversation file lock prevents overlapping resumes.
 
 A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The bridge names a
@@ -173,15 +174,16 @@ The `ask` command runs a consultation from a shell and prints its result when it
 
 ```sh
 uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py ask \
-  --provider codex --working-directory /absolute/path/to/project --context-file review-context.md < question.md
+  --provider codex --working-directory /absolute/path/to/project --context-file "$PWD/review-context.md" < question.md
 ```
 
-The prompt is read from stdin as UTF-8; `--context-file`, `--conversation-id`, `--ref`, `--seed-thread`, `--model` and
-`--reasoning-effort` are optional and match the tool arguments. The command prints the tool's JSON result and exits 0,
-or prints `{"error": "..."}` and exits 1. It applies the same restrictions, nesting guard, timeout, environment cleanup
-and conversation store as the MCP tools, so a conversation started in one can continue in the other. Stopping the
-command with SIGTERM or SIGHUP, even repeatedly, also stops the peer and its child processes and removes a pinned
-checkout.
+The prompt is read from stdin as UTF-8; `--context-file`, `--conversation-id`, `--ref`, `--seed-thread`, `--model`,
+`--reasoning-effort` and the repeatable `--extra-directory` are optional and match the tool arguments. `uv --directory`
+runs the command from the plugin folder, so give `--context-file` an absolute path. The command prints the tool's JSON
+result and exits 0, or prints `{"error": "..."}` and exits 1. It applies the same restrictions, nesting guard, timeout,
+environment cleanup and conversation store as the MCP tools, so a conversation started in one can continue in the other.
+Stopping the command with SIGTERM or SIGHUP, even repeatedly, also stops the peer and its child processes and removes a
+pinned checkout.
 
 `start` takes the same arguments as `ask` and prints the new job. SIGTERM or SIGHUP during job creation cancels the
 start and deletes the job's prompt and context. `job --job-id ID [--wait SECONDS]` and
@@ -215,7 +217,8 @@ which no consultation can continue:
 | `max_messages` | Reading only: how many of the latest agent messages; defaults to 3, at most 20. |
 
 A thread is readable only when its recorded working directory belongs to the same git repository as
-`working_directory`, worktrees and submodules included; a thread whose worktree has since been deleted is not. A
+`working_directory`, its linked worktrees included; a submodule is a repository of its own. A thread whose worktree
+has since been deleted is not readable. A
 folder whose `.git` points at a git directory that does not record it back, as git does for its own worktrees and
 submodules, belongs to no repository here. The read checks this
 again on the same open file it reads the messages from, and refuses a file that changes while it is read, after one
@@ -250,10 +253,12 @@ repository's. A history folder the reader cannot list may hold threads of this r
 
 ## Runtime boundaries
 
-Claude runs as `claude -p` with only `Read`, `Glob` and `Grep`, in `dontAsk` mode, and loads only the user's own
-settings (`--setting-sources user`), so a consulted repository's `.claude/settings.json` cannot run commands. It reads
-inside the consulted directory, Claude Code's own temporary folder, and wherever the user's own settings add a
-directory or allow a read; a read anywhere else, such as the home folder, is denied.
+Claude runs as `claude -p` with `Read`, `Glob`, `Grep`, `WebSearch`, `Skill` and, unless `PEER_BRIDGE_SUBAGENTS=0`,
+`Agent`, in `dontAsk` mode, and loads only the user's own settings (`--setting-sources user`), so a consulted
+repository's `.claude/settings.json` cannot run commands; its `CLAUDE.md` loads through `--add-dir`. It reads inside the
+consulted directory, any `extra_directories`, Claude Code's own temporary folder, and wherever the user's own settings
+add a directory or allow a read; a read anywhere else, such as the home folder, is denied. A web search sends its query
+to Anthropic.
 
 Codex runs as `codex exec` in its read-only sandbox, without the user's config or "always allow" rules, and its
 commands see only the core environment, so tokens in the user's environment do not reach them. It can read any file the

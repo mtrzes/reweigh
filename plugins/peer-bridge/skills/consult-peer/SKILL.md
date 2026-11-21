@@ -25,9 +25,11 @@ Supply a focused `prompt` and the absolute, existing `working_directory` the pee
 peer needs evidence absent from the files, such as the relevant diff, a failing result or a constraint from the user.
 Include only the material needed to answer the question. Ask for file references when a conclusion depends on code.
 
-A Codex consultation takes `model` and `reasoning_effort` (`--model` and `--reasoning-effort` in the CLI). Set them when
-the user or the project names them, for example `gpt-6-astra` at `xhigh` for a review; `list_codex_models` shows what
-this account offers. Otherwise leave them unset and Codex uses its default. The reply names the model and effort the bridge passed when one was chosen. Do not call `codex exec`
+Both peers take `model` and `reasoning_effort` (`--model` and `--reasoning-effort` in the CLI). Set them when the user
+or the project names them, for example `gpt-6-astra` at `xhigh` for a Codex review or `opus` at `max` for a Claude one;
+`list_codex_models` shows what this Codex account offers. Otherwise leave them unset and the peer uses its default. The
+reply names the model and effort the bridge passed when one was chosen, and `warnings` names any the peer's CLI no
+longer offers. Do not call `codex exec`
 directly to get a model: it runs without the bridge's restrictions.
 
 A consultation that may take minutes, such as a review, runs better in the background: call

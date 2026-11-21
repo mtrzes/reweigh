@@ -32,6 +32,41 @@ from thread_parsing import HistoryLookup  # noqa: E402
 
 
 class ConsultationTests(BridgeTestCase):
+    async def test_the_pre_launch_check_decides_what_starts_within_the_peer_s_budget(self):
+        # Its warnings reach the caller, and the command it returns is the one that runs.
+        async def warning(provider, command, runner):
+            return ["Lost a capability."], [*command[:-1], "--checked", command[-1]]
+
+        self.client.preflight = warning
+        answer = await self.consult("claude", model="opus")
+        self.assertEqual(answer["warnings"], ["Lost a capability."])
+        self.assertIn("--checked", self.calls()[-1]["arguments"])
+
+        # A refusal starts no peer.
+        async def refusal(provider, command, runner):
+            raise bridge.BridgeError("Claude Code no longer accepts --tools.")
+
+        self.client.preflight, calls = refusal, len(self.calls())
+        with self.assertRaisesRegex(bridge.BridgeError, "no longer accepts --tools"):
+            await self.consult("claude")
+        self.assertEqual(len(self.calls()), calls)
+
+        # A check that spends the whole budget leaves the peer none, so it does not start; the check's own commands
+        # get no more than what is left.
+        clock = SimpleNamespace(now=100.0)
+
+        async def slow(provider, command, runner):
+            clock.now += self.client.timeout + 1
+            with self.assertRaises(bridge.CommandTimeout):
+                await runner([command[0], "--version"], None, self.project, 5, {})
+            return [], command
+
+        self.client.preflight = slow
+        self.client.store = bridge.SessionStore(self.state, clock=lambda: clock.now)
+        with self.assertRaisesRegex(bridge.BridgeError, "timed out"):
+            await self.consult("claude")
+        self.assertEqual(len(self.calls()), calls)
+
     async def test_both_peers_resume_their_own_conversation_with_context(self):
         for provider in ("claude", "codex"):
             with self.subTest(provider=provider):
@@ -784,12 +819,28 @@ class ConsultationTests(BridgeTestCase):
         (planted / ".git").write_text(f"gitdir: {self.project / '.git'}\n")
         borrowing = git_repository(self.root / "borrowing")
         (borrowing / ".git" / "objects" / "info" / "alternates").write_text(f"{self.project / '.git' / 'objects'}\n")
+        # Git follows alternates of alternates, and an objects folder that is itself a link elsewhere.
+        chained = git_repository(self.root / "chained")
+        inner = chained / ".git" / "objects" / "inner"
+        (inner / "info").mkdir(parents=True)
+        (chained / ".git" / "objects" / "info" / "alternates").write_text(f"{inner}\n")
+        (inner / "info" / "alternates").write_text(f"{self.project / '.git' / 'objects'}\n")
+        linked_objects = git_repository(self.root / "linked-objects")
+        shutil.rmtree(linked_objects / ".git" / "objects")
+        (linked_objects / ".git" / "objects").symlink_to(self.project / ".git" / "objects")
+        # A worktrees registry that is a link would receive the checkout's record outside the repository.
+        foreign = git_repository(self.root / "foreign-registry")
+        (self.root / "elsewhere-registry").mkdir()
+        (foreign / ".git" / "worktrees").symlink_to(self.root / "elsewhere-registry")
         cases = (
             ({"ref": "no-such-ref"}, "does not name a commit"),
             ({"ref": f"--output={injected}"}, "does not name a commit"),
             ({"ref": first, "working_directory": str(self.root / "not-a-repository")}, "inside a git repository"),
             ({"ref": first, "working_directory": str(planted)}, "does not record this folder"),
             ({"ref": first, "working_directory": str(borrowing)}, "objects/info/alternates"),
+            ({"ref": first, "working_directory": str(chained)}, "objects/info/alternates"),
+            ({"ref": first, "working_directory": str(linked_objects)}, "its objects folder"),
+            ({"ref": first, "working_directory": str(foreign)}, "worktrees is not a folder inside it"),
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )
         for arguments, expected in cases:

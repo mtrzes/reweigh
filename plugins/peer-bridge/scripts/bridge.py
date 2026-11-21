@@ -40,10 +40,12 @@ from preflight import Preflight
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
-from thread_parsing import BORROWED_OBJECTS, REDIRECTED_REPOSITORY, alternates_inside, reciprocal
+from thread_parsing import (
+    BORROWED_OBJECTS, FOREIGN_WORKTREES, REDIRECTED_REPOSITORY, alternates_inside, reciprocal,
+)
 from thread_reader import (
-    LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, borrowed_objects,
-    layout_paths, repository_layout,
+    LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, layout_paths,
+    object_stores, repository_layout, worktrees_inside,
 )
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
@@ -79,6 +81,9 @@ class Budget:
 
     def left(self):
         return self.deadline - self.clock()
+
+
+TIMED_OUT = "Consultation timed out. Narrow the question or increase the configured timeout."
 
 
 class CommandTimeout(BridgeError):
@@ -343,8 +348,19 @@ def codex_catalogue():
 def conversation_runner(conversation, budget):
     """The pre-launch check's runner: the conversation's guard, within what is left of the peer's budget."""
     async def run(command, stdin, directory, timeout, environment):
-        return await conversation.run(command, stdin, directory, min(timeout, budget.left()), environment=environment)
+        left = min(timeout, budget.left())
+        if left <= 0:
+            raise CommandTimeout(TIMED_OUT)
+        return await conversation.run(command, stdin, directory, left, environment=environment)
     return run
+
+
+def ran_choices(provider, command, model, reasoning_effort):
+    """The model and effort the command still carries after the pre-launch check dropped any it found unsupported."""
+    if provider == "claude":
+        return (model if "--model" in command else None), (reasoning_effort if "--effort" in command else None)
+    effort_set = any(word.startswith("model_reasoning_effort=") for word in command)
+    return model, (reasoning_effort if effort_set else None)
 
 
 # One cache per server process: a verdict holds until the CLI's version changes.
@@ -543,7 +559,7 @@ async def run_command(command, prompt, working_directory, timeout, environment=N
     try:
         return await asyncio.wait_for(communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:
-        raise CommandTimeout("Consultation timed out. Narrow the question or increase the configured timeout.") from exc
+        raise CommandTimeout(TIMED_OUT) from exc
     finally:
         try:
             await run_to_completion(stop_peer(guard, lifeline_write, status_read))
@@ -622,18 +638,22 @@ async def pinned_checkout(scope, directory, ref):
         yield directory, None
         return
     worktree, preparation = scope.worktree, scope.budget(CHECKOUT_PREPARATION_SECONDS)
+    outside = "A ref needs a working_directory inside a git repository."
     paths = layout_paths(os.fsencode(await scope.git(
-        directory, *LAYOUT_ARGUMENTS,
-        failure="A ref needs a working_directory inside a git repository.", timeout=preparation.left(),
-    )))
+        directory, *LAYOUT_ARGUMENTS, failure=outside, timeout=preparation.left())))
     if paths is None:
-        raise BridgeError("A ref needs a working_directory inside a git repository.")
-    # Pinning writes a worktree record into the repository's git directory and reads its objects, so both must be the
-    # repository's own: a folder unpacked from an archive can aim either at another repository.
-    if not reciprocal(repository_layout(*paths)):
+        # A path holding a newline: one path per call is unambiguous.
+        paths = tuple([Path(await scope.git(directory, *LAYOUT_ARGUMENTS[:2], flag, failure=outside,
+                                            timeout=preparation.left())).resolve() for flag in LAYOUT_ARGUMENTS[2:]])
+    # Pinning writes a worktree record into the repository's git directory and reads its objects, so all of them must
+    # be the repository's own: a folder unpacked from an archive can aim any of them at another repository. These
+    # checks come before anything is written.
+    if not reciprocal(repository_layout(directory, *paths)):
         raise BridgeError(REDIRECTED_REPOSITORY)
-    if not alternates_inside(paths[2], borrowed_objects(paths[2])):
+    if not alternates_inside(paths[2], object_stores(paths[2])):
         raise BridgeError(BORROWED_OBJECTS)
+    if not worktrees_inside(paths[2]):
+        raise BridgeError(FOREIGN_WORKTREES)
     repository = paths[0]
     commit = validate_commit(await scope.git(
         directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
@@ -700,8 +720,12 @@ class Bridge:
             check_against_catalogue(codex_catalogue(), *peer_choices(provider, os.environ, model, reasoning_effort))
         extra = []
         for given in check_extra_directories(provider, extra_directories):
-            resolved = Path(given).resolve()
-            if not resolved.is_dir():
+            try:
+                resolved = Path(given).resolve()
+                found = resolved.is_dir()
+            except (OSError, RuntimeError):
+                found = False
+            if not found:
                 raise BridgeError(f"extra_directories names {given}, which is not a directory.")
             extra.append(resolved)
         return directory, model, reasoning_effort, tuple(extra)
@@ -794,11 +818,15 @@ class Bridge:
                 failure = None
                 # The failure probes share what is left of it.
                 peer = conversation.budget(self.timeout)
-                # A CLI that renamed a name a restriction needs stops the call here, before the peer starts.
-                warnings = await self.preflight(provider, command, conversation_runner(conversation, peer))
+                # A CLI that renamed a name a restriction needs stops the call here, before the peer starts; one that
+                # lost a capability runs without it.
+                warnings, command = await self.preflight(provider, command, conversation_runner(conversation, peer))
+                model, reasoning_effort = ran_choices(provider, command, model, reasoning_effort)
+                if peer.left() <= 0:
+                    raise BridgeError(TIMED_OUT)
                 try:
                     return_code, output, errors = await conversation.run(
-                        command, handoff, consulted, self.timeout,
+                        command, handoff, consulted, peer.left(),
                         environment=peer_environment(os.environ, pinned=commit is not None))
                 except OSError as exc:
                     raise BridgeError(f"Cannot start {provider}. Check its executable and working directory.") from exc

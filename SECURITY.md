@@ -12,13 +12,16 @@ line runs.
   skills' MCP installs or apps, and with web search limited to cached results from OpenAI's index. Sub-agents a peer
   starts keep its
   restrictions. A peer that tries to edit, run a command that writes, or reach the network is refused by its own CLI's
-  restrictions; the bridge chooses those restrictions, checks the exact command line in its tests, and checks before
-  each start that the CLI still honours them, refusing the call when it does not.
+  restrictions; the bridge chooses those restrictions and checks the exact command line in its tests. Before each
+  start it also checks, in an empty home, that the CLI still honours the names it can check: the disabled features,
+  the configuration keys, the `exec` options, Claude's hook, settings and MCP restrictions and its tool list. A lost
+  restriction refuses the call; when a check cannot reach a verdict, the peer starts and the result says so.
 - **What a consulted repository can and cannot do.** It cannot make the bridge run its code, or point it at another
   repository on your machine. It can still influence what the peer answers, and the hints the bridge gives when a
   consultation fails.
 - **A consultation does not nest by accident.** The bridge marks the peer's environment, and the commands Codex runs,
-  and refuses to start inside a marked one. This guards against recursion, not against a process that drops the mark.
+  and refuses to start inside a marked one; the Codex plugin forwards the mark. This guards against recursion, not
+  against a process that drops the mark.
 - **Pinning runs no repository code.** Preparing a pinned checkout runs no git hook, file-system monitor or filter
   driver, including one configured only for linked worktrees; git uses no transport, so a partial clone's missing
   object fails instead of being fetched, and no replacement object, so the checkout holds the commit named; Git LFS
@@ -36,12 +39,12 @@ line runs.
   opens its files without following symlinks. Cleanup checks that the state directory and its folders are private,
   real directories before it lists or removes anything in them. Job cleanup requires a canonical UUID in each job,
   staging or deletion directory name. Only a regular file can mark a job for cancellation.
-- **Thread history is scoped to the requested repository.** Each read attempt checks recorded working directories
-  again against the repository resolved at the start of the request. A Claude sidechain cannot change the main
-  session's repository. Replies and titles come from the main session's current stay there, including titles used to
-  list and select sessions. A read scoped to this repository answers alike for another repository's thread, an
-  unsupported history and a missing one; only the listing's two machine-wide counts span all histories. A folder whose
-  `.git` points at a git directory that does not point back belongs to no repository.
+- **Thread history is scoped to the requested repository.** Each read attempt checks recorded working directories again
+  against the repository resolved at the start of the request. A Claude sidechain cannot change the main session's
+  repository. Replies and titles come from the main session's current stay there, including titles used to list and
+  select sessions. A read scoped to this repository answers alike for another repository's thread, a history that cannot
+  be placed in a repository, and a missing one; only the listing's two machine-wide counts span all histories. A folder
+  whose `.git` points at a git directory that does not point back belongs to no repository.
 - **History filenames are checked against the app's records.** The bridge opens only regular files and follows
   no symlinks below the configured app home. A history's recorded session ID must match the filename.
 - **The tools' read-only hint.** Only the list, read and get tools are annotated read-only. `ask_*` and `start_*` are

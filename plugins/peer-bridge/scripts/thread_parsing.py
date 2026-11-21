@@ -564,14 +564,18 @@ def git_output_path(stdout):
 # worktree or a submodule, and a folder unpacked from an archive can carry only one, aimed at another repository.
 REDIRECTED_REPOSITORY = ("working_directory's .git points at a git directory that does not record this folder as its "
                          "working tree, as a folder unpacked from an archive can. Consult a clone instead.")
-BORROWED_OBJECTS = ("This repository reads objects from outside it (objects/info/alternates), so a pinned checkout "
-                    "could show another repository's files. Consult it without ref.")
+BORROWED_OBJECTS = ("This repository reads objects from outside it (its objects folder or objects/info/alternates), "
+                    "so a pinned checkout could show another repository's files. Consult it without ref.")
+FOREIGN_WORKTREES = ("This repository's .git/worktrees is not a folder inside it, so pinning would register its "
+                     "checkout elsewhere. Consult it without ref.")
+MAX_OBJECT_STORES = 32
 
 
 @dataclass(frozen=True)
 class RepositoryLayout:
     """What git answered for a working tree, and the back references git's own setup would have written, each
-    resolved to an absolute path or None when absent or unreadable."""
+    resolved to an absolute path or None when absent; one that is present but unreadable never matches."""
+    nearest: Path | None  # the requested folder or its nearest parent holding a .git entry
     top: Path
     git_dir: Path
     common_dir: Path
@@ -582,7 +586,10 @@ class RepositoryLayout:
 
 
 def reciprocal(layout):
-    """Whether the working tree and its git directory point at each other the way git sets them up."""
+    """Whether the requested folder's own .git leads to this working tree, and the working tree and its git directory
+    point at each other the way git sets them up."""
+    if layout.nearest != layout.top:
+        return False  # git reached a working tree the requested folder's .git does not name, as core.worktree can
     dot = layout.top / ".git"
     if layout.dot_git == "directory":
         return layout.git_dir == dot and layout.commondir is None and layout.common_dir == layout.git_dir
@@ -596,10 +603,12 @@ def reciprocal(layout):
             and layout.common_dir == layout.git_dir)
 
 
-def alternates_inside(common_dir, alternates):
-    """Whether every resolved objects/info/alternates entry stays inside the repository's own objects."""
+def alternates_inside(common_dir, stores):
+    """Whether every object store git reads, the repository's own objects folder and each alternate it leads to,
+    resolves inside the repository's objects folder; stores holds None for one that could not be read."""
     objects = common_dir / "objects"
-    return all(entry.is_relative_to(objects) for entry in alternates)
+    return bool(stores) and len(stores) <= MAX_OBJECT_STORES and all(
+        store is not None and store.is_relative_to(objects) for store in stores)
 
 
 def core_worktree(config_text):

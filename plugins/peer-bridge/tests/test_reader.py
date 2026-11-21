@@ -71,12 +71,30 @@ class ReaderTests(unittest.TestCase):
         (planted / ".git").write_text(f"gitdir: {main / '.git'}\n")
         borrowed = git_repository(self.root / "borrowed")
         (borrowed / ".git" / "commondir").write_text(f"{main / '.git'}\n")
-        for folder in (planted, borrowed):
+        # A .git file aimed at a real submodule's git directory: git follows its core.worktree to the real checkout,
+        # which is not where the requested folder is.
+        into_module = self.root / "into-module"
+        into_module.mkdir()
+        (into_module / ".git").write_text(f"gitdir: {outer / '.git' / 'modules' / 'sub'}\n")
+        for folder in (planted, borrowed, into_module):
             with self.subTest(folder=folder.name), self.assertRaises(thread_reader.RepositoryRedirected):
                 thread_reader.git_common_dir(folder)
         with self.assertRaisesRegex(ThreadUnavailable, "does not record this folder"):
             ThreadReader(CodexFilesSource()).list(planted, 20)
         self.assertIsNone(thread_reader.git_common_dir(self.root))
+        # A thread recorded in a redirected folder is left out of a real repository's listing, which still lists its
+        # own.
+        codex_thread(self.codex_home, main / "deep", codex_turn("t1", "Real."), name="Real review")
+        codex_thread(self.codex_home, planted, codex_turn("t2", "Planted."), name="Planted review")
+        listing = ThreadReader(CodexFilesSource()).list(main, 20)
+        self.assertEqual([thread["name"] for thread in listing["threads"]], ["Real review"])
+        # A path holding a newline is still found, one path per git call.
+        unusual = git_repository(self.root / "new\nline")
+        self.assertEqual(thread_reader.git_common_dir(unusual), unusual / ".git")
+        # A FIFO in place of a metadata file is refused at once, never waited on.
+        fifo = self.root / "fifo"
+        os.mkfifo(fifo)
+        self.assertIs(thread_reader.read_metadata(fifo), thread_reader.UNREADABLE)
 
     def assert_private_text_absent(self, result):
         serialised = json.dumps(result)

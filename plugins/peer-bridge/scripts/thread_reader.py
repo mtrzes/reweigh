@@ -25,9 +25,9 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout, TailWindows,
-    ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, UUID_PATTERN, claude_cwd_search, core_worktree,
-    reciprocal, claude_head, claude_snapshot, claude_title_search,
+    GIT_LOCATION_ENV, MAX_OBJECT_STORES, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout,
+    TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, UUID_PATTERN, claude_cwd_search,
+    core_worktree, reciprocal, claude_head, claude_snapshot, claude_title_search,
     claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
     is_supported_history, listing_result, match_thread, newest_first, parse_session_index, rollout_identifier,
     scan_codex, search_tail, snapshot_result, turns_search,
@@ -35,8 +35,8 @@ from thread_parsing import (
 
 __all__ = [
     "GIT_LOCATION_ENV", "ClaudeSessionsSource", "CodexFilesSource", "ThreadReader", "ThreadSource",
-    "RepositoryRedirected", "ThreadUnavailable", "borrowed_objects", "git_common_dir", "repository_layout",
-    "layout_paths", "LAYOUT_ARGUMENTS",
+    "RepositoryRedirected", "ThreadUnavailable", "object_stores", "git_common_dir", "repository_layout",
+    "layout_paths", "worktrees_inside", "LAYOUT_ARGUMENTS",
 ]
 
 # Each search starts at 256 KiB of a history's tail and doubles its window up to the most a capture keeps.
@@ -261,8 +261,35 @@ class ClaudeSessionsSource:
 LAYOUT_ARGUMENTS = ("rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
 
 
+# Git metadata files are small; a larger one, or one that is not a regular file, such as a FIFO, is not read.
+METADATA_LIMIT = 64 * 1024
+# Stands for a back reference that is present but cannot be read: it never equals a real path.
+UNREADABLE = Path("/nonexistent/peer-bridge-unreadable")
+
+
+def read_metadata(path):
+    """A git metadata file's bytes, None when it is absent, or UNREADABLE when it is not a small regular file. The open
+    never blocks, so a FIFO planted in its place cannot stall the bridge."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return UNREADABLE
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return UNREADABLE
+        data = os.read(descriptor, METADATA_LIMIT + 1)
+        return UNREADABLE if len(data) > METADATA_LIMIT else data
+    except OSError:
+        return UNREADABLE
+    finally:
+        os.close(descriptor)
+
+
 def layout_paths(stdout):
-    """The three paths LAYOUT_ARGUMENTS prints, or None when git printed anything else."""
+    """The three paths LAYOUT_ARGUMENTS prints, or None when git printed anything else, such as a path holding a
+    newline; the caller then asks for each path on its own."""
     lines = stdout.split(b"\n")
     if lines[-1:] == [b""]:
         lines = lines[:-1]
@@ -273,42 +300,72 @@ def layout_paths(stdout):
 
 def back_reference(git_dir, name):
     """The path a git directory's one-line file (gitdir, commondir) names, resolved against the git directory."""
-    try:
-        text = (git_dir / name).read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return Path("/nonexistent-unreadable")  # present but unreadable: never matches
-    location = git_output_path(text)
-    return (git_dir / os.fsdecode(location)).resolve() if location else Path("/nonexistent-unreadable")
+    data = read_metadata(git_dir / name)
+    if data is None or data is UNREADABLE:
+        return data
+    location = data.split(b"\n", 1)[0].removesuffix(b"\r")
+    return (git_dir / os.fsdecode(location)).resolve() if location else UNREADABLE
 
 
-def repository_layout(top, git_dir, common_dir):
+def nearest_git_entry(directory):
+    """The folder, directory itself or its nearest parent, that holds a .git entry, found with lstat as git does."""
+    for folder in (directory, *directory.parents):
+        try:
+            os.lstat(folder / ".git")
+            return folder
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+    return None
+
+
+def repository_layout(directory, top, git_dir, common_dir):
     """Read the back references git's own setup writes, for reciprocal() to compare."""
     try:
         mode = os.lstat(top / ".git").st_mode
         dot_git = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else None
     except OSError:
         dot_git = None
-    try:
-        worktree = core_worktree((git_dir / "config").read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        worktree = None
-    return RepositoryLayout(top, git_dir, common_dir, dot_git, back_reference(git_dir, "gitdir"),
-                            (git_dir / worktree).resolve() if worktree else None, back_reference(git_dir, "commondir"))
+    config = read_metadata(git_dir / "config")
+    worktree = core_worktree(config.decode("utf-8", errors="replace")) if isinstance(config, bytes) else None
+    return RepositoryLayout(nearest_git_entry(Path(directory).resolve()), top, git_dir, common_dir, dot_git,
+                            back_reference(git_dir, "gitdir"), (git_dir / worktree).resolve() if worktree else None,
+                            back_reference(git_dir, "commondir"))
 
 
-def borrowed_objects(common_dir):
-    """The resolved entries of the repository's objects/info/alternates; an unreadable file counts as outside."""
-    objects = common_dir / "objects"
+def object_stores(common_dir):
+    """Every object folder git reads for the repository: its own, then each alternate, followed as git follows them,
+    relative entries against the folder that lists them. None stands for an alternates file that cannot be read. The
+    walk stops past MAX_OBJECT_STORES."""
+    stores, todo = [], [(common_dir / "objects").resolve()]
+    while todo and len(stores) <= MAX_OBJECT_STORES:
+        store = todo.pop()
+        if store in stores:
+            continue
+        stores.append(store)
+        data = read_metadata(store / "info" / "alternates")
+        if data is UNREADABLE:
+            stores.append(None)
+        elif data:
+            for line in data.split(b"\n"):
+                entry = os.fsdecode(line.removesuffix(b"\r")).strip()
+                if entry and not entry.startswith("#"):
+                    todo.append((store / entry).resolve())
+    return stores
+
+
+def worktrees_inside(common_dir):
+    """Whether the repository's worktrees registry, where pinning records its checkout, is absent or a real folder
+    inside the git directory."""
+    registry = common_dir / "worktrees"
     try:
-        lines = (objects / "info" / "alternates").read_bytes().splitlines()
+        mode = os.lstat(registry).st_mode
     except FileNotFoundError:
-        return []
+        return True
     except OSError:
-        return [Path("/nonexistent-unreadable")]
-    entries = [os.fsdecode(line).strip() for line in lines]
-    return [(objects / entry).resolve() for entry in entries if entry and not entry.startswith("#")]
+        return False
+    return stat.S_ISDIR(mode) and registry.resolve().is_relative_to(common_dir)
 
 
 class RepositoryRedirected(ThreadUnavailable):
@@ -322,15 +379,26 @@ def git_common_dir(directory):
     # The bridge's isolated git environment: no inherited GIT_* variable, such as a GIT_TRACE file to append to, and
     # a PATH of absolute entries, so no git in the directory itself runs.
     environment = git_environment(os.environ)
-    try:
-        result = subprocess.run(["git", "-C", str(directory), *LAYOUT_ARGUMENTS], capture_output=True, timeout=10,
-                                env=environment, stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
+
+    def ask(*arguments):
+        try:
+            return subprocess.run(["git", "-C", str(directory), *arguments], capture_output=True, timeout=10,
+                                  env=environment, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    result = ask(*LAYOUT_ARGUMENTS)
+    if result is None or result.returncode:
         return None
-    paths = None if result.returncode else layout_paths(result.stdout)
+    paths = layout_paths(result.stdout)
     if paths is None:
-        return None
-    if not reciprocal(repository_layout(*paths)):
+        # A path holding a newline: one path per call is unambiguous.
+        answers = [ask(*LAYOUT_ARGUMENTS[:2], flag) for flag in LAYOUT_ARGUMENTS[2:]]
+        locations = [git_output_path(answer.stdout) if answer and not answer.returncode else None for answer in answers]
+        if not all(locations):
+            return None
+        paths = tuple(Path(location).resolve() for location in locations)
+    if not reciprocal(repository_layout(directory, *paths)):
         raise RepositoryRedirected(REDIRECTED_REPOSITORY)
     return paths[2]
 

@@ -29,7 +29,8 @@ PRIVATE_MARKERS = ("SUBAGENT TRAFFIC", "TOOL OUTPUT", "PRIVATE REASONING", "USER
 # Inherited settings that would change what a test exercises.
 UNSET = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "XDG_STATE_HOME", bridge.ACTIVE_ENV,
          "PEER_BRIDGE_CODEX_MODEL", "PEER_BRIDGE_CODEX_REASONING_EFFORT", "PEER_BRIDGE_TIMEOUT_SECONDS",
-         "PEER_BRIDGE_THREADS", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR")
+         "PEER_BRIDGE_THREADS", "PEER_BRIDGE_CLAUDE_MODEL", "PEER_BRIDGE_CLAUDE_REASONING_EFFORT",
+         "PEER_BRIDGE_SUBAGENTS", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_TEMPLATE_DIR")
 # Families of the same: git's numbered config pairs and traces, and every switch of the stand-in peer.
 UNSET_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "GIT_TRACE", "SIMULATED_")
 GIT_ISOLATION = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -274,7 +275,7 @@ class RecordingProbe:
 
 
 async def no_preflight(provider, command, runner):
-    return []
+    return [], command
 
 
 class BridgeTestCase(unittest.IsolatedAsyncioTestCase):

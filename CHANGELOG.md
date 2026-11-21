@@ -7,9 +7,14 @@
 - Before a peer starts, the bridge checks that its CLI still knows every name the command depends on (`preflight.py`).
   A restriction it no longer honours stops the call with a message naming it; a lost capability adds `warnings` to
   the result. Nothing crashes. The check runs in an empty home under the consultation's guard, once per CLI version.
+- Before a peer starts, the bridge checks that its CLI still honours every name the command depends on
+  (`preflight.py`). A lost restriction stops the call with a message naming it; a lost capability is left out of the
+  command and named in `warnings`; a check without a verdict warns and the peer starts. Nothing crashes. The check runs
+  in an empty home under the consultation's guard and timeout, and a verdict is kept for the server process.
 - A folder whose `.git` points at a git directory that does not point back (an unpacked archive can carry such a
   pointer) no longer counts as that repository: thread reads refuse it and leave out threads recorded there, and
-  pinning refuses it, and also a repository whose `objects/info/alternates` reaches outside it.
+  pinning refuses it. Pinning also refuses a repository whose objects, through its objects folder or any chain of
+  `objects/info/alternates`, or whose `.git/worktrees`, lies outside it.
 - The Claude peer gets WebSearch, Skill and Agent (Agent unless `PEER_BRIDGE_SUBAGENTS=0`), your Claude skills, and
   the consulted repository's `CLAUDE.md`, passed with `--add-dir` so the repository's `.claude` settings still do
   not apply. `ask_claude` and `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`;
@@ -31,6 +36,8 @@
 - A Codex peer may start sub-agents, which keep its read-only sandbox; `PEER_BRIDGE_CODEX_SUBAGENTS=0` stops it.
   Codex configuration. It is set as configuration, so a Codex that renames it still starts; a contract test, run by
   the release workflow against the newest Codex, fails when Codex no longer knows a feature the bridge disables.
+  Codex configuration. If Codex renames it, the pre-launch check refuses the consultation with a message naming it, and
+  the release run, against the newest Codex, fails first.
 - A Codex peer may start sub-agents, which keep its read-only sandbox; `PEER_BRIDGE_SUBAGENTS=0` stops it.
   `--disable multi_agent` never did: it is now passed only with the switch, together with
   `features.multi_agent_v2.disable_native_tools=true`. The consultation instructions no longer ask the peer not to
