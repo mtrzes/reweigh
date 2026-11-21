@@ -3,8 +3,8 @@
 ## Unreleased
 
 - CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
-  when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version. CI
-  installs the newest Codex for the contract tests.
+  when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version. The run
+  started by hand also installs the newest Codex and Claude Code for the contract tests.
 - Both plugin launchers and the README's commands run `uv --directory <plugin root> run --locked`. `uv` no longer
   picks up a `.venv` Python from the folder the app starts in (Claude Code ignores a plugin server's `cwd`), and a
   lock file that no longer matches the script stops the server instead of resolving from the package index.

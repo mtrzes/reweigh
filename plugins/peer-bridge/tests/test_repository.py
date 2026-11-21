@@ -142,13 +142,10 @@ class CodexPluginTests(unittest.TestCase):
         # Codex passes an MCP server only the variables it names; the nesting mark must reach the bridge it starts.
         server = json.loads((PLUGIN / "codex-mcp.json").read_text(encoding="utf-8"))
         forwarded = set(server["mcpServers"]["peer-bridge"]["env_vars"])
-        # Claude's backend selectors and their routing come along, so a Bedrock or Vertex model ID reaches its backend.
         for name in ("PEER_BRIDGE_ACTIVE", "PEER_BRIDGE_THREADS", "PEER_BRIDGE_TIMEOUT_SECONDS",
                      "PEER_BRIDGE_STATE_DIR", "PEER_BRIDGE_CLAUDE_BIN", "PEER_BRIDGE_SUBAGENTS",
                      "PEER_BRIDGE_CLAUDE_MODEL",
-                     "PEER_BRIDGE_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR",
-                     "CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_PROFILE", "CLAUDE_CODE_USE_VERTEX",
-                     "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_APPLICATION_CREDENTIALS"):
+                     "PEER_BRIDGE_CLAUDE_REASONING_EFFORT", "XDG_STATE_HOME", "CLAUDE_CONFIG_DIR"):
             with self.subTest(name=name):
                 self.assertIn(name, forwarded)
 

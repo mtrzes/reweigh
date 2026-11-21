@@ -55,8 +55,9 @@ class InstalledCliTests(unittest.TestCase):
     def installed(self, name):
         executable = shutil.which(name)
         if executable is None:
-            if name == "codex":
-                self.assertNotEqual(os.environ.get("GITHUB_ACTIONS"), "true", "CI must install Codex.")
+            # The run started by hand on a release commit installs both CLIs; elsewhere a missing one skips.
+            self.assertNotEqual(os.environ.get("GITHUB_EVENT_NAME"), "workflow_dispatch",
+                                f"The release run must install {name}.")
             self.skipTest(f"{name} is not on PATH.")
         return executable
 

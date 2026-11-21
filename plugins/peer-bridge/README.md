@@ -19,7 +19,8 @@ pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script
 
 Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
 `2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
-On Linux, only the test suites run, in CI, with Python 3.11 and 3.15 and the newest Codex.
+On Linux, only the test suites run, in CI, with Python 3.11 and 3.15; the release run adds the newest Codex and Claude
+Code.
 
 On macOS, ChatGPT.app bundles the Codex CLI at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
 without adding it to `PATH`. When `PEER_BRIDGE_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
@@ -58,8 +59,10 @@ and add the plugin again. Restart Codex to load it.
 Without the plugin, register the script directly and give it the same timeouts in the generated
 `[mcp_servers.peer-bridge]` section of `~/.codex/config.toml` (`startup_timeout_sec = 60`, `tool_timeout_sec = 3900`),
 and the `env_vars` list from the plugin's `codex-mcp.json`: Codex passes an MCP server only the environment variables
-it names. `--directory` points `uv` at the plugin, so it never runs a Python environment from the folder Codex
-starts in, and `--locked` refuses a lock file that no longer matches the script.
+it names. Settings Claude Code needs from the environment, such as a Bedrock or Vertex backend, go in the `env` of
+`~/.claude/settings.json`, which the Claude peer loads. `--directory` points `uv` at the plugin, so it never runs a
+Python environment from the folder Codex starts in, and `--locked` refuses a lock file that no longer matches the
+script; both were checked with uv 0.13.8.
 
 ```sh
 codex mcp add peer-bridge -- uv --directory /absolute/path/plugins/peer-bridge run --locked --no-project --no-config --script /absolute/path/plugins/peer-bridge/scripts/bridge.py --peer claude
@@ -296,7 +299,6 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `PEER_BRIDGE_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |
 | `PEER_BRIDGE_SUBAGENTS` | `0` stops a peer from starting sub-agents (for Claude, it removes Agent and Skill); any other value, or none, lets it start them. Each one adds to the consultation's cost and time; SECURITY.md says what is known about their restrictions. |
 | `CODEX_HOME` | Codex's own setting; the thread reader reads Codex history from it, defaulting to `~/.codex`. |
-| `CLAUDE_CODE_USE_BEDROCK`, `AWS_REGION`, `AWS_PROFILE`, `CLAUDE_CODE_USE_VERTEX`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, `GOOGLE_APPLICATION_CREDENTIALS` | Claude Code's own backend settings; the Codex plugin forwards them, so a Claude peer started from Codex reaches the same backend. |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own setting; the thread reader reads Claude Code sessions from it, defaulting to `~/.claude`. |
 
 After increasing the bridge timeout, increase the host's MCP tool timeout to leave room for shutdown and result delivery.
