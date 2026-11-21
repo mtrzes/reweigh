@@ -25,7 +25,8 @@ line runs.
   each start.
 - **What a consulted repository can and cannot do.** It cannot make the bridge run its code (a Codex peer may run it
   inside its read-only sandbox), or point it at another repository on your machine. It can still influence what the
-  peer answers, and the hints the bridge gives when a consultation fails.
+  peer answers, and the hints the bridge gives when a consultation fails. This assumes the `PATH` the app starts the
+  bridge with names no folder inside the repository.
 - **A consultation does not nest by accident.** The bridge marks the peer's environment, and the commands Codex runs,
   and refuses to start inside a marked one; the Codex plugin forwards the mark. This guards against recursion, not
   against a process that drops the mark.
@@ -40,7 +41,8 @@ line runs.
   not a real folder inside it. A repository whose objects come from elsewhere, through `objects/info/alternates` or a
   link, can still show the peer another repository's files at a commit both share.
 - **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
-  entries only, so a file in the repository named like a command never runs in place of it.
+  entries only, so a file in the repository named like a command never runs in place of it through a relative entry.
+  An absolute entry that points into the repository is the user's own setting and is kept.
 - **The peer's process group ends with the consultation**, also when the bridge is killed, and so do the sign-in
   probes and git commands it runs during a consultation. Their guards all hold the conversation lock until their
   process groups stop, so no other consultation takes over a checkout that is still in use.

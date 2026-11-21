@@ -91,8 +91,8 @@ For a host that needs both tools, launch the script with `--peer both`.
 reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue is
 readable, a consultation whose model, or whose model's effort, it does not list is refused before Codex starts, with the
 values it does list. Without a catalogue, without a named model to check an effort against, or for a model whose
-catalogue entry lists no efforts, the catalogue check is skipped; the pre-launch check still finds out whether Codex
-accepts the effort at all.
+catalogue entry lists no efforts, the catalogue check is skipped. The pre-launch check then tries to verify the effort;
+if it cannot reach a verdict and time remains, the consultation goes ahead and a successful result carries `warnings`.
 
 For example, ask the available peer tool:
 
