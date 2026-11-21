@@ -136,8 +136,7 @@ the peer to read only inside that checkout and to say when something is absent a
 not a sandbox, because either peer can read outside it. The worktree is removed when the consultation ends, including
 on timeout or cancellation, and the peer stays read-only. While it exists, git records it in the repository's
 `.git/worktrees`. Pinning is refused in a folder whose `.git` points at a git directory that does not record it back,
-and in a repository that reads objects from outside itself (`objects/info/alternates`), as a folder unpacked from an
-archive can be set up to.
+as a folder unpacked from an archive can be set up to, or whose `.git/worktrees` is not a folder inside it.
 
 Claude resumes a session only from the directory it ran in, so each conversation keeps one checkout path,
 `worktrees/<conversation_id>`, recreated on every call. A follow-up without `ref` reads the conversation's pinned commit

@@ -564,11 +564,8 @@ def git_output_path(stdout):
 # worktree or a submodule, and a folder unpacked from an archive can carry only one, aimed at another repository.
 REDIRECTED_REPOSITORY = ("working_directory's .git points at a git directory that does not record this folder as its "
                          "working tree, as a folder unpacked from an archive can. Consult a clone instead.")
-BORROWED_OBJECTS = ("This repository reads objects from outside it (its objects folder or objects/info/alternates), "
-                    "so a pinned checkout could show another repository's files. Consult it without ref.")
 FOREIGN_WORKTREES = ("This repository's .git/worktrees is not a folder inside it, so pinning would register its "
                      "checkout elsewhere. Consult it without ref.")
-MAX_OBJECT_STORES = 32
 
 
 @dataclass(frozen=True)
@@ -601,14 +598,6 @@ def reciprocal(layout):
     # A submodule whose git directory lives in its superproject's: git records the working tree as core.worktree.
     return (layout.worktree_back == layout.top and layout.commondir is None
             and layout.common_dir == layout.git_dir)
-
-
-def alternates_inside(common_dir, stores):
-    """Whether every object store git reads, the repository's own objects folder and each alternate it leads to,
-    resolves inside the repository's objects folder; stores holds None for one that could not be read."""
-    objects = common_dir / "objects"
-    return bool(stores) and len(stores) <= MAX_OBJECT_STORES and all(
-        store is not None and store.is_relative_to(objects) for store in stores)
 
 
 def core_worktree(config_text):

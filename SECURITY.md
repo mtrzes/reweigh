@@ -28,8 +28,9 @@ line runs.
   downloads nothing; and no inherited `GIT_*` variable reaches the bridge's git. Removing the checkout touches no other
   worktree of the repository. This assumes the repository's configuration does not change while the checkout is made.
   Pinning writes a temporary worktree record into the repository's `.git/worktrees`, removed with the checkout, and is
-  refused in a folder whose `.git` points at a git directory that does not point back, or in a repository that reads
-  objects from outside itself.
+  refused in a folder whose `.git` points at a git directory that does not point back, or whose `.git/worktrees` is not
+  a folder inside it. A repository whose objects come from elsewhere, through `objects/info/alternates` or a link, can
+  still show the peer another repository's files at a commit both share.
 - **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
   entries only, so a file in the repository named like a command never runs in place of it.
 - **The peer's process group ends with the consultation**, also when the bridge is killed, and so do the sign-in

@@ -13,8 +13,7 @@
   in an empty home under the consultation's guard and timeout, and a verdict is kept for the server process.
 - A folder whose `.git` points at a git directory that does not point back (an unpacked archive can carry such a
   pointer) no longer counts as that repository: thread reads refuse it and leave out threads recorded there, and
-  pinning refuses it. Pinning also refuses a repository whose objects, through its objects folder or any chain of
-  `objects/info/alternates`, or whose `.git/worktrees`, lies outside it.
+  pinning refuses it, and a repository whose `.git/worktrees` is not a folder inside it.
 - The Claude peer gets WebSearch, Skill and Agent (Agent unless `PEER_BRIDGE_SUBAGENTS=0`), your Claude skills, and
   the consulted repository's `CLAUDE.md`, passed with `--add-dir` so the repository's `.claude` settings still do
   not apply. `ask_claude` and `start_claude_consultation` take `model`, `reasoning_effort` and `extra_directories`;

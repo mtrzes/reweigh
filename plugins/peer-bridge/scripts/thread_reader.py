@@ -25,7 +25,7 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    GIT_LOCATION_ENV, MAX_OBJECT_STORES, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout,
+    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout,
     TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, UUID_PATTERN, claude_cwd_search,
     core_worktree, reciprocal, claude_head, claude_snapshot, claude_title_search,
     claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
@@ -35,7 +35,7 @@ from thread_parsing import (
 
 __all__ = [
     "GIT_LOCATION_ENV", "ClaudeSessionsSource", "CodexFilesSource", "ThreadReader", "ThreadSource",
-    "RepositoryRedirected", "ThreadUnavailable", "object_stores", "git_common_dir", "repository_layout",
+    "RepositoryRedirected", "ThreadUnavailable", "git_common_dir", "repository_layout",
     "layout_paths", "worktrees_inside", "LAYOUT_ARGUMENTS",
 ]
 
@@ -303,8 +303,18 @@ def back_reference(git_dir, name):
     data = read_metadata(git_dir / name)
     if data is None or data is UNREADABLE:
         return data
-    location = data.split(b"\n", 1)[0].removesuffix(b"\r")
-    return (git_dir / os.fsdecode(location)).resolve() if location else UNREADABLE
+    # Only the line ending git writes goes: a newline inside the path stays part of it.
+    return resolved(git_dir, os.fsdecode(data.removesuffix(b"\n").removesuffix(b"\r")))
+
+
+def resolved(base, location):
+    """location, resolved against base, or UNREADABLE when it is empty or cannot be resolved (a NUL, a link loop)."""
+    if not location:
+        return UNREADABLE
+    try:
+        return (base / location).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return UNREADABLE
 
 
 def nearest_git_entry(directory):
@@ -330,29 +340,8 @@ def repository_layout(directory, top, git_dir, common_dir):
     config = read_metadata(git_dir / "config")
     worktree = core_worktree(config.decode("utf-8", errors="replace")) if isinstance(config, bytes) else None
     return RepositoryLayout(nearest_git_entry(Path(directory).resolve()), top, git_dir, common_dir, dot_git,
-                            back_reference(git_dir, "gitdir"), (git_dir / worktree).resolve() if worktree else None,
+                            back_reference(git_dir, "gitdir"), resolved(git_dir, worktree) if worktree else None,
                             back_reference(git_dir, "commondir"))
-
-
-def object_stores(common_dir):
-    """Every object folder git reads for the repository: its own, then each alternate, followed as git follows them,
-    relative entries against the folder that lists them. None stands for an alternates file that cannot be read. The
-    walk stops past MAX_OBJECT_STORES."""
-    stores, todo = [], [(common_dir / "objects").resolve()]
-    while todo and len(stores) <= MAX_OBJECT_STORES:
-        store = todo.pop()
-        if store in stores:
-            continue
-        stores.append(store)
-        data = read_metadata(store / "info" / "alternates")
-        if data is UNREADABLE:
-            stores.append(None)
-        elif data:
-            for line in data.split(b"\n"):
-                entry = os.fsdecode(line.removesuffix(b"\r")).strip()
-                if entry and not entry.startswith("#"):
-                    todo.append((store / entry).resolve())
-    return stores
 
 
 def worktrees_inside(common_dir):

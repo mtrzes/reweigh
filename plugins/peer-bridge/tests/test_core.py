@@ -1056,21 +1056,6 @@ class RepositoryLayoutTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(t.core_worktree(text), expected)
 
-    def test_every_object_store_must_stay_in_the_repository_s_objects(self):
-        common = Path("/work/repo/.git")
-        own = common / "objects"
-        cases = (
-            ("own objects only", [own], True),
-            ("an alternate inside", [own, own / "pack"], True),
-            ("an alternate outside", [own, Path("/work/other/.git/objects")], False),
-            ("objects folder resolving elsewhere", [Path("/work/other/.git/objects")], False),
-            ("an unreadable alternates file", [own, None], False),
-            ("too many stores", [own / str(index) for index in range(t.MAX_OBJECT_STORES + 1)], False),
-            ("none read", [], False),
-        )
-        for name, stores, expected in cases:
-            with self.subTest(stores=name):
-                self.assertIs(t.alternates_inside(common, stores), expected)
 
 
 if __name__ == "__main__":

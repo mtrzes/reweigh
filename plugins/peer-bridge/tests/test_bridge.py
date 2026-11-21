@@ -817,17 +817,6 @@ class ConsultationTests(BridgeTestCase):
         planted = self.root / "planted"
         planted.mkdir()
         (planted / ".git").write_text(f"gitdir: {self.project / '.git'}\n")
-        borrowing = git_repository(self.root / "borrowing")
-        (borrowing / ".git" / "objects" / "info" / "alternates").write_text(f"{self.project / '.git' / 'objects'}\n")
-        # Git follows alternates of alternates, and an objects folder that is itself a link elsewhere.
-        chained = git_repository(self.root / "chained")
-        inner = chained / ".git" / "objects" / "inner"
-        (inner / "info").mkdir(parents=True)
-        (chained / ".git" / "objects" / "info" / "alternates").write_text(f"{inner}\n")
-        (inner / "info" / "alternates").write_text(f"{self.project / '.git' / 'objects'}\n")
-        linked_objects = git_repository(self.root / "linked-objects")
-        shutil.rmtree(linked_objects / ".git" / "objects")
-        (linked_objects / ".git" / "objects").symlink_to(self.project / ".git" / "objects")
         # A worktrees registry that is a link would receive the checkout's record outside the repository.
         foreign = git_repository(self.root / "foreign-registry")
         (self.root / "elsewhere-registry").mkdir()
@@ -837,9 +826,6 @@ class ConsultationTests(BridgeTestCase):
             ({"ref": f"--output={injected}"}, "does not name a commit"),
             ({"ref": first, "working_directory": str(self.root / "not-a-repository")}, "inside a git repository"),
             ({"ref": first, "working_directory": str(planted)}, "does not record this folder"),
-            ({"ref": first, "working_directory": str(borrowing)}, "objects/info/alternates"),
-            ({"ref": first, "working_directory": str(chained)}, "objects/info/alternates"),
-            ({"ref": first, "working_directory": str(linked_objects)}, "its objects folder"),
             ({"ref": first, "working_directory": str(foreign)}, "worktrees is not a folder inside it"),
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )

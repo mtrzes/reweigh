@@ -10,6 +10,7 @@ import os
 import sqlite3
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -88,13 +89,21 @@ class ReaderTests(unittest.TestCase):
         codex_thread(self.codex_home, planted, codex_turn("t2", "Planted."), name="Planted review")
         listing = ThreadReader(CodexFilesSource()).list(main, 20)
         self.assertEqual([thread["name"] for thread in listing["threads"]], ["Real review"])
-        # A path holding a newline is still found, one path per git call.
+        # A path holding a newline is still found, one path per git call, also for a linked worktree, whose gitdir
+        # back reference holds the newline too.
         unusual = git_repository(self.root / "new\nline")
         self.assertEqual(thread_reader.git_common_dir(unusual), unusual / ".git")
-        # A FIFO in place of a metadata file is refused at once, never waited on.
+        git(main, "worktree", "add", "--quiet", "--detach", str(self.root / "linked\nworktree"))
+        self.assertEqual(thread_reader.git_common_dir(self.root / "linked\nworktree"), main / ".git")
+        # A FIFO in place of a metadata file is refused at once, never waited on; the read runs in a child with a
+        # deadline, so a regression fails instead of hanging the suite.
         fifo = self.root / "fifo"
         os.mkfifo(fifo)
-        self.assertIs(thread_reader.read_metadata(fifo), thread_reader.UNREADABLE)
+        probe = ("import sys; sys.path.insert(0, sys.argv[1]); import thread_reader as r; "
+                 "print(r.read_metadata(r.Path(sys.argv[2])) is r.UNREADABLE)")
+        result = subprocess.run([sys.executable, "-c", probe, str(thread_reader.Path(thread_reader.__file__).parent),
+                                 str(fifo)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.stdout.strip(), "True")
 
     def assert_private_text_absent(self, result):
         serialised = json.dumps(result)

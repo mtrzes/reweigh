@@ -41,11 +41,11 @@ from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner,
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
 from thread_parsing import (
-    BORROWED_OBJECTS, FOREIGN_WORKTREES, REDIRECTED_REPOSITORY, alternates_inside, reciprocal,
+    FOREIGN_WORKTREES, REDIRECTED_REPOSITORY, reciprocal,
 )
 from thread_reader import (
     LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, layout_paths,
-    object_stores, repository_layout, worktrees_inside,
+    repository_layout, worktrees_inside,
 )
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
@@ -645,13 +645,10 @@ async def pinned_checkout(scope, directory, ref):
         # A path holding a newline: one path per call is unambiguous.
         paths = tuple([Path(await scope.git(directory, *LAYOUT_ARGUMENTS[:2], flag, failure=outside,
                                             timeout=preparation.left())).resolve() for flag in LAYOUT_ARGUMENTS[2:]])
-    # Pinning writes a worktree record into the repository's git directory and reads its objects, so all of them must
-    # be the repository's own: a folder unpacked from an archive can aim any of them at another repository. These
-    # checks come before anything is written.
+    # Pinning writes a worktree record into the repository's git directory, so both must be the repository's own: a
+    # folder unpacked from an archive can aim its .git at another repository. These checks come before any write.
     if not reciprocal(repository_layout(directory, *paths)):
         raise BridgeError(REDIRECTED_REPOSITORY)
-    if not alternates_inside(paths[2], object_stores(paths[2])):
-        raise BridgeError(BORROWED_OBJECTS)
     if not worktrees_inside(paths[2]):
         raise BridgeError(FOREIGN_WORKTREES)
     repository = paths[0]
