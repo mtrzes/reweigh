@@ -456,7 +456,7 @@ class ConsultationTests(BridgeTestCase):
             (5, 0, []),
         ):
             with self.subTest(peer_seconds=peer_seconds, sign_in_seconds=sign_in_seconds):
-                clock, guarded = SimpleNamespace(now=100.0), []
+                clock, guarded, probe_folders = SimpleNamespace(now=100.0), [], []
 
                 async def recording(command, prompt, directory, timeout, environment=None, lock=None):
                     guarded.append((command[0], timeout, lock))
@@ -464,6 +464,9 @@ class ConsultationTests(BridgeTestCase):
                         clock.now += peer_seconds
                         return 7, b"", b""
                     if command[1:] == ["login", "status"]:
+                        # The probe runs in an empty folder of its own, never the consulted one, whose settings
+                        # `claude auth status` would apply.
+                        probe_folders.append((Path(directory), sorted(Path(directory).iterdir())))
                         clock.now += sign_in_seconds
                     return 0, b"/project/.git\n", b""
 
@@ -474,6 +477,10 @@ class ConsultationTests(BridgeTestCase):
                 (_, _, lock), *probes = guarded
                 self.assertIsInstance(lock, int)
                 self.assertEqual(probes, [(executable, timeout, lock) for executable, timeout in expected])
+                for folder, entries in probe_folders:
+                    self.assertEqual(entries, [])
+                    self.assertNotIn(self.project.resolve(), [folder.resolve(), *folder.resolve().parents])
+                    self.assertFalse(folder.exists())
 
     async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
         # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any

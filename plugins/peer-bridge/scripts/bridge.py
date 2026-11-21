@@ -15,6 +15,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import uuid
@@ -275,13 +276,16 @@ class FailureProbe:
 
     async def signed_in(self, session):
         """Ask the peer CLI, under the guard like the consultation, so a helper it starts cannot outlive a cancelled
-        consultation, and a cancellation passes on only once the probe's group has stopped."""
+        consultation, and a cancellation passes on only once the probe's group has stopped. It runs in an empty private
+        folder: `claude auth status` applies the settings of the folder it runs in, which a consulted repository could
+        use to change the answer or the provider."""
         timeout = min(SIGN_IN_PROBE_SECONDS, self.peer.left())
         if timeout <= 0:
             return None
         try:
             command = [peer_executable(self.provider), *SIGN_IN_PROBES[self.provider]]
-            return_code, output, _ = await self.scope.run(command, None, self.directory, timeout)
+            with tempfile.TemporaryDirectory(prefix="peer-bridge-probe-") as empty:
+                return_code, output, _ = await self.scope.run(command, None, empty, timeout)
         except (BridgeError, OSError):
             return None
         return signed_in_from(self.provider, return_code, output.decode("utf-8", errors="replace"))
@@ -833,11 +837,12 @@ def create_server(peer):
 
     server = FastMCP("peer-bridge", instructions=server_instructions(peer), log_level="WARNING")
     bridge = Bridge()
-    consulting = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+    # A consultation sends repository content to the other provider, so a host that trusts read-only hints still asks.
+    consulting = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
     reading = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
     providers = {"claude", "codex"} if peer == "both" else {peer}
-    starting = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+    starting = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
     stopping = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
     @server.tool(annotations=reading)

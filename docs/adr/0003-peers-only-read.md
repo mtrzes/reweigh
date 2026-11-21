@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Enforced by: test_core `test_claude_command` and `test_codex_command` (read-only tools and sandbox);
-  test_contracts `test_tools_their_annotations_and_envelopes` (no tool but `cancel_consultation` is marked as writing)
+  test_contracts `test_tools_their_annotations_and_envelopes` (only the list, read and get tools are marked read-only)
 
 ## Context
 Some work could be split between Claude Code and Codex, and a peer that edits would allow it. A delegate tool was
@@ -18,6 +18,9 @@ worktree of their own (`claude --worktree`, `codex --worktree`).
 - Every peer peer-bridge starts only reads: Claude with Read, Glob and Grep, Codex in its read-only sandbox. Codex can
   run commands, which its sandbox keeps from writing. No tool, flag or command lets a peer edit, write files or write to
   a session.
+- A tool that consults or starts a consultation is not marked read-only, though the peer only reads: it sends
+  repository content to the other provider, so a host that skips approval for read-only tools still asks. Only
+  the list, read and get tools carry `readOnlyHint`. Annotations are hints a host may ignore.
 - Split work goes through the apps themselves: the lead puts the handoff in its reply; the operator starts the other
   app in its own worktree; the lead follows it with `read_codex_thread` or `read_claude_thread` and reviews the
   resulting branch with `ask_*` and `ref`.

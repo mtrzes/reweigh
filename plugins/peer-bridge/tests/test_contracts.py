@@ -128,8 +128,9 @@ class McpTests(BridgeTestCase):
             # One subtest per tool or tool group, so a broken route does not hide the ones after it.
             with self.subTest(part="annotations"):
                 for tool in listing.tools:
-                    # Cancelling stops a running consultation, so only that tool is not read-only.
-                    self.assertEqual(tool.annotations.readOnlyHint, tool.name != "cancel_consultation")
+                    # Consulting sends content to the other provider and cancelling stops a job: only lookups are
+                    # read-only.
+                    self.assertEqual(tool.annotations.readOnlyHint, tool.name.startswith(("list_", "read_", "get_")))
                     self.assertFalse(tool.annotations.destructiveHint)
 
             conversation = {"conversation_id": "unset"}
