@@ -11,8 +11,6 @@ import signal
 import stat
 import subprocess
 import sys
-import threading
-import time
 import unittest
 import uuid
 from pathlib import Path
@@ -423,7 +421,6 @@ class ConsultationTests(BridgeTestCase):
         return message
 
     async def test_cli_text_alone_never_names_a_cause(self):
-        await asyncio.to_thread(git_repository, self.project)
         misleading = ("thread already has an active writer; 401 Unauthorized; Not logged in; Please run /login; "
                       "model is not supported; No conversation found with session ID; Not inside a trusted directory; "
                       "note: [claude-code:unrecognized_model]")
@@ -437,9 +434,8 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(list(self.state.glob("*.json")), [])
 
     async def test_failures_are_named_from_the_facts_the_bridge_gathers(self):
-        await asyncio.to_thread(git_repository, self.project)
         # One row per path a fact travels to the message; test_core holds the rules that read them.
-        cases = (  # the sign-in probe, the peer's stdout and stderr, the model settings, a real .git lookup
+        cases = (  # the sign-in probe, the peer's stdout and stderr, the model settings
             ("codex", {"SIMULATED_SIGNED_IN": "0"}, {}, "Codex is not signed in"),
             ("claude", {"SIMULATED_PEER_MODE": "api_error", "SIMULATED_API_STATUS": "401"}, {},
              "Claude Code is not signed in"),
@@ -454,12 +450,9 @@ class ConsultationTests(BridgeTestCase):
             with self.subTest(provider=provider, environment=environment, arguments=arguments):
                 message = await self.failure_message(provider, environment, **arguments)
                 self.assertTrue(message.startswith(expected), message)
-        message = await self.failure_message("codex", {}, working_directory=str(self.other_project))
-        self.assertEqual(message, consultation.OUTSIDE_GIT)
         self.assertEqual(list(self.state.glob("*.json")), [])
 
     async def test_diagnosis_asks_the_probes_its_provider_and_resume_state_need(self):
-        await asyncio.to_thread(git_repository, self.project)
         for provider in ("claude", "codex"):
             conversation = (await self.consult(provider))["conversation_id"]
             session = json.loads((self.state / f"{conversation}.json").read_text())["backend_session_id"]
@@ -484,32 +477,11 @@ class ConsultationTests(BridgeTestCase):
                 looked_up.clear()
                 clock = iter(readings)
                 scope = bridge.Conversation(None, None, lambda: next(clock), None)
-                probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(5), source)
+                probe = bridge.FailureProbe("codex", scope, scope.budget(5), source)
                 self.assertIs(await probe.observe("history_present", "session"), expected)
                 self.assertEqual(looked_up, [True] if expected else [])
 
-    async def test_the_git_entry_lookup_gives_up_on_a_volume_that_stops_answering(self):
-        started, release = threading.Event(), threading.Event()
-        scope = bridge.Conversation(None, None, time.monotonic, None)
-        probe = bridge.FailureProbe("codex", self.project, scope, scope.budget(30), None)
-
-        def unanswered(directory, lstat):
-            started.set()
-            return release.wait(DEADLINE_SECONDS)
-
-        try:
-            # A nonzero limit lets the lookup reach its thread; the probe then gives up on the lookup, not before it.
-            with (
-                patch.object(bridge, "git_entry_found", unanswered),
-                patch.object(bridge, "GIT_ENTRY_PROBE_SECONDS", 0.01),
-            ):
-                self.assertIsNone(await probe.observe("in_git_repository", None))
-            self.assertTrue(await asyncio.to_thread(started.wait, DEADLINE_SECONDS), "The lookup never started.")
-        finally:
-            release.set()
-
     async def test_failure_probes_share_the_peers_deadline_and_conversation_lock(self):
-        await asyncio.to_thread(git_repository, self.project)
         self.client.timeout = 5
         sign_in = str(self.peer), 2
         for peer_seconds, sign_in_seconds, expected in (
@@ -555,7 +527,6 @@ class ConsultationTests(BridgeTestCase):
         self.assertFalse(running(read_pid(self.root / "probe-child.pid")))
 
     async def test_resumed_consultation_failures_check_the_peer_history_and_writer_lock(self):
-        await asyncio.to_thread(git_repository, self.project)
         for provider in ("claude", "codex"):
             with self.subTest(provider=provider):
                 conversation = (await self.consult(provider))["conversation_id"]
@@ -580,7 +551,6 @@ class ConsultationTests(BridgeTestCase):
                 self.assertEqual(json.loads((self.state / f"{conversation}.json").read_text()), record)
 
     async def test_failure_before_the_peer_reads_its_input_is_still_diagnosed(self):
-        await asyncio.to_thread(git_repository, self.project)
         large_context = "x" * (2 * 1024 * 1024)
         for exit_status, signed_in, expected in (("1", "0", "Codex is not signed in"),
                                                  ("1", "1", "closed its input"), ("0", "1", "closed its input")):

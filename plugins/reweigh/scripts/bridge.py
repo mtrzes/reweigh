@@ -33,7 +33,7 @@ from consultation import (
 )
 from consultation import (
     FINISHED_JOB_STATES, SIGN_IN_PROBES, catalogue_models, check_against_catalogue, check_choices,
-    check_extra_directories, check_wait, failure_probes, git_entry_found, history_presence, peer_choices,
+    check_extra_directories, check_wait, failure_probes, history_presence, peer_choices,
 )
 from cleanup import run_to_completion
 from preflight import preflight
@@ -56,8 +56,6 @@ CHECKOUT_PREPARATION_SECONDS = 300
 CHECKOUT_REMOVAL_SECONDS = 120
 GIT_LATE = "git did not finish in time while preparing the pinned ref."
 SIGN_IN_PROBE_SECONDS = 30
-# How long the lookup of a .git entry above working_directory may take, on a volume that has stopped answering.
-GIT_ENTRY_PROBE_SECONDS = 10
 GUARD_SCRIPT = Path(__file__).resolve().with_name("peer_guard.py")
 # How long past the guard's own grace period to wait for it to stop the peer's group.
 GUARD_MARGIN_SECONDS = 3
@@ -276,8 +274,8 @@ class FailureProbe:
     """The real adapter diagnosis observes a failed consultation through: each answer True, False, or None when it
     cannot tell."""
 
-    def __init__(self, provider, directory, scope, peer, source):
-        self.provider, self.directory, self.scope, self.peer, self.source = provider, directory, scope, peer, source
+    def __init__(self, provider, scope, peer, source):
+        self.provider, self.scope, self.peer, self.source = provider, scope, peer, source
 
     async def observe(self, name, session):
         return await self.OBSERVATIONS[name](self, session)
@@ -322,16 +320,8 @@ class FailureProbe:
         except OSError:
             return None
 
-    async def in_git_repository(self, session):
-        # The directory is already resolved, so nothing touches the filesystem on the event loop.
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(git_entry_found, self.directory, os.lstat),
-                                          GIT_ENTRY_PROBE_SECONDS)
-        except asyncio.TimeoutError:
-            return None
-
     OBSERVATIONS = {"signed_in": signed_in, "history_present": history_present,
-                    "writer_lock_present": writer_lock_present, "in_git_repository": in_git_repository}
+                    "writer_lock_present": writer_lock_present}
 
 
 def codex_catalogue():
@@ -825,7 +815,7 @@ class Bridge:
                     raise failure
                 backend_session_id, reply = consultation_outcome(provider, return_code, output)
             except PeerFailure as exc:
-                probe = self.probe(provider, directory, conversation, peer, self.readers[provider].source)
+                probe = self.probe(provider, conversation, peer, self.readers[provider].source)
                 facts = await self.failure_facts(provider, conversation.record, output, errors, probe,
                                                  chose_model=bool(model or reasoning_effort))
                 raise BridgeError(failure_message(provider, facts, str(exc))) from exc

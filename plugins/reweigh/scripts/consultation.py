@@ -7,7 +7,6 @@ them in, and acts on what comes back.
 import json
 import os
 import re
-import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,10 +71,6 @@ WRITER_HELD = (
 SIGNED_OUT = "{name} is not signed in, or its login expired. Sign in through its CLI and try again."
 HISTORY_GONE = "{name} no longer has this conversation's history. Start a new consultation."
 MODEL_REJECTED = "{name} rejected the requested model. Check {model_setting}."
-OUTSIDE_GIT = (
-    "Codex runs only inside a git repository or a directory it trusts, and working_directory is not inside a git "
-    "repository. Use a working_directory inside a git repository."
-)
 MODEL_HINT = " A Codex model or reasoning effort was chosen; if Codex rejected it, change it or leave it unset."
 # Characters a Codex model name or reasoning effort may contain. Codex itself decides which values it accepts.
 CODEX_CHOICE_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
@@ -119,8 +114,6 @@ class FailureFacts:
     """Whether the peer still keeps a history file for the resumed backend session."""
     writer_lock_present: bool | None = None
     """Codex only: whether a writer-lock file exists for the resumed thread, so another app may hold it."""
-    in_git_repository: bool | None = None
-    """Codex only: whether working_directory or a parent holds a .git entry, the check Codex makes before it runs."""
     model_setting: bool = False
     """Codex only: a model or reasoning effort was chosen, by the request or the environment."""
     api_error_status: int | None = None
@@ -488,8 +481,9 @@ def build_command(provider, executable, conversation_id, backend_session_id=None
     command.extend(["exec", "--json"])
     if backend_session_id:
         command.extend(["resume", backend_session_id])
-    # The user's "always allow" rules would run matching commands outside the read-only sandbox.
-    command.extend(["--ignore-user-config", "--ignore-rules", "-"])
+    # The user's "always allow" rules would run matching commands outside the read-only sandbox. Codex refuses to run
+    # outside a git repository or a directory it trusts unless told to skip that check; a consultation only reads.
+    command.extend(["--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "-"])
     return command
 
 
@@ -654,28 +648,6 @@ def output_signals(provider, output, errors):
     }
 
 
-def git_entry_found(directory, lstat):
-    """Whether a resolved, absolute directory or one of its parents holds a .git entry; None when a level is unreadable.
-
-    This is the check Codex makes before it runs outside a trusted directory: any .git entry counts, even an empty
-    file, and git is never asked whether the repository is valid.
-    """
-    for level in (directory, *directory.parents):
-        try:
-            if not stat.S_ISDIR(lstat(level).st_mode):
-                return None  # replaced since it was resolved
-        except OSError:
-            return None  # gone or unreadable
-        try:
-            lstat(level / ".git")
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return None
-        return True
-    return False
-
-
 def history_presence(found, unreadable_directories):
     """Whether the peer keeps a history file for the session: True once one is found; None when none is found but a
     directory could not be listed, since the file may be in it; False only after every directory was listed."""
@@ -689,10 +661,8 @@ def failure_probes(provider, resuming):
     probes = ["signed_in"]
     if resuming:
         probes.append("history_present")
-    if provider == "codex":
-        if resuming:
-            probes.append("writer_lock_present")
-        probes.append("in_git_repository")
+    if provider == "codex" and resuming:
+        probes.append("writer_lock_present")
     return tuple(probes)
 
 
@@ -707,8 +677,6 @@ def failure_message(provider, facts, generic):
         return HISTORY_GONE.format(**names)
     if facts.unrecognized_model:
         return MODEL_REJECTED.format(**names)
-    if provider == "codex" and facts.in_git_repository is False:
-        return OUTSIDE_GIT
     if provider == "codex" and facts.model_setting:
         return generic + MODEL_HINT
     return generic
