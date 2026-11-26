@@ -171,10 +171,9 @@ starts the other app in its own worktree (`claude --worktree`, `codex --worktree
 `read_*_thread` and reviews its branch with `ref`. No peer ever edits;
 [ADR 0003](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0003-peers-only-read.md) records why.
 
-Codex's session files are an internal format. A developer tool outside the plugin, `dev/codex_app_server.py`, tests
-whether Codex's app-server API could replace reading them;
+Codex's session files are an internal format;
 [ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0001-codex-thread-reader-source.md) sets
-when it may take over.
+when Codex's app-server API may replace reading them.
 
 ## Scope
 
