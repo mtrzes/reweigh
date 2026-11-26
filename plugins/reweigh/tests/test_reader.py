@@ -656,7 +656,7 @@ class ReaderTests(unittest.TestCase):
                 self.addCleanup(path.parent.chmod, 0o700)
                 self.assertEqual(self.threads(provider)["unreadable_history_directories_machine_wide"], 1)
                 scope = bridge.Conversation(None, None, time.monotonic, None)
-                probe = bridge.FailureProbe(provider, self.project, scope, scope.budget(60), sources[provider])
+                probe = bridge.FailureProbe(provider, scope, scope.budget(60), sources[provider])
                 self.assertIsNone(asyncio.run(probe.observe("history_present", session)))
 
 

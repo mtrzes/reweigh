@@ -241,7 +241,7 @@ class RecordingProbe:
     def __init__(self, answers):
         self.answers, self.asked = answers, []
 
-    def __call__(self, provider, directory, scope, peer, source):
+    def __call__(self, provider, scope, peer, source):
         return self
 
     async def observe(self, name, session):
@@ -260,9 +260,8 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
         temporary = tempfile.TemporaryDirectory(prefix="reweigh-tests-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
-        self.project, self.other_project = self.root / "project", self.root / "other-project"
-        for directory in (self.project, self.other_project):
-            directory.mkdir()
+        self.project = self.root / "project"
+        self.project.mkdir()
         self.state, self.log = self.root / "state", self.root / "calls.jsonl"
         self.codex_home, self.claude_home = self.root / "codex-home", self.root / "claude-home"
         self.peer = self.root / "peer executable"

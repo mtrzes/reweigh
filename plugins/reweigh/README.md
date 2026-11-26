@@ -111,9 +111,9 @@ resumes.
 
 A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The message names
 a cause only when an exact field or a check establishes it, never from the CLI's or the model's text: a thread held
-open elsewhere, a signed-out CLI, a conversation whose history is gone, a model Claude Code does not know, or Codex
-outside a git repository. Otherwise it is generic, and adds that the choice may be the cause when a Codex consultation
-chose a model or reasoning effort, per call or by environment.
+open elsewhere, a signed-out CLI, a conversation whose history is gone, or a model Claude Code does not know.
+Otherwise it is generic, and adds that the choice may be the cause when a Codex consultation chose a model or
+reasoning effort, per call or by environment.
 [ADR 0004](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0004-causes-from-exact-facts.md) says what
 counts as such a fact.
 

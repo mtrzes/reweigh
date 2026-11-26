@@ -93,7 +93,7 @@ flowchart TB
   and what escapes one.
 - **A pinned checkout is prepared and removed within budgets of its own**, set in `scripts/bridge.py`. The peer's
   timeout starts once the checkout is ready; a checkout that cannot be removed is left for a later sweep, and the
-  consultation's outcome stands. The timed steps of a pinned call take at most its timeout plus 445 seconds; reading a
+  consultation's outcome stands. The timed steps of a pinned call take at most its timeout plus 435 seconds; reading a
   `seed_thread`, sweeping checkouts left by runs that died and deleting a folder git does not record are not timed.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
   given a cause only when an exact fact establishes it, such as `loggedIn: false` or a writer-lock file. Codex events

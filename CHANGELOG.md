@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A Codex consultation now runs in a folder outside a git repository, still in its read-only sandbox: the bridge
+  passes `--skip-git-repo-check`. The "not inside a git repository" message is gone. Pinning with `ref` and the thread
+  tools still need a git repository.
 - The tool-call timeout registered for Codex, and the `MCP_TOOL_TIMEOUT` the README gives Claude Code, are now 4200
   seconds, up from 3900: a pinned `ask_*` call at the longest bridge timeout could outlast 3900 seconds and be dropped
   with its reply. In Codex, add the plugin again after updating; a server registered by hand needs
