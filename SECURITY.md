@@ -97,8 +97,6 @@ line runs.
   context during cancellation.
 - Conversation records, which bind a conversation to its peer and project, are kept until the user removes them.
 - Each peer CLI keeps its own transcript of every consultation, as long as it keeps any history.
-- The developer tool `dev/codex_app_server.py` keeps a full copy of the Codex history, without credentials, until it is
-  removed. Run it only on a machine nobody else uses.
 
 ## Advice
 

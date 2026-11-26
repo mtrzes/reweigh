@@ -253,8 +253,7 @@ class ScriptImportTests(unittest.TestCase):
 
 class TestImportTests(unittest.TestCase):
     def test_no_test_module_imports_another(self):
-        # Shared fixtures live in each suite's support module. dev/tests also imports the plugin suite's support,
-        # which is the one edge between the suites; support modules are not in this set.
+        # Shared fixtures live in the plugin suite's support module, which is not in this set.
         test_modules = {path.stem for path in test_files() if path.stem.startswith("test_")}
         for path in test_files():
             with self.subTest(module=str(path.relative_to(ROOT))):
