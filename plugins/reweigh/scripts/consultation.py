@@ -525,16 +525,13 @@ def consultation_result(provider, conversation_id, reply, commit, model=None, re
 # Handoffs
 
 
-def checkout_root(depth):
-    """How the peer reaches the pinned checkout's root from a directory depth levels below it."""
-    return f"`{'/'.join(['..'] * depth)}`" if depth else "the current directory"
-
-
 def build_handoff(provider, prompt, context="", commit=None, depth=0):
     """The text the peer reads on stdin. depth is how far the consulted directory sits below a pinned checkout."""
     handoff = f"Question:\n{prompt}"
     if commit:
-        handoff = f"{PINNED_INSTRUCTIONS.format(commit=commit, root=checkout_root(depth))}\n\n{handoff}"
+        # How the peer reaches the checkout's root from a directory depth levels below it.
+        root = f"`{'/'.join(['..'] * depth)}`" if depth else "the current directory"
+        handoff = f"{PINNED_INSTRUCTIONS.format(commit=commit, root=root)}\n\n{handoff}"
     if provider == "codex":
         # Claude receives these instructions as an appended system prompt instead.
         handoff = f"{CONSULTATION_INSTRUCTIONS}\n\n{handoff}"

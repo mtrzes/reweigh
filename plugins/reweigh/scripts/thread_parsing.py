@@ -427,16 +427,6 @@ def is_interactive_claude_session(entrypoint):
     return isinstance(entrypoint, str) and bool(entrypoint) and not entrypoint.startswith("sdk")
 
 
-def keep_title(titles, entry):
-    for kind, key in CLAUDE_TITLE_RECORDS:
-        if entry.get("type") == kind and isinstance(entry.get(key), str):
-            titles[kind] = entry[key]
-
-
-def chosen_title(titles):
-    return titles.get("custom-title") or titles.get("ai-title")
-
-
 def claude_active_branch(records, identifier, whole):
     """Return the last main node's ancestry, None for histories without parent links, or EARLIER when the ancestry
     reaches a parent before records cut from the file's end."""
@@ -503,7 +493,9 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
                 inside = True
         if not inside:
             continue
-        keep_title(titles, entry)
+        for kind, key in CLAUDE_TITLE_RECORDS:
+            if entry.get("type") == kind and isinstance(entry.get(key), str):
+                titles[kind] = entry[key]
         if title_only or not on_branch or entry.get("isMeta"):
             continue
         message = entry.get("message") if isinstance(entry.get("message"), dict) else {}
@@ -534,7 +526,8 @@ def scan_claude(records, belongs, *, title_only=False, identifier=None, whole=Tr
             if text.strip():
                 messages.append(AgentMessage(turn_id, text))
             latest = TurnState(turn_id, CLAUDE_STOP_STATUSES.get(stop_reason))
-    return Scan(latest, messages, title=chosen_title(titles), segment_start=segment_start)
+    return Scan(latest, messages, title=titles.get("custom-title") or titles.get("ai-title"),
+                segment_start=segment_start)
 
 
 def claude_snapshot(summary, scan, max_messages):
