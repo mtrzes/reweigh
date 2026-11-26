@@ -858,10 +858,13 @@ class ConsultationTests(BridgeTestCase):
         unpinned = await self.consult()
         (self.root / "not-a-repository").mkdir()
         injected = self.root / "injected"
+        # A .git folder git cannot use is skipped by git, so the folder below it belongs to the repository above.
+        (self.project / "pkg" / ".git").mkdir()
         cases = (
             ({"ref": "no-such-ref"}, "does not name a commit"),
             ({"ref": f"--output={injected}"}, "does not name a commit"),
             ({"ref": first, "working_directory": str(self.root / "not-a-repository")}, "inside a git repository"),
+            ({"ref": first, "working_directory": str(self.project / "pkg")}, "inside a git repository"),
             ({"ref": first, "extra_directories": [str(self.root)]}, "cannot be combined with a pinned ref"),
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )

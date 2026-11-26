@@ -630,6 +630,14 @@ async def pinned_checkout(scope, directory, ref):
     if paths is None:
         raise BridgeError(outside)
     repository = paths[0]
+    # The consulted folder is placed in the checkout by its path below the nearest .git entry, which must therefore be
+    # git's top level: git skips a .git folder it cannot use, and core.worktree can name a top level elsewhere.
+    nearest = nearest_git_entry(directory)
+    try:
+        if nearest is None or not os.path.samefile(nearest, repository):
+            raise BridgeError(outside)
+    except OSError as exc:
+        raise BridgeError(outside) from exc
     commit = validate_commit(await scope.git(
         directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
         failure="The ref does not name a commit in this repository.", timeout=preparation.left(),
@@ -654,7 +662,7 @@ async def pinned_checkout(scope, directory, ref):
                         "--no-recurse-submodules", commit, failure="Cannot check out the ref in a temporary worktree.",
                         config=filters, timeout=preparation.left())
         # Relative to the folder as the request spells it, which can differ from git's spelling of the same folder.
-        consulted = worktree / directory.relative_to(nearest_git_entry(directory))
+        consulted = worktree / directory.relative_to(nearest)
         # A symlink at the ref could lead the peer out of the checkout.
         if not consulted.is_dir() or not consulted.resolve().is_relative_to(worktree.resolve()):
             raise BridgeError("working_directory does not exist at that ref.")
