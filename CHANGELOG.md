@@ -12,9 +12,10 @@
 
 - peer-bridge is now reweigh, and the old names are not read any more. To move from 1.0.0-beta.2, install
   `reweigh@reweigh` from the `mtrzes/reweigh` marketplace in each app and remove the old plugin; rename each
-  `PEER_BRIDGE_*` setting to `REWEIGH_*`, the tool prefix in permission rules to `mcp__plugin_reweigh_reweigh__*`, and
-  a hand-registered server's name and script path (`plugins/reweigh/scripts/bridge.py`); and set `REWEIGH_STATE_DIR`
-  to the old `peer-bridge/` state folder to keep earlier conversations and jobs.
+  `PEER_BRIDGE_*` setting to `REWEIGH_*` and the tool prefix in permission rules to `mcp__plugin_reweigh_reweigh__*`;
+  register a Codex server added by hand again as the plugin README's manual Codex setup describes (the script is now at
+  `plugins/reweigh/scripts/bridge.py`, and Codex forwards only the variables its `env_vars` list names), then restart
+  Codex; and set `REWEIGH_STATE_DIR` to the old `peer-bridge/` state folder to keep earlier conversations and jobs.
 - Both plugin launchers and the README's commands run `uv --directory <plugin root> run --locked`. `uv` no longer
   picks up a `.venv` Python from the folder the app starts in (Claude Code ignores a plugin server's `cwd`), and a
   lock file that no longer matches the script stops the server instead of resolving from the package index.

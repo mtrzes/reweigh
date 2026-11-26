@@ -154,8 +154,11 @@ unfinished turn and no messages. A session whose branch links are malformed is l
 refused; a gap that cannot be resolved within the recent history leaves no title and refuses a read that needs the
 records beyond it. A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a
 stop reason of the wrong type; any other failure inside the reader is a reader fault, not a damaged file. Message
-phases are the recorded `commentary` or `final_answer` tokens, or null. A history beyond the size limits set in
-`scripts/history_capture.py` and `scripts/thread_parsing.py` is refused.
+phases are the recorded `commentary` or `final_answer` tokens, or null. A plain history of any size is read from its
+end, looking back no further than `MAX_TAIL_BYTES`, and a Claude session's start, the Codex name index and a compressed
+rollout's header are read within `MAX_METADATA_BYTES`; a compressed rollout over `MAX_COMPRESSED_BYTES` stored or
+`MAX_DECOMPRESSED_BYTES` decoded, and a tail window of more than `MAX_TAIL_RECORDS` complete lines, are refused. The
+constants are in `scripts/history_capture.py` and `scripts/thread_parsing.py`.
 
 The bridge never writes into the other app's sessions. An agent never reaches the other app by operating its desktop
 app; it puts a handoff in its own reply, which the other session reads with `read_codex_thread` or

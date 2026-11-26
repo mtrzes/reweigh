@@ -20,7 +20,7 @@ in its header and pins them in `scripts/bridge.py.lock`; `uv` installs them into
 
 Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
 `2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
-On Linux, only the test suites run.
+On Linux, only the test suites were run, in CI.
 
 ### Claude Code to Codex
 
