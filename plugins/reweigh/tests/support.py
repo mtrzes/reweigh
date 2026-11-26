@@ -236,7 +236,7 @@ PEER_SOURCE = textwrap.dedent('''\
 
 class RecordingProbe:
     """The second adapter behind failure diagnosis: answers each observation from answers, None when it has none, and
-    records what was asked. Pass it to Bridge as probe=RecordingProbe(answers)."""
+    records what was asked. Set it as a Bridge's probe attribute."""
 
     def __init__(self, answers):
         self.answers, self.asked = answers, []

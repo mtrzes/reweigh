@@ -665,16 +665,14 @@ async def pinned_checkout(scope, directory, ref):
 
 
 class Bridge:
-    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None):
+    def __init__(self, store=None, timeout=None):
         self.store = store or SessionStore(state_directory())
-        self.readers = readers or {
-            "claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource()),
-        }
+        self.readers = {"claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource())}
         self.timeout = consultation_timeout(os.environ, timeout)
-        self.jobs = jobs or JobStore(self.store.directory)
-        self.spawn = spawn or spawn_runner
+        self.jobs = JobStore(self.store.directory)
+        self.spawn = spawn_runner
         # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
-        self.probe = probe or FailureProbe
+        self.probe = FailureProbe
         # Checks, before a peer starts, that its CLI still knows the names the command depends on.
         self.preflight = preflight
 

@@ -235,7 +235,8 @@ class ReaderTests(unittest.TestCase):
             def read(self, *arguments):
                 raise AttributeError("a fault in the reader")
 
-        client = bridge.Bridge(readers={"claude": Faulty()})
+        client = bridge.Bridge()
+        client.readers = {"claude": Faulty()}
         with self.assertRaisesRegex(bridge.BridgeError, "^The thread reader failed unexpectedly.$"):
             asyncio.run(client.thread("claude", str(self.project), "Claude types"))
 
