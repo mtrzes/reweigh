@@ -136,6 +136,12 @@ class ConsultationTests(BridgeTestCase):
         with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
             await self.consult("codex", extra_directories=[str(self.root)])
         self.assertEqual(len(self.calls()), calls)
+        # The model listing reads Codex's own catalogue, in CODEX_HOME.
+        self.codex_home.mkdir(parents=True, exist_ok=True)
+        (self.codex_home / "models_cache.json").write_text(json.dumps({"models": [
+            {"slug": "gpt-6-astra", "visibility": "list", "supported_reasoning_levels": [{"effort": "xhigh"}]}]}))
+        self.assertEqual(bridge.models_result(), {"provider": "codex", "models": [
+            {"model": "gpt-6-astra", "reasoning_efforts": ["xhigh"], "default_reasoning_effort": None}]})
         # A system configuration it cannot read could declare a server it cannot disable, so nothing starts; one that
         # is not a regular file, such as a FIFO, is refused without blocking.
         system = consultation.CODEX_SYSTEM_CONFIG

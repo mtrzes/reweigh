@@ -529,7 +529,6 @@ def build_handoff(provider, prompt, context="", commit=None, depth=0):
     """The text the peer reads on stdin. depth is how far the consulted directory sits below a pinned checkout."""
     handoff = f"Question:\n{prompt}"
     if commit:
-        # How the peer reaches the checkout's root from a directory depth levels below it.
         root = f"`{'/'.join(['..'] * depth)}`" if depth else "the current directory"
         handoff = f"{PINNED_INSTRUCTIONS.format(commit=commit, root=root)}\n\n{handoff}"
     if provider == "codex":
