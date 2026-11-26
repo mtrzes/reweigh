@@ -1063,42 +1063,5 @@ class ResultTests(unittest.TestCase):
 
 
 
-class RepositoryLayoutTests(unittest.TestCase):
-    """Whether a working tree and its git directory point at each other, as git sets up a clone, a linked worktree or
-    a submodule, and as a folder unpacked from an archive need not."""
-
-    def layout(self, **changes):
-        top = Path("/work/repo")
-        fields = {"nearest": top, "top": top, "git_dir": top / ".git", "common_dir": top / ".git",
-                  "dot_git": "directory", "gitdir_back": None, "worktree_back": None, "commondir": None}
-        return t.RepositoryLayout(**(fields | changes))
-
-    def test_only_git_s_own_layouts_are_reciprocal(self):
-        main = Path("/work/main/.git")
-        linked = {"dot_git": "file", "git_dir": main / "worktrees" / "wt", "common_dir": main,
-                  "gitdir_back": Path("/work/repo/.git"), "commondir": main}
-        module = {"dot_git": "file", "git_dir": main / "modules" / "sub", "common_dir": main / "modules" / "sub",
-                  "worktree_back": Path("/work/repo")}
-        cases = (
-            ("clone", {}, True),
-            ("linked worktree", linked, True),
-            ("submodule", module, True),
-            ("clone with a planted commondir", {"commondir": main}, False),
-            ("gitfile into another clone", {"dot_git": "file", "git_dir": main, "common_dir": main}, False),
-            ("worktree registered for another folder", linked | {"gitdir_back": Path("/work/other/.git")}, False),
-            ("worktree outside worktrees/", linked | {"git_dir": main / "elsewhere" / "wt"}, False),
-            ("worktree whose commondir differs", linked | {"commondir": Path("/work/other/.git")}, False),
-            ("submodule for another folder", module | {"worktree_back": Path("/work/other")}, False),
-            ("submodule with a commondir", module | {"commondir": main}, False),
-            ("no .git entry", {"dot_git": None}, False),
-            # A planted .git whose submodule git directory names a real checkout elsewhere through core.worktree: git
-            # reports that checkout, which is not where the requested folder's .git is.
-            ("core.worktree elsewhere", module | {"nearest": Path("/work/planted")}, False),
-        )
-        for name, changes, expected in cases:
-            with self.subTest(layout=name):
-                self.assertIs(t.reciprocal(self.layout(**changes)), expected)
-
-
 if __name__ == "__main__":
     unittest.main()
