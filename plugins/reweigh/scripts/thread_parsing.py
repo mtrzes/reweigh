@@ -9,7 +9,6 @@ import os
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from pathlib import Path
 
 MAX_MESSAGE_CHARACTERS = 24_000
 MAX_TAIL_RECORDS = 128 * 1024
@@ -556,50 +555,6 @@ def git_output_path(stdout):
     if stdout.endswith(b"\n"):
         stdout = stdout[:-1]
     return os.fsdecode(stdout) if stdout else None
-
-
-# Repository layout
-
-# A working tree whose .git points at a git directory that does not point back: git sets both ends up for a linked
-# worktree or a submodule, and a folder unpacked from an archive can carry only one, aimed at another repository.
-REDIRECTED_REPOSITORY = ("working_directory's .git points at a git directory that does not record this folder as its "
-                         "working tree, as a folder unpacked from an archive can. Consult a clone instead.")
-FOREIGN_WORKTREES = ("This repository's .git/worktrees is not a folder inside it, so pinning would register its "
-                     "checkout elsewhere. Consult it without ref.")
-
-
-@dataclass(frozen=True)
-class RepositoryLayout:
-    """What git answered for a working tree, and the back references git's own setup would have written, each
-    resolved to an absolute path or None when absent; one that is present but unreadable never matches."""
-    nearest: Path | None  # the requested folder or its nearest parent holding a .git entry
-    top: Path
-    git_dir: Path
-    common_dir: Path
-    dot_git: str | None  # "directory", "file" or None, from lstat of top/.git
-    gitdir_back: Path | None  # the git directory's gitdir file: a linked worktree's .git
-    worktree_back: Path | None  # the git directory's core.worktree: a submodule's working tree
-    commondir: Path | None  # the git directory's commondir file
-
-
-def reciprocal(layout):
-    """Whether the requested folder's own .git leads to this working tree, and the working tree and its git directory
-    point at each other the way git sets them up."""
-    if layout.nearest != layout.top:
-        return False  # git reached a working tree the requested folder's .git does not name, as core.worktree can
-    dot = layout.top / ".git"
-    if layout.dot_git == "directory":
-        return layout.git_dir == dot and layout.commondir is None and layout.common_dir == layout.git_dir
-    if layout.dot_git != "file":
-        return False
-    if layout.gitdir_back is not None:  # a linked worktree, registered under its repository's worktrees/
-        return (layout.gitdir_back == dot and layout.commondir == layout.common_dir
-                and layout.git_dir.parent == layout.common_dir / "worktrees")
-    # A submodule whose git directory lives in its superproject's: git records the working tree as core.worktree.
-    # Kept although dropping it would shorten the layout check: refusing submodules was rejected by the operator, and
-    # test_reader test_git_s_own_layouts_give_their_shared_git_directory holds it.
-    return (layout.worktree_back == layout.top and layout.commondir is None
-            and layout.common_dir == layout.git_dir)
 
 
 # Results

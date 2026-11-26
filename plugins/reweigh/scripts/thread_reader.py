@@ -14,7 +14,6 @@ thread_parsing.py holds the rules applied to what they hold.
 """
 
 import os
-import stat
 import subprocess
 from dataclasses import replace
 from functools import cache
@@ -25,9 +24,9 @@ from typing import Callable, Protocol
 from consultation import git_environment
 from history_capture import MAX_TAIL_BYTES, read_header, read_once, read_stable
 from thread_parsing import (
-    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY, REDIRECTED_REPOSITORY, RepositoryLayout,
+    GIT_LOCATION_ENV, HistoryLookup, NOT_IN_REPOSITORY,
     TailWindows, ThreadListing, ThreadSnapshot, ThreadSummary, ThreadUnavailable, UUID_PATTERN, claude_cwd_search,
-    reciprocal, claude_head, claude_snapshot, claude_title_search,
+    claude_head, claude_snapshot, claude_title_search,
     claude_turns_search, codex_main_thread, codex_snapshot, git_output_path, is_interactive_claude_session,
     is_supported_history, listing_result, match_thread, newest_first, parse_session_index, rollout_identifier,
     scan_codex, search_tail, snapshot_result, turns_search,
@@ -35,8 +34,7 @@ from thread_parsing import (
 
 __all__ = [
     "GIT_LOCATION_ENV", "ClaudeSessionsSource", "CodexFilesSource", "ThreadReader", "ThreadSource",
-    "RepositoryRedirected", "ThreadUnavailable", "git_common_dir", "checked_layout", "nearest_git_entry",
-    "worktrees_inside", "LAYOUT_ARGUMENTS", "CORE_WORKTREE_ARGUMENTS",
+    "ThreadUnavailable", "git_common_dir", "checked_layout", "nearest_git_entry", "LAYOUT_ARGUMENTS",
 ]
 
 # Each search starts at 256 KiB of a history's tail and doubles its window up to the most a capture keeps.
@@ -257,55 +255,9 @@ class ClaudeSessionsSource:
         return read_stable(self.home, lambda: self.session_file(summary.id), read)
 
 
-# The two git commands checked_layout reads: a working tree's layout, one absolute path per line in RepositoryLayout
-# order, and the repository's own core.worktree, which git records for a submodule's working tree.
+# The git command checked_layout reads, a working tree's layout: its top level, its git directory and the repository's
+# shared git directory, one absolute path per line.
 LAYOUT_ARGUMENTS = ("rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir")
-CORE_WORKTREE_ARGUMENTS = ("config", "--local", "--get", "core.worktree")
-
-
-# Git metadata files are small; a larger one, or one that is not a regular file, such as a FIFO, is not read.
-METADATA_LIMIT = 64 * 1024
-# Stands for a back reference that is present but cannot be read: it never equals a real path.
-UNREADABLE = Path("/nonexistent/reweigh-unreadable")
-
-
-def read_metadata(path):
-    """A git metadata file's bytes, None when it is absent, or UNREADABLE when it is not a small regular file. The open
-    never blocks, so a FIFO planted in its place cannot stall the bridge."""
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return UNREADABLE
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            return UNREADABLE
-        data = os.read(descriptor, METADATA_LIMIT + 1)
-        return UNREADABLE if len(data) > METADATA_LIMIT else data
-    except OSError:
-        return UNREADABLE
-    finally:
-        os.close(descriptor)
-
-
-def back_reference(git_dir, name):
-    """The path a git directory's one-line file (gitdir, commondir) names, resolved against the git directory."""
-    data = read_metadata(git_dir / name)
-    if data is None or data is UNREADABLE:
-        return data
-    # Only the line ending git writes goes: a newline inside the path stays part of it.
-    return resolved(git_dir, os.fsdecode(data.removesuffix(b"\n").removesuffix(b"\r")))
-
-
-def resolved(base, location):
-    """location, resolved against base, or UNREADABLE when it is empty or cannot be resolved (a NUL, a link loop)."""
-    if not location:
-        return UNREADABLE
-    try:
-        return (base / location).resolve()
-    except (OSError, ValueError, RuntimeError):
-        return UNREADABLE
 
 
 def nearest_git_entry(directory):
@@ -321,59 +273,16 @@ def nearest_git_entry(directory):
     return None
 
 
-def repository_layout(directory, top, git_dir, common_dir, worktree):
-    """Read the back references git's own setup writes, for reciprocal() to compare; worktree is the repository's
-    core.worktree, or None."""
-    try:
-        mode = os.lstat(top / ".git").st_mode
-        dot_git = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else None
-    except OSError:
-        dot_git = None
-    nearest = nearest_git_entry(Path(directory).resolve())
-    try:
-        # The same folder, spelled as typed, on a disk that ignores case or Unicode form: git prints the disk's spelling.
-        if nearest is not None and os.path.samefile(nearest, top):
-            nearest = top
-    except OSError:
-        pass  # could not tell: the spellings stay unequal, so the layout is refused
-    return RepositoryLayout(nearest, top, git_dir, common_dir, dot_git,
-                            back_reference(git_dir, "gitdir"), resolved(git_dir, worktree) if worktree else None,
-                            back_reference(git_dir, "commondir"))
-
-
-def worktrees_inside(common_dir):
-    """Whether the repository's worktrees registry, where pinning records its checkout, is absent or a real folder
-    inside the git directory."""
-    registry = common_dir / "worktrees"
-    try:
-        mode = os.lstat(registry).st_mode
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return stat.S_ISDIR(mode) and registry.resolve().is_relative_to(common_dir)
-
-
-class RepositoryRedirected(ThreadUnavailable):
-    """The working tree's .git points at a git directory that does not point back."""
-
-
-def checked_layout(directory, layout_output, worktree_output):
-    """The three paths LAYOUT_ARGUMENTS printed, from the outputs of the two layout commands; None for any other
-    output, such as a path holding a newline. Raises RepositoryRedirected when the back references disagree."""
+def checked_layout(layout_output):
+    """The three paths LAYOUT_ARGUMENTS printed; None for any other output, such as a path holding a newline."""
     lines = layout_output.removesuffix(b"\n").split(b"\n")
     if len(lines) != 3 or not all(lines):
         return None
-    paths = tuple(Path(os.fsdecode(line)).resolve() for line in lines)
-    if not reciprocal(repository_layout(directory, *paths, git_output_path(worktree_output))):
-        raise RepositoryRedirected(REDIRECTED_REPOSITORY)
-    return paths
+    return tuple(Path(os.fsdecode(line)).resolve() for line in lines)
 
 
 def git_common_dir(directory):
-    """Return the repository's shared git directory, identical for all of its worktrees, or None outside one.
-
-    Raises RepositoryRedirected when the working tree and its git directory do not point at each other."""
+    """Return the repository's shared git directory, identical for all of its worktrees, or None outside one."""
     # The bridge's isolated git environment: no inherited GIT_* variable, such as a GIT_TRACE file to append to, and
     # a PATH of absolute entries, so no git in the directory itself runs.
     environment = git_environment(os.environ)
@@ -389,15 +298,12 @@ def git_common_dir(directory):
     if result is None:
         return None
     if result.returncode:
-        # A bare repository has no working tree, so no .git pointer to check: its own folder is its git directory.
+        # A bare repository has no working tree: its own folder is its git directory.
         bare = ask(*LAYOUT_ARGUMENTS[:2], "--git-common-dir")
         location = git_output_path(bare.stdout) if bare and not bare.returncode else None
         common = Path(location).resolve() if location else None
         return common if common and Path(directory).resolve().is_relative_to(common) else None
-    configured = ask(*CORE_WORKTREE_ARGUMENTS)
-    if configured is None or configured.returncode not in (0, 1):
-        return None
-    paths = checked_layout(directory, result.stdout, configured.stdout)
+    paths = checked_layout(result.stdout)
     return paths[2] if paths else None
 
 
@@ -415,12 +321,7 @@ class ThreadReader:
 
         def include(cwd):
             # Only an absolute path: an empty or relative one would resolve against the server's own directory.
-            if not (Path(cwd).is_absolute() and Path(cwd).is_dir()):
-                return False
-            try:
-                return self.common_dir(cwd) == repository
-            except RepositoryRedirected:
-                return False  # a folder that only claims to belong to this repository
+            return Path(cwd).is_absolute() and Path(cwd).is_dir() and self.common_dir(cwd) == repository
 
         return include
 

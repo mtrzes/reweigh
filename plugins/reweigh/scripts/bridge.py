@@ -40,10 +40,9 @@ from preflight import preflight
 from jobs import JobStore, job_request, job_store_errors, run_job, spawn_runner, start_job
 from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
 import peer_guard
-from thread_parsing import FOREIGN_WORKTREES
 from thread_reader import (
-    CORE_WORKTREE_ARGUMENTS, LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, RepositoryRedirected,
-    ThreadReader, ThreadUnavailable, checked_layout, nearest_git_entry, worktrees_inside,
+    LAYOUT_ARGUMENTS, ClaudeSessionsSource, CodexFilesSource, ThreadReader, ThreadUnavailable, checked_layout,
+    nearest_git_entry,
 )
 
 UNKNOWN_CONVERSATION = "Unknown or unreadable conversation. Start a new consultation."
@@ -627,19 +626,18 @@ async def pinned_checkout(scope, directory, ref):
     worktree, preparation = scope.worktree, scope.budget(CHECKOUT_PREPARATION_SECONDS)
     outside = "A ref needs a working_directory inside a git repository."
     layout = await scope.git(directory, *LAYOUT_ARGUMENTS, failure=outside, timeout=preparation.left())
-    configured = await scope.git(directory, *CORE_WORKTREE_ARGUMENTS, allowed=(1,), timeout=preparation.left(),
-                                 failure="Cannot read the repository's git configuration.")
-    # Pinning writes a worktree record into the repository's git directory, so both must be the repository's own: a
-    # folder unpacked from an archive can aim its .git at another repository. These checks come before any write.
-    try:
-        paths = checked_layout(directory, os.fsencode(layout), os.fsencode(configured))
-    except RepositoryRedirected as exc:
-        raise BridgeError(str(exc)) from exc
+    paths = checked_layout(os.fsencode(layout))
     if paths is None:
         raise BridgeError(outside)
-    if not worktrees_inside(paths[2]):
-        raise BridgeError(FOREIGN_WORKTREES)
     repository = paths[0]
+    # The consulted folder is placed in the checkout by its path below the nearest .git entry, which must therefore be
+    # git's top level: git skips a .git folder it cannot use, and core.worktree can name a top level elsewhere.
+    nearest = nearest_git_entry(directory)
+    try:
+        if nearest is None or not os.path.samefile(nearest, repository):
+            raise BridgeError(outside)
+    except OSError as exc:
+        raise BridgeError(outside) from exc
     commit = validate_commit(await scope.git(
         directory, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}",
         failure="The ref does not name a commit in this repository.", timeout=preparation.left(),
@@ -664,7 +662,7 @@ async def pinned_checkout(scope, directory, ref):
                         "--no-recurse-submodules", commit, failure="Cannot check out the ref in a temporary worktree.",
                         config=filters, timeout=preparation.left())
         # Relative to the folder as the request spells it, which can differ from git's spelling of the same folder.
-        consulted = worktree / directory.relative_to(nearest_git_entry(directory))
+        consulted = worktree / directory.relative_to(nearest)
         # A symlink at the ref could lead the peer out of the checkout.
         if not consulted.is_dir() or not consulted.resolve().is_relative_to(worktree.resolve()):
             raise BridgeError("working_directory does not exist at that ref.")
