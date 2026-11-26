@@ -6,7 +6,7 @@ to worker processes, and fails unless every discovered test ran exactly once and
 a test that leaks state into the next one in its process still shows, in the order its worker runs them.
 
     .venv/bin/python dev/run_tests.py -s plugins/reweigh/tests
-    .venv/bin/python dev/run_tests.py -s dev/tests -t dev/tests
+    .venv/bin/python dev/run_tests.py -s dev/tests
 
 A green run prints one line. A red one prints each failing worker's tracebacks and names any test that did not run,
 ran twice or was still running when its worker died or reached the deadline.
@@ -25,7 +25,7 @@ import time
 import unittest
 from pathlib import Path
 
-DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
+DEFAULT_WORKERS = os.cpu_count() or 1
 DEADLINE_SECONDS = 600  # for the whole run; CI stops a serial run at 15 minutes
 
 
@@ -180,15 +180,13 @@ def main(argv):
         return work(*argv[1:3])
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("-s", "--start-directory", default=".", help="directory to start discovery in")
-    parser.add_argument("-t", "--top-level-directory", help="top-level directory of the project (default: start)")
     parser.add_argument("-j", "--workers", type=int, default=DEFAULT_WORKERS, help="number of worker processes")
     parser.add_argument("--deadline", type=float, default=DEADLINE_SECONDS, help="seconds for the whole run")
     arguments = parser.parse_args(argv)
     if arguments.workers < 1:
         parser.error("--workers must be at least 1")
     start = os.path.abspath(arguments.start_directory)
-    top = os.path.abspath(arguments.top_level_directory or start)
-    return run(start, top, arguments.workers, arguments.deadline)
+    return run(start, start, arguments.workers, arguments.deadline)
 
 
 if __name__ == "__main__":
