@@ -194,19 +194,6 @@ class CatalogueTests(unittest.TestCase):
             with self.subTest(cache=broken):
                 self.assertEqual(c.catalogue_models(broken), [])
 
-    def test_a_choice_is_checked_only_against_what_the_catalogue_says(self):
-        models = c.catalogue_models(self.CACHE)
-        for model, effort in (("gpt-6-astra", "xhigh"), ("gpt-6-astra", None), (None, "anything"),
-                              ("gpt-6-luna", "anything")):
-            with self.subTest(model=model, effort=effort):
-                c.check_against_catalogue(models, model, effort)
-        c.check_against_catalogue([], "unknown", "unknown")  # no catalogue: Codex decides
-        for model, effort, reason in (("gpt-6-astra", "medium", "takes reasoning_effort low, xhigh, not medium"),
-                                      ("hidden-model", None, "lists no model hidden-model"),
-                                      ("gpt-9", "low", "Its models are: gpt-6-astra, gpt-6-luna")):
-            with self.subTest(model=model, effort=effort), self.assertRaisesRegex(c.BridgeError, reason):
-                c.check_against_catalogue(models, model, effort)
-
 
 class CommandTests(unittest.TestCase):
     def test_codex_mcp_server_names(self):

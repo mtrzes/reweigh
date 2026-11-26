@@ -87,10 +87,8 @@ For a host that needs both tools, launch the script with `--peer both`.
 | `extra_directories` | Claude only, optional: up to 20 absolute paths of existing folders the peer may also read, passed as `--add-dir`; a `CLAUDE.md` in one of them is loaded as instructions too. Refused for a pinned consultation, whether `ref` is given or the conversation is already pinned. A Codex peer already reads any file you can. |
 
 `list_codex_models` (and the `codex-models` command) lists the models this Codex account offers, with each model's
-reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). When that catalogue is
-readable, a consultation whose model, or whose model's effort, it does not list is refused before Codex starts, with the
-values it does list. Without a catalogue, without a named model to check an effort against, or for a model whose
-catalogue entry lists no efforts, the catalogue check is skipped and the effort reaches Codex unchecked.
+reasoning efforts and default, from Codex's own catalogue (`models_cache.json` in `CODEX_HOME`). The bridge does not
+check a consultation's `model` or `reasoning_effort` against it: Codex decides whether it accepts them.
 
 For example, ask the available peer tool:
 
@@ -268,7 +266,7 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `REWEIGH_CLAUDE_BIN` | Claude Code executable; defaults to `claude` on `PATH`. |
 | `REWEIGH_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI ChatGPT.app bundles at `Contents/Resources/codex-cli/bin/codex`, in `/Applications` or `~/Applications`. A set value that does not resolve is an error, not a fallback. |
 | `REWEIGH_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
-| `REWEIGH_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The catalogue check is described under [Consultation requests](#consultation-requests). |
+| `REWEIGH_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. |
 | `REWEIGH_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
 | `REWEIGH_CLAUDE_REASONING_EFFORT` | Optional Claude effort, such as `high` or `max`, passed as `--effort`; a per-call `reasoning_effort` overrides it. |
 | `REWEIGH_THREADS` | `1` turns on the experimental thread tools and `seed_thread`; any other value, or none, leaves them off. |

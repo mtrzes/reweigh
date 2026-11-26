@@ -173,7 +173,7 @@ def check_choices(provider, model=None, reasoning_effort=None):
 def catalogue_models(cache):
     """The models in Codex's own catalogue (models_cache.json) that Codex lists, with their reasoning efforts.
 
-    Only exact fields are read; a cache of another shape yields no models, and nothing is then checked against it.
+    Only exact fields are read; a cache of another shape yields no models.
     """
     entries = cache.get("models") if isinstance(cache, dict) else None
     models = []
@@ -188,19 +188,6 @@ def catalogue_models(cache):
         models.append({"model": entry["slug"], "reasoning_efforts": efforts,
                        "default_reasoning_effort": default if isinstance(default, str) else None})
     return models
-
-
-def check_against_catalogue(models, model=None, reasoning_effort=None):
-    """Refuse a model, or a model's reasoning effort, that Codex's catalogue does not list. Without a catalogue, or
-    without a named model to check an effort against, the choice goes to Codex unchecked."""
-    if not models or not model:
-        return
-    known = {entry["model"]: entry for entry in models}
-    if model not in known:
-        raise BridgeError(f"Codex lists no model {model}. Its models are: {', '.join(sorted(known))}.")
-    efforts = known[model]["reasoning_efforts"]
-    if reasoning_effort and efforts and reasoning_effort not in efforts:
-        raise BridgeError(f"{model} takes reasoning_effort {', '.join(efforts)}, not {reasoning_effort}.")
 
 
 def peer_choices(provider, environ, model=None, reasoning_effort=None):

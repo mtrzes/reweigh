@@ -77,9 +77,8 @@ flowchart TB
   skills, not the repository's, and has no shell, since Claude Code's sandbox cannot keep a command from writing. Where
   each reads is in
   [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-it-does-not-protect-against).
-- **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
-  readable, a Codex model it does not list, or an effort its model does not list, is refused before Codex starts; the
-  [README](README.md#consultation-requests) says when the choice goes unchecked.
+- **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`, and the peer's CLI decides
+  whether it accepts them; `list_codex_models` gives the values Codex's catalogue lists.
 - **A lost restriction refuses the call before the peer starts.** `preflight.py` runs Codex in an empty home with only
   `PATH`, `HOME` and `CODEX_HOME`, under the consultation's guard and within its timeout. Each disabled feature must be
   listed and off, each restricting `-c` key must refuse a wrong-type value, and Codex must accept the command's

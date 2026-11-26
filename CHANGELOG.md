@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A Codex `model` or `reasoning_effort` that Codex's cached catalogue does not list is no longer refused before Codex
+  starts: Codex decides whether it accepts the value, so a stale catalogue cannot block a new model.
+  `list_codex_models` still lists what the catalogue offers.
 - A Codex consultation now runs in a folder outside a git repository, still in its read-only sandbox: the bridge
   passes `--skip-git-repo-check`. The "not inside a git repository" message is gone. Pinning with `ref` and the thread
   tools still need a git repository.
