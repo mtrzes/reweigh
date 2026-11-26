@@ -28,7 +28,7 @@ threads from the same Git repository. The bridge never posts into the original c
 - **Claude Code** can read the directory you ask it to inspect, its own temporary folder, and paths your Claude
   settings allow.
 
-Neither peer can edit files, search the web or start another consultation. Pinning selects the checkout where
+Neither peer can edit files or start another consultation; both can search the web. Pinning selects the checkout where
 the peer starts; the read permissions above still apply. The bridge runs locally, but your question and whatever the
 peer reads go to that peer's model provider, and its CLI keeps a transcript. [Security details](SECURITY.md)
 

@@ -22,8 +22,6 @@ Run both suites before each commit: [Verification](plugins/reweigh/README.md#ver
   boundaries updates HOW-IT-WORKS in the same commit; `test_repository` fails when its Tools or job-state table differs
   from the tools and states the code has.
 - Tests follow [ADR 0002](docs/adr/0002-test-architecture.md): each critical path proved once, at the lowest level.
-  CI runs them for a pull request and, started by hand, on the release commit before it is tagged; the `v*` tag's run
-  only checks that the tag names the version in `plugin.json`.
 - Decisions go in `docs/adr/` with the sections Status, Enforced by, Context, Decision, Consequences and Reconsider if;
   current decision only; history is in git.
 - Deterministic code reads exact tokens and structure; judgement about language goes to a model or the operator. An

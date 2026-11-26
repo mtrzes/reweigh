@@ -4,11 +4,9 @@
 - Enforced by: review; standing duty: each commit body gives net production and test lines per approved item
 
 ## Context
-The 2026-11-20 security walkthrough approved about 25 items. Its branch went through twelve review rounds, and the later
-rounds' findings were mostly in code the earlier rounds' fixes had added; an object-store containment check was cut
-after it kept producing new P1 findings. After two trim passes it still landed with about 460 net production and 920
-net test lines. Claude Code and Codex change often, so every name the bridge checks at runtime is code that has to keep
-up with them.
+One security review's fixes went through twelve review rounds, the later rounds' findings mostly in code the earlier
+rounds' fixes had added, and after two trim passes still landed with about 460 net production and 920 net test lines.
+Claude Code and Codex change often, so every name the bridge checks at runtime is code that has to keep up with them.
 
 ## Decision
 - A check becomes code only when it reads an exact token, field, exit status or file existence and fits the budget;

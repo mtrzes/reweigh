@@ -47,17 +47,16 @@ line runs.
   staging or deletion directory name. Only a regular file can mark a job for cancellation.
 - **Thread history is scoped to the requested repository.** Each read attempt checks recorded working directories again
   against the repository resolved at the start of the request. A Claude sidechain cannot change the main session's
-  repository. Replies and titles come from the main session's current stay there, including titles used to list and
-  select sessions. A read scoped to this repository answers alike for another repository's thread, a history that cannot
-  be placed in a repository, and a missing one; only the listing's two machine-wide counts span all histories. A folder
+  repository. A read scoped to this repository answers alike for another repository's thread, a history that cannot be
+  placed in a repository, and a missing one; only the listing's two machine-wide counts span all histories. A folder
   whose `.git` points at a git directory that does not point back belongs to no repository. So do a repository made
   with `git init --separate-git-dir`, whose git directory records no working tree, and one whose `.git` is a symlink:
   thread reads and pinning refuse both.
 - **History filenames are checked against the app's records.** The bridge opens only regular files and follows
   no symlinks below the configured app home. A history's recorded session ID must match the filename.
-- **The tools' read-only hint.** Only the list, read and get tools are annotated read-only. `ask_*` and `start_*` are
-  not: they send repository content to the other provider, so a host that skips approval for read-only tools does not
-  skip them. Whether the host asks is up to the host.
+- **The tools' read-only hint.** Only the list, read and get tools are annotated read-only, so a host that skips
+  approval for read-only tools does not skip `ask_*` and `start_*`;
+  [ADR 0003](docs/adr/0003-peers-only-read.md) says why.
 
 ## What it does not protect against
 
@@ -91,10 +90,11 @@ line runs.
 ## What is kept, and for how long
 
 - A background consultation's reply stays in the state directory until a later background start removes it, at the
-  earliest seven days after the job finished; with no later start it stays until the user removes it. Its prompt and
-  context are deleted when the runner reads them. If the request is unreadable and the job record is valid, the
-  runner deletes the request and records a fixed failure message. If SIGTERM or SIGHUP interrupts the CLI while it
-  creates a job, the bridge deletes that job's prompt and context during cancellation.
+  earliest seven days after the job finished, or after its last change when its files cannot be read; with no later
+  start it stays until the user removes it. Its prompt and context are deleted when the runner reads them. If the
+  request is unreadable and the job record is valid, the runner deletes the request and records a fixed failure
+  message. If SIGTERM or SIGHUP interrupts the CLI while it creates a job, the bridge deletes that job's prompt and
+  context during cancellation.
 - Conversation records, which bind a conversation to its peer and project, are kept until the user removes them.
 - Each peer CLI keeps its own transcript of every consultation, as long as it keeps any history.
 - The developer tool `dev/codex_app_server.py` keeps a full copy of the Codex history, without credentials, until it is

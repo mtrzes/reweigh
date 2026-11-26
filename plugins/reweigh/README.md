@@ -14,17 +14,13 @@ shows its shape and the paths a request takes.
 ## Setup
 
 Requires macOS or Linux and Python 3.11 or later. Install `uv`, Codex CLI and Claude Code on the machine running the MCP
-server, and sign in to each peer CLI with its normal login flow. The script declares its dependencies in its header and
-pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script environment.
+server, and sign in to each peer CLI with its normal login flow; on macOS the bridge also finds the Codex CLI that
+ChatGPT.app bundles (`REWEIGH_CODEX_BIN` under [Configuration](#configuration)). The script declares its dependencies
+in its header and pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script environment.
 
 Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
 `2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
-On Linux, only the test suites run, in CI, with Python 3.11 and 3.15; the release run adds the newest Codex and Claude
-Code.
-
-On macOS, ChatGPT.app bundles the Codex CLI at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`
-without adding it to `PATH`. When `REWEIGH_CODEX_BIN` is unset and `codex` is not on `PATH`, the bridge uses that
-bundled CLI, or the same path under `~/Applications`.
+On Linux, only the test suites run.
 
 ### Claude Code to Codex
 
@@ -70,7 +66,7 @@ codex mcp add reweigh -- uv --directory /absolute/path/plugins/reweigh run --loc
 
 The startup allowance covers the first `uv` dependency installation. For Claude Code versions that support
 `MCP_TOOL_TIMEOUT`, launch Claude Code with `MCP_TOOL_TIMEOUT=4200000` to give consultations the same tool-call
-allowance. The bridge's own timeout defaults to 600 seconds and goes up to 3600.
+allowance.
 
 For a host that needs both tools, launch the script with `--peer both`.
 
@@ -113,22 +109,13 @@ returned ID on follow-ups, with the same peer and project directory. Bridge meta
 canonical directory; it does not accept a peer CLI's raw session ID. A per-conversation file lock prevents overlapping
 resumes.
 
-A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The bridge names a
-cause only when an exact field or a check establishes it, and never by reading the CLI's or the model's text:
-
-| Message names | Established by |
-|---------------|----------------|
-| A thread held open elsewhere | On a Codex follow-up, a writer-lock file for the thread under `CODEX_HOME/thread-writer-locks` |
-| A signed-out CLI | `claude auth status --json` reporting `loggedIn: false`, `codex login status` exiting 1, or Claude's result carrying `api_error_status` 401 |
-| A conversation whose history is gone | On a follow-up, no session file for it under the peer's history directory, every folder of which could be listed |
-| A model Claude Code does not know | A stderr line starting with Claude Code's `[claude-code:unrecognized_model]` tag |
-| Codex outside a git repository | No `.git` entry in `working_directory` or any parent, the check Codex itself makes |
-
-The bridge runs the sign-in check and the history lookup only while time remains from the consultation timeout, and
-gives up looking for a `.git` entry after 10 seconds. If the checks and result fields establish no cause, the bridge
-returns a generic error. When a Codex consultation that chose a model or reasoning effort, per call or by environment,
-fails after the start with no other cause established, the message adds that the choice may be the cause, because Codex
-reports a rejected choice only in prose.
+A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The message names
+a cause only when an exact field or a check establishes it, never from the CLI's or the model's text: a thread held
+open elsewhere, a signed-out CLI, a conversation whose history is gone, a model Claude Code does not know, or Codex
+outside a git repository. Otherwise it is generic, and adds that the choice may be the cause when a Codex consultation
+chose a model or reasoning effort, per call or by environment.
+[ADR 0004](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0004-causes-from-exact-facts.md) says what
+counts as such a fact.
 
 ### Pinned refs
 
@@ -138,13 +125,13 @@ worktree under the state directory, and runs the peer in the same subdirectory o
 `commit`, the full hash of the checkout prepared; the peer may still have read files outside it. The handoff tells
 the peer to read only inside that checkout and to say when something is absent at the commit; this is an instruction,
 not a sandbox, because either peer can read outside it. The worktree is removed when the consultation ends, including
-on timeout or cancellation. The peer keeps its restrictions; SECURITY.md says when pinning is refused.
+on timeout or cancellation. The peer keeps its restrictions; SECURITY.md says what pinning writes into the repository
+and when it is refused.
 
 Claude resumes a session only from the directory it ran in, so each conversation keeps one checkout path,
 `worktrees/<conversation_id>`, recreated on every call. A follow-up without `ref` reads the conversation's pinned commit
 again, and a follow-up with `ref` moves the conversation to the new commit. A conversation started without `ref` cannot
-be pinned later; start a new one. Pinning registers the temporary worktree under `worktrees/` in the repository's common
-git directory while the consultation runs and leaves the working tree untouched.
+be pinned later; start a new one.
 
 ### Background consultations
 
@@ -156,14 +143,12 @@ consultation in a detached runner, and return at once:
 {"job_id": "7047ca11-b7e9-4459-9956-82848805450f", "provider": "codex", "state": "queued"}
 ```
 
-`get_consultation` takes the `job_id` and an optional `wait_seconds`, at most 60, and returns the job's `state`:
-`queued`, `running`, `cancelling` while a cancelled job's runner stops, `completed`, `failed`, `cancelled`, or `lost`
-when its runner stopped without a result or did not claim it within two minutes. A completed job adds the
-`conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, `model` and `reasoning_effort` when chosen,
-and `warnings` as for `ask_`; a failed, cancelled or lost one adds a fixed `error` message. `cancel_consultation` stops
-a running job, its peer and the peer's child processes, and removes a pinned checkout. Each server sees only the jobs of
-the peers it exposes. Each status read or cancellation can wait up to one second for the job's state lock before
-reporting that the job is busy.
+`get_consultation` takes the `job_id` and an optional `wait_seconds`, at most 60, and returns the job's `state`;
+[HOW-IT-WORKS](HOW-IT-WORKS.md#background-jobs) lists the states and says when a read reports the job busy. A completed
+job adds the `conversation_id` and `reply` an `ask_` tool returns, `commit` when pinned, `model` and `reasoning_effort`
+when chosen, and `warnings` as for `ask_`; a failed, cancelled or lost one adds a fixed `error` message.
+`cancel_consultation` stops a running job, its peer and the peer's child processes, and removes a pinned checkout. Each
+server sees only the jobs of the peers it exposes.
 
 Each job runs in its own process, so it outlives a restart of the MCP server or the calling app, and a later server
 reads its result. The runner deletes the request holding the prompt and context after trying to read it. The reply is kept as
@@ -219,16 +204,11 @@ which no consultation can continue:
 
 A thread is readable only when its recorded working directory belongs to the same git repository as
 `working_directory`, its linked worktrees included; a submodule is a repository of its own. A thread whose worktree
-has since been deleted is not readable. A
-folder whose `.git` points at a git directory that does not record it back, as git does for its own worktrees and
-submodules, belongs to no repository here. The read checks this
-again on the same open file it reads the messages from, and refuses a file that changes while it is read, after one
-more try. For Claude Code, replies, listed titles and exact-name selection use the main session's current stay in
-the repository. After a rewind, replies follow the active branch. The reader looks back up to 32 MiB for the
-main session's working directory and active branch links. It refuses a session when those records cannot establish
-its directory or resolve a branch gap. Only agent messages come back, never prompts, tool calls, tool output or
-reasoning, up to 24,000 characters. `latest_turn`
-gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut
+has since been deleted is not readable. [HOW-IT-WORKS](HOW-IT-WORKS.md#thread-reading) says how a read checks this and
+which part of a Claude Code session counts;
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-the-bridge-enforces) says how far
+that scoping goes. Only agent messages come back, never prompts, tool calls, tool output or reasoning, up to 24,000
+characters. `latest_turn` gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut
 off at its output limit counts as `completed` and a refusal as `failed`. For an unfinished turn, `liveness` is `abandoned` when
 Codex keeps no writer-lock file for the thread, and `unknown` otherwise: the listing's `writer_lock_file` usually means
 an app holds the thread, but a crash can leave the file behind, and Claude Code sessions record neither. Codex lists
@@ -249,29 +229,27 @@ uv --directory /absolute/path/plugins/reweigh run --locked --no-project --no-con
 A history the reader does not know how to parse is refused with a reason. A Codex rollout it cannot place in a
 repository, or a thread with more than one rollout file, is left out of the listing and reads like a missing thread; the
 listing's `unsupported_threads_machine_wide` counts the threads whose rollouts are duplicated, unsupported or
-unreadable, across all of `CODEX_HOME`, not only this repository's. A single supported rollout recorded in another
-repository, a deleted worktree, a folder outside any repository, or one whose `.git` does not point back is left out
-uncounted. A history folder the reader cannot list may hold threads of this repository; the listing's
-`unreadable_history_directories_machine_wide` counts such folders across the whole history.
+unreadable, across all of `CODEX_HOME`, not only this repository's. A single supported rollout whose recorded directory
+does not place it in this repository, a deleted worktree included, is left out uncounted. A history folder the reader
+cannot list may hold threads of this repository; the listing's `unreadable_history_directories_machine_wide` counts
+such folders across the whole history.
 
 ## Runtime boundaries
 
 Claude runs as `claude -p` with `Read`, `Glob`, `Grep`, `WebSearch` and, unless `REWEIGH_SUBAGENTS=0`, `Skill`
 and `Agent`, in `dontAsk` mode, and loads only the user's own settings (`--setting-sources user`), so a consulted
-repository's `.claude/settings.json` cannot run commands; its `CLAUDE.md` loads through `--add-dir`. It reads inside the
-consulted directory, any `extra_directories`, Claude Code's own temporary folder, and wherever the user's own settings
-add a directory or allow a read; a read anywhere else, such as the home folder, is denied. A web search sends its query
-to Anthropic.
+repository's `.claude/settings.json` cannot run commands; its `CLAUDE.md` loads through `--add-dir`. A read outside the
+places SECURITY.md lists, such as the home folder, is denied. A web search sends its query to Anthropic.
 
 Codex runs as `codex exec` in its read-only sandbox, without the user's config or "always allow" rules, and its
-commands see only the core environment, so tokens in the user's environment do not reach them. It can read any file the
-user can read. Saved Codex authentication and project instructions still load; user-level integrations and model
-preferences do not, so choose a model per call with `model`, or set `REWEIGH_CODEX_MODEL`. Managed requirements
-still apply and may refuse the consultation configuration.
+commands see only the core environment, so tokens in the user's environment do not reach them. Saved Codex
+authentication and project instructions still load; user-level integrations and model preferences do not, so choose a
+model per call with `model`, or set `REWEIGH_CODEX_MODEL`. Managed requirements still apply and may refuse the
+consultation configuration.
 
 Whatever a peer reads goes to its model provider, and each peer CLI keeps its own authentication, logs and transcript
-outside the project. The full list of what the bridge enforces, and what it does not, is in
-[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md).
+outside the project. Where each peer can read, and the full list of what the bridge enforces and what it does not, are
+in [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md).
 
 Claude consultations are saved as CLI sessions for the supplied project and named `reweigh <conversation_id>`.
 They remain resumable by their Claude session ID. The [Claude session documentation][claude-sessions] excludes print-mode
@@ -288,7 +266,7 @@ visibility. Bridge follow-ups should use the bridge conversation ID so the consu
 | `REWEIGH_STATE_DIR` | Overrides the private state directory (conversation records and locks, `jobs/`, `worktrees/`); must be an absolute path. |
 | `XDG_STATE_HOME` | When set to an absolute path, bridge state lives at `$XDG_STATE_HOME/reweigh`; otherwise at `~/.local/state/reweigh`. |
 | `REWEIGH_CLAUDE_BIN` | Claude Code executable; defaults to `claude` on `PATH`. |
-| `REWEIGH_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI bundled with ChatGPT.app. A set value that does not resolve is an error, not a fallback. |
+| `REWEIGH_CODEX_BIN` | Codex executable; defaults to `codex` on `PATH`, then on macOS the CLI ChatGPT.app bundles at `Contents/Resources/codex-cli/bin/codex`, in `/Applications` or `~/Applications`. A set value that does not resolve is an error, not a fallback. |
 | `REWEIGH_CODEX_MODEL` | Optional default Codex model; a per-call `model` overrides it; otherwise the CLI default. |
 | `REWEIGH_CODEX_REASONING_EFFORT` | Optional Codex reasoning effort, such as `high` or `xhigh`, passed as `model_reasoning_effort`; a per-call `reasoning_effort` overrides it. The catalogue check is described under [Consultation requests](#consultation-requests). |
 | `REWEIGH_CLAUDE_MODEL` | Optional default Claude model, such as `opus`, passed as `--model`; a per-call `model` overrides it; otherwise Claude Code's settings. Claude Code itself refuses a model it does not know. |
@@ -317,17 +295,15 @@ and lock file. Orphan lock files can be removed while those servers are stopped.
 is running: a process can retain a lock on an unlinked file while another process creates and locks its replacement.
 Removing bridge state does not delete the peer CLI's transcript; manage those histories through the respective CLI.
 
-A background job's files, including its reply, stay under `jobs/` until a later background start removes them, at the
-earliest seven days after the job finished; a job whose files cannot be read is removed seven days after its last
-change. A pinned consultation's checkout under `worktrees/` exists only while it runs. If the server is killed mid-run,
-the next consultation removes the leftover, and git's record of it, once no consultation holds that conversation.
+A background job's files stay under `jobs/` for as long as
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-is-kept-and-for-how-long) says. A
+pinned consultation's checkout under `worktrees/` exists only while it runs. If the server is killed mid-run, the next
+consultation removes the leftover, and git's record of it, once no consultation holds that conversation.
 
 ## Verification
 
 From a checkout of the repository, at its root, install the locked dependencies into a virtual environment, then run
-the bridge's tests and the developer tools' tests, before each commit. CI runs the same commands on Linux with Python
-3.11 for a pull request, and on macOS and Linux with Python 3.11 and 3.15 when started by hand on a release commit
-before it is tagged; the `v*` tag's run checks only that the tag names the plugin's version
+the bridge's tests and the developer tools' tests, before each commit. CI runs the same commands
 (`.github/workflows/tests.yml`):
 
 ```sh
@@ -358,7 +334,7 @@ The tests use simulated peer executables, synthetic thread histories and tempora
 no real history or user settings. The contract tests also run the installed Codex and Claude Code, each in a temporary
 home, so machine-wide configuration such as `/etc/codex/config.toml` still applies to them.
 [ADR 0002](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0002-test-architecture.md) sets the rules
-a change to the tests follows.
+a change to the tests follows, and says when CI runs them and on which platforms.
 
 The adapters follow the official [Claude headless interface](https://code.claude.com/docs/en/headless) and
 [Codex non-interactive interface](https://developers.openai.com/codex/noninteractive).
