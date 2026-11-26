@@ -31,10 +31,8 @@ line runs.
   nothing; and no inherited `GIT_*` variable reaches the bridge's git. Removing the checkout touches no other worktree
   of the repository. This assumes the repository's configuration does not change while the checkout is made. Pinning
   writes a temporary worktree record under `worktrees/` in the repository's common git directory (`git rev-parse
-  --git-common-dir`), removed with the checkout, and is refused in a folder whose `.git` points at a git directory that
-  does not point back, or whose `worktrees/` registry exists and is
-  not a real folder inside it. A repository whose objects come from elsewhere, through `objects/info/alternates` or a
-  link, can still show the peer another repository's files at a commit both share.
+  --git-common-dir`), removed with the checkout. A repository whose objects come from elsewhere, through
+  `objects/info/alternates` or a link, can still show the peer another repository's files at a commit both share.
 - **Nothing runs from the consulted directory by name.** The peer is found, and launched with, a `PATH` of absolute
   entries only, so a file in the repository named like a command never runs in place of it through a relative entry.
   An absolute entry that points into the repository is the user's own setting and is kept.
@@ -48,10 +46,7 @@ line runs.
 - **Thread history is scoped to the requested repository.** Each read attempt checks recorded working directories again
   against the repository resolved at the start of the request. A Claude sidechain cannot change the main session's
   repository. A read scoped to this repository answers alike for another repository's thread, a history that cannot be
-  placed in a repository, and a missing one; only the listing's two machine-wide counts span all histories. A folder
-  whose `.git` points at a git directory that does not point back belongs to no repository. So do a repository made
-  with `git init --separate-git-dir`, whose git directory records no working tree, and one whose `.git` is a symlink:
-  thread reads and pinning refuse both.
+  placed in a repository, and a missing one; only the listing's two machine-wide counts span all histories.
 - **History filenames are checked against the app's records.** The bridge opens only regular files and follows
   no symlinks below the configured app home. A history's recorded session ID must match the filename.
 - **The tools' read-only hint.** Only the list, read and get tools are annotated read-only, so a host that skips
@@ -77,6 +72,11 @@ line runs.
 - **Codex threads continued elsewhere.** A Codex thread is placed in a repository by the working directory its session
   started in. Turns it later ran in another directory, for example after resuming it elsewhere, are returned with it.
   This is one reason the thread tools are off unless `REWEIGH_THREADS=1`.
+- **A folder whose `.git` leads elsewhere.** The bridge takes git's word for the repository a folder belongs to. A
+  folder whose `.git` points at another repository's git directory, as one unpacked from an archive can, is treated as
+  that repository: the thread tools show that repository's threads, and pinning registers its temporary checkout
+  there, as a plain git command run in that folder would. Pinning also follows a `worktrees/` entry in the git
+  directory that leads outside it.
 - **The lead agent.** A lead agent can route any question it likes through a peer, including one that reads files its
   own rules would deny it, and can list another repository's threads by naming its directory.
 - **Tokens in the environment.** Commands Codex runs see only the core environment, but both peer CLIs inherit the

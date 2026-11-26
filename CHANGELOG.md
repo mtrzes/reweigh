@@ -10,6 +10,10 @@
   with its reply. In Codex, add the plugin again after updating; a server registered by hand needs
   `tool_timeout_sec = 4200` in its `config.toml` section. In Claude Code, raise a `MCP_TOOL_TIMEOUT=3900000` you
   launch with to `4200000`.
+- The bridge no longer checks that a folder's `.git` and its git directory point at each other, or that the
+  repository's `worktrees/` registry is a real folder inside it: it takes git's word for the repository a folder
+  belongs to, and `SECURITY.md` states what that leaves open. A repository made with `git init --separate-git-dir`,
+  and one whose `.git` is a symlink, are read and pinned again.
 
 ## 1.0.0-beta.3
 
