@@ -10,21 +10,12 @@
 
 ## 1.0.0-beta.3
 
-- peer-bridge is now reweigh, and the old names are not read any more. To move from 1.0.0-beta.2:
-  - Install `reweigh@reweigh` from the `mtrzes/reweigh` marketplace in Claude Code and in Codex, then remove
-    `peer-bridge@peer-bridge` and its marketplace. In Claude Code the plugin's tools are now
-    `mcp__plugin_reweigh_reweigh__*`; update any permission rule that names the old prefix, and for any other
-    registration, the tool names your host shows.
-  - Rename each `PEER_BRIDGE_*` setting to `REWEIGH_*` in the environment the apps start from.
-  - A server registered by hand moves too: the script is now at `plugins/reweigh/scripts/bridge.py`. In Codex, remove
-    `[mcp_servers.peer-bridge]`, register the server again as the plugin README's manual Codex setup describes (the
-    `codex mcp add reweigh` command, both timeouts and the `env_vars` list), and restart Codex. Saved `bridge.py` commands need the new path as well.
-  - State now lives in `reweigh/` under `XDG_STATE_HOME` or `~/.local/state`. To keep earlier conversations and jobs,
-    set `REWEIGH_STATE_DIR` to the old `peer-bridge/` folder.
-  - A test checks that the marketplaces, plugins, MCP server keys and the server's handshake share one name.
-- CI runs both suites on Linux with Python 3.11 for each pull request, and on macOS and Linux with Python 3.11 and 3.15
-  when started by hand on a release commit. A `v*` tag's run checks that the tag names the plugin's version. The run
-  started by hand also installs the newest Codex and Claude Code for the contract tests.
+- peer-bridge is now reweigh, and the old names are not read any more. To move from 1.0.0-beta.2, install
+  `reweigh@reweigh` from the `mtrzes/reweigh` marketplace in each app and remove the old plugin; rename each
+  `PEER_BRIDGE_*` setting to `REWEIGH_*` and the tool prefix in permission rules to `mcp__plugin_reweigh_reweigh__*`;
+  register a Codex server added by hand again as the plugin README's manual Codex setup describes (the script is now at
+  `plugins/reweigh/scripts/bridge.py`, and Codex forwards only the variables its `env_vars` list names), then restart
+  Codex; and set `REWEIGH_STATE_DIR` to the old `peer-bridge/` state folder to keep earlier conversations and jobs.
 - Both plugin launchers and the README's commands run `uv --directory <plugin root> run --locked`. `uv` no longer
   picks up a `.venv` Python from the folder the app starts in (Claude Code ignores a plugin server's `cwd`), and a
   lock file that no longer matches the script stops the server instead of resolving from the package index.
@@ -73,7 +64,6 @@ Hardening from architecture, security and implementation reviews of 1.0.0-beta.1
   stay in the repository, follow its active branch, refuse a history whose recorded ID does not match its file, and
   bound their scans.
 - Codex replies containing U+2028 or other Unicode line separators no longer fail to parse.
-- CI runs the unit tests on macOS and Linux with Python 3.11 to 3.13.
 
 ## 1.0.0-beta.1
 

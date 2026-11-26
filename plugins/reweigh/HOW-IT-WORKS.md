@@ -72,32 +72,29 @@ flowchart TB
   sandbox. Neither peer can start another consultation.
   [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md) lists what each peer can read,
   the one known write a sub-agent can make, and what the bridge does not cover.
-- **Where the two peers differ.** Claude applies the user's Claude settings and allow rules; Codex ignores the user's
-  config.toml and command rules, since an allowed command runs outside its sandbox. Codex loads the repository's skills
-  and can run read-only commands; Claude loads the user's own skills and the repository's CLAUDE.md, not its skills,
-  and has no shell, since Claude Code's sandbox cannot keep a command from writing. Codex's plugins stay off. Where
+- **Where the two peers differ.** Codex ignores the user's command rules, since an allowed command runs outside its
+  sandbox, runs read-only commands and loads the repository's skills; Claude keeps the user's own allow rules and
+  skills, not the repository's, and has no shell, since Claude Code's sandbox cannot keep a command from writing. Where
   each reads is in
   [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-it-does-not-protect-against).
 - **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`. When Codex's catalogue is
   readable, a Codex model it does not list, or an effort its model does not list, is refused before Codex starts; the
   [README](README.md#consultation-requests) says when the choice goes unchecked.
 - **A lost restriction refuses the call before the peer starts.** `preflight.py` runs Codex in an empty home with only
-  `PATH` and `HOME`, under the consultation's guard and within its timeout. Each disabled feature must be listed and
-  off; each restricting `-c` key must refuse a wrong-type value, as Codex does for a key it knows; and Codex must
-  accept the command's top-level options. A lost name refuses the call. A check that cannot tell adds `warnings` to a
-  successful result. The command is never changed. The `exec` options are not checked: Codex refuses one it does not
-  know, so the consultation fails. Claude Code is checked only by the contract tests.
+  `PATH`, `HOME` and `CODEX_HOME`, under the consultation's guard and within its timeout. Each disabled feature must be
+  listed and off, each restricting `-c` key must refuse a wrong-type value, and Codex must accept the command's
+  top-level options; the `exec` options are not checked, since Codex refuses one it does not know. A lost name refuses
+  the call, a check that cannot tell adds `warnings` to a successful result, and the command is never changed. Claude
+  Code is checked only by the contract tests.
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the group and stops all of it
-  when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL; sign-in probes and
-  git commands run under a guard too. Each guard holds the conversation's lock until its group has stopped. The git
-  command that checks a `seed_thread`'s repository runs before the conversation opens, unguarded. A descendant that
-  starts its own session or group is not stopped.
-- **A pinned checkout is prepared within one budget.** The git commands that prepare it, including removing a checkout
-  an earlier run left in its place, share 300 seconds. Removing it afterwards has 120 seconds; a checkout it cannot
-  remove is left for a later sweep, and the consultation's outcome stands. The peer's timeout starts once the checkout
-  is ready. Reading a `seed_thread`, and sweeping checkouts left by runs that died (120 seconds each), come first.
-  With each guard's stop and the `.git` probe, the timed steps of a pinned call take at most its timeout plus 445
-  seconds; the seed read, the sweep and deleting a folder git does not record are not timed.
+  when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL. The git command
+  that checks a `seed_thread`'s repository runs before the conversation opens, unguarded.
+  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md) says what else runs under a guard
+  and what escapes one.
+- **A pinned checkout is prepared and removed within budgets of its own**, set in `scripts/bridge.py`. The peer's
+  timeout starts once the checkout is ready; a checkout that cannot be removed is left for a later sweep, and the
+  consultation's outcome stands. The timed steps of a pinned call take at most its timeout plus 445 seconds; reading a
+  `seed_thread`, sweeping checkouts left by runs that died and deleting a folder git does not record are not timed.
 - **Only the reply or a fixed message comes back.** The CLI's own output never reaches the caller, and a failure is
   given a cause only when an exact fact establishes it, such as `loggedIn: false` or a writer-lock file. Codex events
   are separated by LF, so Unicode line separators inside a reply are preserved.
@@ -133,13 +130,10 @@ flowchart LR
 A job lives in its own folder under the state directory and survives an MCP server restart. Whether a runner is alive
 is read from the lock it holds, never from a process ID. A job is stored as `lost` when a read, a cancellation or a
 claim finds its runner gone; a stored outcome, `lost` included, is final. Cancelling settles a job no runner has
-claimed, marks a running one, and leaves an existing outcome as it is. The runner deletes the request once read; a
-request it cannot read is deleted and the job `failed`. A start whose first status read finds the lock busy reports
-the job `queued`. A CLI `start` that is interrupted, or cannot read its job once the runner is launched, tries to
-cancel the job, since the caller never learns its ID; if that fails, the error names the ID. A status read or
-cancellation waits at most one second for the job's state lock, then reports the job busy; the runner still answers
-SIGTERM and SIGHUP while it waits, and cleanup skips a job whose lock is held. The locking model is in
-`scripts/jobs.py`; how long a finished job is kept, in
+claimed, marks a running one, and leaves an existing outcome as it is. A status read or cancellation waits at most one
+second for the job's state lock, then reports the job busy. The locking model, and what a start does when it is
+interrupted or finds the lock busy, are in `scripts/jobs.py`; what becomes of a job's request, and how long a finished
+job is kept, in
 [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-is-kept-and-for-how-long).
 
 ## Thread reading
@@ -160,9 +154,11 @@ unfinished turn and no messages. A session whose branch links are malformed is l
 refused; a gap that cannot be resolved within the recent history leaves no title and refuses a read that needs the
 records beyond it. A Codex read refuses malformed turn and message fields, and a Claude read refuses prompt text or a
 stop reason of the wrong type; any other failure inside the reader is a reader fault, not a damaged file. Message
-phases are the recorded `commentary` or `final_answer` tokens, or null. The reader refuses windows of more than
-131,072 complete lines, uses up to 8 MiB for a Claude session's start, the Codex name index or a compressed rollout's
-header, and allows a compressed rollout 256 MiB stored and 2 GiB decoded.
+phases are the recorded `commentary` or `final_answer` tokens, or null. A plain history of any size is read from its
+end, looking back no further than `MAX_TAIL_BYTES`, and a Claude session's start, the Codex name index and a compressed
+rollout's header are read within `MAX_METADATA_BYTES`; a compressed rollout over `MAX_COMPRESSED_BYTES` stored or
+`MAX_DECOMPRESSED_BYTES` decoded, and a tail window of more than `MAX_TAIL_RECORDS` complete lines, are refused. The
+constants are in `scripts/history_capture.py` and `scripts/thread_parsing.py`.
 
 The bridge never writes into the other app's sessions. An agent never reaches the other app by operating its desktop
 app; it puts a handoff in its own reply, which the other session reads with `read_codex_thread` or
