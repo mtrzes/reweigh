@@ -1,11 +1,11 @@
 {
-  "cli_version": "codex-cli 0.169.1",
+  "cli_version": "codex-cli 0.171.0-alpha.13",
   "exit_status": 0,
   "stdout": [
     "{\"type\": \"thread.started\", \"thread_id\": \"00000000-0000-0000-0000-000000000007\"}",
     "{\"type\": \"turn.started\"}",
     "{\"type\": \"item.completed\", \"item\": {\"id\": \"TEXT-27\", \"type\": \"agent_message\", \"text\": \"REWEIGH-CAPTURE-OK\"}}",
-    "{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 30532, \"cached_input_tokens\": 28416, \"cache_write_input_tokens\": 0, \"output_tokens\": 24, \"reasoning_output_tokens\": 0}}",
+    "{\"type\": \"turn.completed\", \"usage\": {\"input_tokens\": 30924, \"cached_input_tokens\": 27392, \"cache_write_input_tokens\": 0, \"output_tokens\": 24, \"reasoning_output_tokens\": 0}}",
     ""
   ],
   "stderr": [

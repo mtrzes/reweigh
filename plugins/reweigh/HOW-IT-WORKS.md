@@ -70,13 +70,13 @@ flowchart TB
 - **The peer only reads.** Claude runs as `claude -p` with the read and search tools the
   [README](README.md#runtime-boundaries) lists, and the repository's CLAUDE.md; Codex as `codex exec` in its read-only
   sandbox. Neither peer can start another consultation.
-  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md) lists what each peer can read,
+  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md) lists what each peer can read,
   the one known write a sub-agent can make, and what the bridge does not cover.
 - **Where the two peers differ.** Codex ignores the user's command rules, since an allowed command runs outside its
   sandbox, runs read-only commands and loads the repository's skills; Claude keeps the user's own allow rules and
   skills, not the repository's, and has no shell, since Claude Code's sandbox cannot keep a command from writing. Where
   each reads is in
-  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-it-does-not-protect-against).
+  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md#what-it-does-not-protect-against).
 - **The model is chosen per call.** Either peer takes `model` and `reasoning_effort`, and the peer's CLI decides
   whether it accepts them; `list_codex_models` gives the values Codex's catalogue lists.
 - **A lost restriction refuses the call before the peer starts.** `preflight.py` runs Codex in an empty home with only
@@ -88,7 +88,7 @@ flowchart TB
 - **The peer's process group never outlives the consultation.** `peer_guard.py` leads the group and stops all of it
   when the consultation ends, times out or is cancelled, and when the bridge dies, even by SIGKILL. The git command
   that checks a `seed_thread`'s repository runs before the conversation opens, unguarded.
-  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md) says what else runs under a guard
+  [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md) says what else runs under a guard
   and what escapes one.
 - **A pinned checkout is prepared and removed within budgets of its own**, set in `scripts/bridge.py`. The peer's
   timeout starts once the checkout is ready; a checkout that cannot be removed is left for a later sweep, and the
@@ -136,7 +136,7 @@ that read returns cancels the job, if it has published one; if another process h
 than that second, the cancellation gives up, and the job runs to its end or its timeout with nothing reporting its ID.
 If the runner cannot be launched, the start cancels the job, or names it in the error when the cancellation fails too.
 The locking model is in `scripts/jobs.py`; what becomes of a job's request, and how long a finished job is kept, in
-[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-is-kept-and-for-how-long).
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md#what-is-kept-and-for-how-long).
 
 ## Thread reading
 
@@ -167,10 +167,10 @@ app; it puts a handoff in its own reply, which the other session reads with `rea
 `read_claude_thread`. To split work, the operator
 starts the other app in its own worktree (`claude --worktree`, `codex --worktree`), and the lead follows it with
 `read_*_thread` and reviews its branch with `ref`. No peer ever edits;
-[ADR 0003](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0003-peers-only-read.md) records why.
+[ADR 0003](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/docs/adr/0003-peers-only-read.md) records why.
 
 Codex's session files are an internal format;
-[ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0001-codex-thread-reader-source.md) records
+[ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/docs/adr/0001-codex-thread-reader-source.md) records
 why the bridge reads them and not Codex's app-server API.
 
 ## Scope

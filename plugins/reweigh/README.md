@@ -110,7 +110,7 @@ resumes.
 A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The message names
 a cause only when an exact field or a check establishes it, never from the CLI's or the model's text; otherwise it
 is generic.
-[ADR 0004](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0004-causes-from-exact-facts.md) lists the
+[ADR 0004](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/docs/adr/0004-causes-from-exact-facts.md) lists the
 causes and the fact behind each.
 
 ### Pinned refs
@@ -202,7 +202,7 @@ A thread is readable only when its recorded working directory belongs to the sam
 `working_directory`, its linked worktrees included; a submodule is a repository of its own. A thread whose worktree
 has since been deleted is not readable. [HOW-IT-WORKS](HOW-IT-WORKS.md#thread-reading) says how a read checks this and
 which part of a Claude Code session counts;
-[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-the-bridge-enforces) says how far
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md#what-the-bridge-enforces) says how far
 that scoping goes. Only agent messages come back, never prompts, tool calls, tool output or reasoning, up to 24,000
 characters. `latest_turn` gives the turn's `status` (`completed`, `failed`, `interrupted` or `inProgress`) and `finished`; a Claude Code reply cut
 off at its output limit counts as `completed` and a refusal as `failed`. For an unfinished turn, `liveness` is `abandoned` when
@@ -245,7 +245,7 @@ consultation configuration.
 
 Whatever a peer reads goes to its model provider, and each peer CLI keeps its own authentication, logs and transcript
 outside the project. Where each peer can read, and the full list of what the bridge enforces and what it does not, are
-in [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md).
+in [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md).
 
 Claude consultations are saved as CLI sessions for the supplied project and named `reweigh <conversation_id>`.
 They remain resumable by their Claude session ID. The [Claude session documentation][claude-sessions] excludes print-mode
@@ -292,7 +292,7 @@ is running: a process can retain a lock on an unlinked file while another proces
 Removing bridge state does not delete the peer CLI's transcript; manage those histories through the respective CLI.
 
 A background job's files stay under `jobs/` for as long as
-[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-is-kept-and-for-how-long) says. A
+[SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/SECURITY.md#what-is-kept-and-for-how-long) says. A
 pinned consultation's checkout under `worktrees/` exists only while it runs. If the server is killed mid-run, the next
 consultation removes the leftover, and git's record of it, once no consultation holds that conversation.
 
@@ -329,7 +329,7 @@ commit, and CI runs only those.
 The tests use simulated peer executables, synthetic thread histories and temporary state; they call no model and read
 no real history or user settings. The contract tests also run the installed Codex and Claude Code, each in a temporary
 home, so machine-wide configuration such as `/etc/codex/config.toml` still applies to them.
-[ADR 0002](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0002-test-architecture.md) sets the rules
+[ADR 0002](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.4/docs/adr/0002-test-architecture.md) sets the rules
 a change to the tests follows, and says when CI runs them and on which platforms.
 
 The adapters follow the official [Claude headless interface](https://code.claude.com/docs/en/headless) and
