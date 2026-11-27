@@ -55,7 +55,8 @@ def drain(descriptor):
 
 def release_standard_streams():
     """Let go of the peer's pipes, so only the peer holds them: the bridge then sees a broken input pipe or the end
-    of output exactly when the peer, not the guard, stops using them."""
+    of output exactly when the peer, not the guard, stops using them. Input is let go before the error stream: the
+    test of a peer that cannot start waits for the end of errors to know the input is closed."""
     null = os.open(os.devnull, os.O_RDWR)
     for descriptor in (0, 1, 2):
         os.dup2(null, descriptor)

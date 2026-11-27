@@ -667,14 +667,12 @@ async def pinned_checkout(scope, directory, ref):
 
 
 class Bridge:
-    def __init__(self, store=None, timeout=None):
-        self.store = store or SessionStore(state_directory())
+    def __init__(self):
+        self.store = SessionStore(state_directory())
         self.readers = {"claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource())}
-        self.timeout = consultation_timeout(os.environ, timeout)
+        self.timeout = consultation_timeout(os.environ)
         self.jobs = JobStore(self.store.directory)
         self.spawn = spawn_runner
-        # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
-        self.probe = FailureProbe
         # Checks, before a peer starts, that its CLI still knows the names the command depends on.
         self.preflight = preflight
 
@@ -812,7 +810,7 @@ class Bridge:
                     raise failure
                 backend_session_id, reply = consultation_outcome(provider, return_code, output)
             except PeerFailure as exc:
-                probe = self.probe(provider, conversation, peer, self.readers[provider].source)
+                probe = FailureProbe(provider, conversation, peer, self.readers[provider].source)
                 facts = await self.failure_facts(provider, conversation.record, output, errors, probe,
                                                  chose_model=bool(model or reasoning_effort))
                 raise BridgeError(failure_message(provider, facts, str(exc))) from exc
@@ -964,7 +962,8 @@ def create_server(peer):
         @server.tool(annotations=reading)
         async def list_codex_models() -> dict[str, Any]:
             """Experimental: list the models this Codex account offers, from Codex's own catalogue, with each one's
-            reasoning efforts and default: the values ask_codex's model and reasoning_effort accept."""
+            reasoning efforts and default. ask_codex passes any other model or reasoning_effort on, and Codex decides
+            whether it accepts it."""
             return await asyncio.to_thread(models_result)
 
         @server.tool(annotations=reading)

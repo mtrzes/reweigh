@@ -100,10 +100,10 @@ def stop(process):
     process.wait()
 
 
-def run(start, top, workers, deadline):
+def run(start, workers, deadline):
     loader = unittest.TestLoader()
-    sys.path.insert(0, top)
-    tests = list(discovered(loader.discover(start, top_level_dir=top)))
+    sys.path.insert(0, start)
+    tests = list(discovered(loader.discover(start, top_level_dir=start)))
     if loader.errors:
         print("Discovery failed:", *loader.errors, sep="\n", file=sys.stderr)
         return 1
@@ -117,7 +117,7 @@ def run(start, top, workers, deadline):
                 report, log = (os.path.join(folder, f"{number}.{kind}") for kind in ("jsonl", "log"))
                 with open(log, "w", encoding="utf-8") as written:  # a file, so a chatty worker never blocks on a pipe
                     process = subprocess.Popen(
-                        [sys.executable, os.path.abspath(__file__), "--worker", top, report], stdin=subprocess.PIPE,
+                        [sys.executable, os.path.abspath(__file__), "--worker", start, report], stdin=subprocess.PIPE,
                         stdout=written, stderr=subprocess.STDOUT, text=True, start_new_session=True)
                 process.stdin.write(json.dumps(shard))
                 process.stdin.close()
@@ -186,7 +186,7 @@ def main(argv):
     if arguments.workers < 1:
         parser.error("--workers must be at least 1")
     start = os.path.abspath(arguments.start_directory)
-    return run(start, start, arguments.workers, arguments.deadline)
+    return run(start, arguments.workers, arguments.deadline)
 
 
 if __name__ == "__main__":
