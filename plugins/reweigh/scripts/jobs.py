@@ -57,12 +57,10 @@ STAGING_RETENTION_SECONDS = 3600
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("bridge.py")
 
 
-# The request a job's runner consults with, as start writes it to request.json. model, reasoning_effort and
-# extra_directories came later: a request written without them asks for none.
+# The request a job's runner consults with, as start writes it to request.json.
 REQUEST_TEXT_FIELDS = ("prompt", "working_directory", "context")
 REQUEST_OPTIONAL_FIELDS = ("conversation_id", "ref", "seed_thread", "model", "reasoning_effort")
 REQUEST_LIST_FIELDS = ("extra_directories",)
-REQUEST_ADDED_FIELDS = ("model", "reasoning_effort", "extra_directories")
 
 
 def job_request(provider, prompt, working_directory, context="", conversation_id=None, ref=None, seed_thread=None,
@@ -78,12 +76,11 @@ def read_job_request(saved):
     """The consultation's keyword arguments from a persisted request, or None when it is not one this bridge writes."""
     if not isinstance(saved, dict) or saved.get("provider") not in PROVIDERS:
         return None
-    saved = {key: None for key in REQUEST_ADDED_FIELDS} | saved
     if (any(not isinstance(saved.get(key), str) for key in REQUEST_TEXT_FIELDS)
             or any(key not in saved or not isinstance(saved[key], (str, type(None)))
                    for key in REQUEST_OPTIONAL_FIELDS)
-            or any(saved.get(key) is not None and (not isinstance(saved[key], list)
-                                                   or not all(isinstance(item, str) for item in saved[key]))
+            or any(key not in saved or saved[key] is not None and (
+                       not isinstance(saved[key], list) or not all(isinstance(item, str) for item in saved[key]))
                    for key in REQUEST_LIST_FIELDS)):
         return None
     return {key: saved[key] for key in ("provider", *REQUEST_TEXT_FIELDS, *REQUEST_OPTIONAL_FIELDS,

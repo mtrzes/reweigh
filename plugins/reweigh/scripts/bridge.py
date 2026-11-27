@@ -32,7 +32,7 @@ from consultation import (
     validate_session_id, with_seed,
 )
 from consultation import (
-    FINISHED_JOB_STATES, SIGN_IN_PROBES, catalogue_models, check_against_catalogue, check_choices,
+    FINISHED_JOB_STATES, SIGN_IN_PROBES, catalogue_models, check_choices,
     check_extra_directories, check_wait, failure_probes, history_presence, peer_choices,
 )
 from cleanup import run_to_completion
@@ -665,16 +665,14 @@ async def pinned_checkout(scope, directory, ref):
 
 
 class Bridge:
-    def __init__(self, store=None, timeout=None, readers=None, jobs=None, spawn=None, probe=None):
+    def __init__(self, store=None, timeout=None):
         self.store = store or SessionStore(state_directory())
-        self.readers = readers or {
-            "claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource()),
-        }
+        self.readers = {"claude": ThreadReader(ClaudeSessionsSource()), "codex": ThreadReader(CodexFilesSource())}
         self.timeout = consultation_timeout(os.environ, timeout)
-        self.jobs = jobs or JobStore(self.store.directory)
-        self.spawn = spawn or spawn_runner
+        self.jobs = JobStore(self.store.directory)
+        self.spawn = spawn_runner
         # Builds what diagnosis observes a failed consultation through: FailureProbe's arguments, or a test's fake.
-        self.probe = probe or FailureProbe
+        self.probe = FailureProbe
         # Checks, before a peer starts, that its CLI still knows the names the command depends on.
         self.preflight = preflight
 
@@ -689,9 +687,6 @@ class Bridge:
         if conversation_id:
             validate_session_id(conversation_id)
         model, reasoning_effort = check_choices(provider, model, reasoning_effort)
-        if provider == "codex":
-            # A model or effort Codex does not list would be ignored or refused only once Codex runs; refuse it now.
-            check_against_catalogue(codex_catalogue(), *peer_choices(provider, os.environ, model, reasoning_effort))
         extra = []
         for given in check_extra_directories(provider, extra_directories):
             try:
@@ -960,8 +955,7 @@ def create_server(peer):
             seed_thread names a Codex thread whose recent agent messages become context. model (such as
             gpt-6-astra) and reasoning_effort (such as low, medium, high or xhigh) choose what Codex runs for this
             call, over REWEIGH_CODEX_MODEL and REWEIGH_CODEX_REASONING_EFFORT. list_codex_models gives the
-            values Codex offers, and a value it does not list is refused before Codex starts. The reply names the
-            model and effort when one was chosen."""
+            values Codex offers. The reply names the model and effort when one was chosen."""
             return await bridge.consult("codex", prompt, working_directory, context, conversation_id, ref,
                                         seed_thread, model, reasoning_effort)
 

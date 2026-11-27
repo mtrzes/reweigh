@@ -33,26 +33,17 @@ LATER = consultation.JOB_RETENTION_SECONDS + 60
 class RequestFormatTests(unittest.TestCase):
     """The persisted request, written by start and read by the runner: pure, no files."""
 
-    def test_job_request_round_trips_and_reads_requests_written_before_model_choices(self):
+    def test_job_request_round_trips_and_another_shape_is_refused(self):
         written = jobs.job_request("claude", "Why?", Path("/project"), "", "", None, "Review", "opus", "max",
                                    (Path("/other"),))
         self.assertEqual(written, {"provider": "claude", "prompt": "Why?", "working_directory": "/project",
                                    "context": "", "conversation_id": None, "ref": None, "seed_thread": "Review",
                                    "model": "opus", "reasoning_effort": "max", "extra_directories": ["/other"]})
-        earlier = {key: value for key, value in written.items()
-                   if key not in {"model", "reasoning_effort", "extra_directories"}}
         for name, saved, expected in (
             ("written", written, written),
-            ("before model choices", earlier,
-             earlier | {"model": None, "reasoning_effort": None, "extra_directories": None}),
             ("no extra directories", written | {"extra_directories": None}, written | {"extra_directories": None}),
-            ("written before extra directories",
-             {"provider": "codex", "prompt": "Why?", "working_directory": "/project", "context": "",
-              "conversation_id": None, "ref": None, "seed_thread": None, "model": "gpt-6-astra",
-              "reasoning_effort": "xhigh"},
-             {"provider": "codex", "prompt": "Why?", "working_directory": "/project", "context": "",
-              "conversation_id": None, "ref": None, "seed_thread": None, "model": "gpt-6-astra",
-              "reasoning_effort": "xhigh", "extra_directories": None}),
+            ("missing extra directories",
+             {key: value for key, value in written.items() if key != "extra_directories"}, None),
             ("directory as text", written | {"extra_directories": "/other"}, None),
             ("number as directory", written | {"extra_directories": [1]}, None),
             ("extra field", written | {"later": 1}, written),

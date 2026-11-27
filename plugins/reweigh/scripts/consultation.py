@@ -173,7 +173,7 @@ def check_choices(provider, model=None, reasoning_effort=None):
 def catalogue_models(cache):
     """The models in Codex's own catalogue (models_cache.json) that Codex lists, with their reasoning efforts.
 
-    Only exact fields are read; a cache of another shape yields no models, and nothing is then checked against it.
+    Only exact fields are read; a cache of another shape yields no models.
     """
     entries = cache.get("models") if isinstance(cache, dict) else None
     models = []
@@ -188,19 +188,6 @@ def catalogue_models(cache):
         models.append({"model": entry["slug"], "reasoning_efforts": efforts,
                        "default_reasoning_effort": default if isinstance(default, str) else None})
     return models
-
-
-def check_against_catalogue(models, model=None, reasoning_effort=None):
-    """Refuse a model, or a model's reasoning effort, that Codex's catalogue does not list. Without a catalogue, or
-    without a named model to check an effort against, the choice goes to Codex unchecked."""
-    if not models or not model:
-        return
-    known = {entry["model"]: entry for entry in models}
-    if model not in known:
-        raise BridgeError(f"Codex lists no model {model}. Its models are: {', '.join(sorted(known))}.")
-    efforts = known[model]["reasoning_efforts"]
-    if reasoning_effort and efforts and reasoning_effort not in efforts:
-        raise BridgeError(f"{model} takes reasoning_effort {', '.join(efforts)}, not {reasoning_effort}.")
 
 
 def peer_choices(provider, environ, model=None, reasoning_effort=None):
@@ -538,16 +525,12 @@ def consultation_result(provider, conversation_id, reply, commit, model=None, re
 # Handoffs
 
 
-def checkout_root(depth):
-    """How the peer reaches the pinned checkout's root from a directory depth levels below it."""
-    return f"`{'/'.join(['..'] * depth)}`" if depth else "the current directory"
-
-
 def build_handoff(provider, prompt, context="", commit=None, depth=0):
     """The text the peer reads on stdin. depth is how far the consulted directory sits below a pinned checkout."""
     handoff = f"Question:\n{prompt}"
     if commit:
-        handoff = f"{PINNED_INSTRUCTIONS.format(commit=commit, root=checkout_root(depth))}\n\n{handoff}"
+        root = f"`{'/'.join(['..'] * depth)}`" if depth else "the current directory"
+        handoff = f"{PINNED_INSTRUCTIONS.format(commit=commit, root=root)}\n\n{handoff}"
     if provider == "codex":
         # Claude receives these instructions as an appended system prompt instead.
         handoff = f"{CONSULTATION_INSTRUCTIONS}\n\n{handoff}"

@@ -2,15 +2,14 @@
 
 - Status: Accepted
 - Enforced by: test_repository `test_both_manifests_and_the_newest_release_in_the_changelog_name_one_version`; test_jobs
-  `test_job_request_round_trips_and_reads_requests_written_before_model_choices`; test_core
+  `test_job_request_round_trips_and_another_shape_is_refused`; test_core
   `test_stored_records_and_outcomes_are_validated` and `test_resumed_record`; `.github/workflows/tests.yml` (the tag
   names the version, per ADR 0002); standing duty: a release runs the steps below in order
 
 ## Context
 Users install the plugin from this repository's marketplaces, or from another marketplace that pins a `v*` tag, and the
 installed copy holds only `plugins/reweigh/`. One user's state directory outlives each upgrade: conversation
-records, background jobs and their requests, written by whichever release ran them. Between releases, changes collect on
-`main`.
+records and background jobs, written by whichever release ran them. Between releases, changes collect on `main`.
 
 ## Decision
 - The two `plugin.json` files and the newest `CHANGELOG.md` release heading, `## <version>`, name one version; no
@@ -21,7 +20,8 @@ records, background jobs and their requests, written by whichever release ran th
   `## <version>`, run `dev/capture_cli_output.py` and commit the diff, run both suites locally, start CI by hand on
   that commit ([ADR 0002](0002-test-architecture.md)), and once it passes, tag that commit `v<version>`.
 - A field added to stored state gets a default when it is missing, so state an earlier release wrote stays readable;
-  today that covers `pinned_commit`, the result's optional fields, and a request's `model` and `reasoning_effort`.
+  today that covers `pinned_commit` and the result's optional fields. A job's request is not such state: the install
+  that writes it reads it within seconds, so a request missing a field is refused.
   Readers check the fields they use and ignore others; a missing or malformed field they need stops the resume or job
   with a fixed message, never a guess.
 - Only `plugins/reweigh/` ships. Techniques that work with any peer, such as review modes and prompts, live outside
