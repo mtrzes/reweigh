@@ -49,11 +49,8 @@ class ThreadUnavailable(Exception):
 class ThreadSummary:
     id: str
     name: str | None
-    cwd: str
     recency_at: float
     archived: bool = False
-    source_kind: str = ""
-    forked_from_id: str | None = None
     writer_lock_present: bool = False
     """The thread's writer-lock file exists. Only a hint that an app holds the thread: a crash can leave it behind."""
 
@@ -278,7 +275,7 @@ def parse_session_index(lines):
 
 
 def codex_main_thread(meta, identifier):
-    """Return (source, cwd, forked_from_id) for a Desktop or interactive CLI thread's session_meta, else None.
+    """Return (cwd, forked_from_id) for a Desktop or interactive CLI thread's session_meta, else None.
 
     Subagent and guardian threads record their source as an object; consultations record "exec".
     """
@@ -291,7 +288,7 @@ def codex_main_thread(meta, identifier):
     cwd = payload.get("cwd")
     if not isinstance(cwd, str):
         return None
-    return source, cwd, payload.get("forked_from_id")
+    return cwd, payload.get("forked_from_id")
 
 
 def codex_agent_message(item, turn_id):
@@ -586,12 +583,12 @@ def match_thread(threads, thread):
     return matches[0]
 
 
-def cap_messages(messages, budget=MAX_MESSAGE_CHARACTERS):
-    """Keep the newest text within budget characters, cutting the oldest kept message from its start.
+def cap_messages(messages):
+    """Keep the newest text within MAX_MESSAGE_CHARACTERS, cutting the oldest kept message from its start.
 
     Returns the kept messages, oldest first, and whether anything was cut or left out.
     """
-    kept, truncated = [], False
+    kept, truncated, budget = [], False, MAX_MESSAGE_CHARACTERS
     for message in reversed(messages):
         text = message.text
         if len(text) > budget:
