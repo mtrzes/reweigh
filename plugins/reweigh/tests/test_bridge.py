@@ -126,7 +126,8 @@ class ConsultationTests(BridgeTestCase):
         self.assertFalse([argument for argument in arguments if "project-peer" in argument])
         self.assertEqual(arguments[arguments.index("--model") + 1], "gpt-x")
         # A choice made for the call wins over the environment, and the reply says what ran.
-        # Besides the MCP wire test, the only test that fails when the reply does not name the chosen model.
+        # Besides the MCP wire test, the only test that fails when the bridge stops passing the chosen model to the
+        # reply; test_core holds the rule that a reply names it.
         with patch.dict(os.environ, settings):
             answer = await self.consult("codex", model="gpt-6-astra", reasoning_effort="xhigh")
         arguments = self.calls()[-1]["arguments"]
@@ -134,7 +135,8 @@ class ConsultationTests(BridgeTestCase):
         self.assertIn('model_reasoning_effort="xhigh"', arguments)
         self.assertEqual((answer["model"], answer["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
         calls = len(self.calls())
-        # The only test that fails when a Codex peer is given extra_directories.
+        # The only test that fails when the bridge stops checking a Codex request's extra_directories; test_core
+        # holds the rule that refuses them.
         with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
             await self.consult("codex", extra_directories=[str(self.root)])
         self.assertEqual(len(self.calls()), calls)
@@ -488,7 +490,7 @@ class ConsultationTests(BridgeTestCase):
     async def test_a_cancelled_sign_in_probe_is_stopped_before_the_cancellation_passes_on(self):
         # A failed run asks the CLI whether it is signed in; a job is reported cancelled only once that probe, and any
         # helper it started, has stopped.
-        with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "failure", "SIMULATED_PROBE_HANGS": "1"}):
+        with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "known_failure", "SIMULATED_PROBE_HANGS": "1"}):
             task = asyncio.create_task(self.consult())
             await eventually_async((self.root / "probe-child.pid").exists, "The sign-in probe did not start.")
             task.cancel()
@@ -809,7 +811,7 @@ class ConsultationTests(BridgeTestCase):
             ({"ref": first, "conversation_id": unpinned["conversation_id"]}, "not pinned to a ref"),
         )
         for arguments, expected in cases:
-            with self.subTest(expected=expected), self.assertRaisesRegex(bridge.BridgeError, expected):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(bridge.BridgeError, expected):
                 await self.consult(**arguments)
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual(len(self.registered_worktrees()), 1)

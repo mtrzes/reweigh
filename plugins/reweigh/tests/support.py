@@ -141,8 +141,8 @@ PEER_SOURCE = textwrap.dedent('''\
         sys.exit(0 if signed_in else 1)
     provider = "claude" if "--print" in arguments else "codex"
     mode = os.environ.get("SIMULATED_PEER_MODE", "success")
-    if mode not in {"success", "early_exit", "failure", "known_failure", "api_error", "error_result", "hang",
-                    "spawn_hang", "flood", "lingering_descendant", "changed_session"}:
+    if mode not in {"success", "early_exit", "known_failure", "api_error", "error_result", "hang", "spawn_hang",
+                    "flood", "lingering_descendant", "changed_session"}:
         print(f"unknown SIMULATED_PEER_MODE: {mode}", file=sys.stderr)  # a mistyped mode must not pass as success
         sys.exit(97)
     pids = Path(os.environ["SIMULATED_PEER_PID_DIR"])
@@ -171,10 +171,6 @@ PEER_SOURCE = textwrap.dedent('''\
                                    if name in os.environ),
             "head": head,
         }) + "\\n")
-    if mode == "failure":
-        print("PRIVATE BACKEND CONTEXT", file=sys.stderr)
-        print(prompt)
-        sys.exit(7)
     if mode == "known_failure":
         print("PRIVATE BACKEND CONTEXT", file=sys.stderr)
         print(os.environ.get("SIMULATED_FAILURE_TEXT", ""), file=sys.stderr)
@@ -259,9 +255,9 @@ class BridgeTestCase(unittest.IsolatedAsyncioTestCase):
             "CLAUDECODE": "test-parent-marker", "REWEIGH_THREADS": "1",
         })
         self.addCleanup(self.kill_recorded_processes)
-        self.store = bridge.SessionStore(self.state)
         # The pre-launch check is tested on its own; in-process consultations skip it, as each would add CLI runs.
-        self.client = bridge.Bridge(store=self.store, timeout=DEADLINE_SECONDS)
+        self.client = bridge.Bridge()
+        self.store = self.client.store
         self.client.preflight = no_preflight
 
     def kill_recorded_processes(self):

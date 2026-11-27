@@ -18,8 +18,8 @@ server, and sign in to each peer CLI with its normal login flow; on macOS the br
 ChatGPT.app bundles (`REWEIGH_CODEX_BIN` under [Configuration](#configuration)). The script declares its dependencies
 in its header and pins them in `scripts/bridge.py.lock`; `uv` installs them into a separate script environment.
 
-Live consultations and follow-ups were verified on macOS with Codex CLI `0.162.0-alpha.17.2` and Claude Code
-`2.1.286`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
+Live consultations and follow-ups were verified on macOS with Codex CLI `0.171.0-alpha.13` and Claude Code
+`2.1.326`; failure messages and compressed thread reading with Codex CLI `0.167.0-alpha.4.1` and Claude Code `2.1.309`.
 On Linux, only the test suites were run, in CI.
 
 ### Claude Code to Codex
@@ -108,12 +108,10 @@ canonical directory; it does not accept a peer CLI's raw session ID. A per-conve
 resumes.
 
 A failed consultation comes back as a fixed message; the CLI's own output never reaches the caller. The message names
-a cause only when an exact field or a check establishes it, never from the CLI's or the model's text: a thread held
-open elsewhere, a signed-out CLI, a conversation whose history is gone, or a model Claude Code does not know.
-Otherwise it is generic, and adds that the choice may be the cause when a Codex consultation chose a model or
-reasoning effort, per call or by environment.
-[ADR 0004](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0004-causes-from-exact-facts.md) says what
-counts as such a fact.
+a cause only when an exact field or a check establishes it, never from the CLI's or the model's text; otherwise it
+is generic.
+[ADR 0004](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0004-causes-from-exact-facts.md) lists the
+causes and the fact behind each.
 
 ### Pinned refs
 

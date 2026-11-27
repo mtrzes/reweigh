@@ -246,13 +246,12 @@ def state_directory(environ, home):
     return root / "reweigh"
 
 
-def consultation_timeout(environ, timeout=None):
-    """The consultation timeout in seconds: the given one, else REWEIGH_TIMEOUT_SECONDS, else the default."""
-    if timeout is None:
-        try:
-            timeout = int(environ.get("REWEIGH_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
-        except ValueError as exc:
-            raise BridgeError("Consultation timeout must be an integer number of seconds.") from exc
+def consultation_timeout(environ):
+    """The consultation timeout in seconds: REWEIGH_TIMEOUT_SECONDS, else the default."""
+    try:
+        timeout = int(environ.get("REWEIGH_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS)))
+    except ValueError as exc:
+        raise BridgeError("Consultation timeout must be an integer number of seconds.") from exc
     if not 0 < timeout <= MAX_TIMEOUT_SECONDS:
         raise BridgeError("Consultation timeout must be greater than zero and at most 3600 seconds.")
     return timeout

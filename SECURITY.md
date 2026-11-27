@@ -75,8 +75,9 @@ line runs.
 - **A folder whose `.git` leads elsewhere.** The bridge takes git's word for the repository a folder belongs to. A
   folder whose `.git` points at another repository's git directory, as one unpacked from an archive can, is treated as
   that repository: the thread tools show that repository's threads, and pinning registers its temporary checkout
-  there, as a plain git command run in that folder would. Pinning also follows a `worktrees/` entry in the git
-  directory that leads outside it.
+  there, as a plain git command run in that folder would. When that git directory names a working tree elsewhere
+  (`core.worktree`), as a submodule's does, the thread tools still read the folder as that repository, but pinning
+  refuses it. Pinning also follows a `worktrees/` entry in the git directory that leads outside it.
 - **The lead agent.** A lead agent can route any question it likes through a peer, including one that reads files its
   own rules would deny it, and can list another repository's threads by naming its directory.
 - **Tokens in the environment.** Commands Codex runs see only the core environment, but both peer CLIs inherit the
