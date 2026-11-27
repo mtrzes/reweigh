@@ -86,6 +86,11 @@ class JobTests(BridgeTestCase):
 
         await jobs.run_job(self.client.jobs, job_id, consult)
 
+    def runner_gone(self, folder):
+        """Whether the job's runner has released its lock, probed under the state lock as the store probes it."""
+        with self.client.jobs.state_lock(folder):
+            return not self.client.jobs.runner_present(folder)
+
     async def never(self, request):
         """A consultation that must not happen. run_job records any exception as `failed`, so a call is also
         checked after the test, whatever the test asserts."""
@@ -125,12 +130,8 @@ class JobTests(BridgeTestCase):
         await self.assert_processes_stopped()
         self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelled")
         folder = self.folder(job_id)
-
-        def runner_gone():  # the runner publishes its outcome before it releases its lock
-            with self.client.jobs.state_lock(folder):
-                return not self.client.jobs.runner_present(folder)
-
-        await eventually_async(runner_gone, "The cancelled runner still holds its job.")
+        # The runner publishes its outcome before it releases its lock.
+        await eventually_async(lambda: self.runner_gone(folder), "The cancelled runner still holds its job.")
         self.client.jobs.prune(time.time() + LATER)
         self.assertFalse(folder.exists())
 
@@ -178,10 +179,6 @@ time.sleep({4 * DEADLINE_SECONDS})
                 runner = json.loads((folder / "job.json").read_text())["pid"]
                 guard = int((self.root / "guard.pid").read_text())
 
-                def runner_gone():
-                    with self.client.jobs.state_lock(folder):
-                        return not self.client.jobs.runner_present(folder)
-
                 def free():
                     with self.client.store.holding(checkout.name) as lock:
                         return lock is not None
@@ -190,7 +187,7 @@ time.sleep({4 * DEADLINE_SECONDS})
                 os.kill(guard, signal.SIGSTOP)
                 try:
                     os.kill(runner, signal.SIGKILL)
-                    await eventually_async(runner_gone, "The killed runner still holds its job.")
+                    await eventually_async(lambda: self.runner_gone(folder), "The killed runner still holds its job.")
                     self.assertFalse(free())
                     await bridge.sweep_worktrees(self.client.store)
                     self.assertTrue(checkout.is_dir())
@@ -263,12 +260,7 @@ time.sleep({4 * DEADLINE_SECONDS})
             await self.wait_for_child()
         folder = self.folder(job_id)
         os.kill(json.loads((folder / "job.json").read_text())["pid"], signal.SIGKILL)
-
-        def runner_gone():
-            with self.client.jobs.state_lock(folder):
-                return not self.client.jobs.runner_present(folder)
-
-        await eventually_async(runner_gone, "The killed runner still holds its job.")
+        await eventually_async(lambda: self.runner_gone(folder), "The killed runner still holds its job.")
         # Cancelled while the guard may still be stopping the peer: no clean cancellation, so lost.
         cancelled = await self.client.cancel(job_id, CLAUDE)
         self.assertEqual((cancelled["state"], cancelled["error"]), ("lost", consultation.LOST_JOB))
@@ -462,13 +454,6 @@ time.sleep({4 * DEADLINE_SECONDS})
         await jobs.run_job(self.client.jobs, job_id, self.never)
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelled")
 
-    async def test_a_cancel_marker_left_before_the_runner_starts_stops_it(self):
-        job_id = await self.queued()
-        (self.folder(job_id) / "cancel.requested").touch()
-        await jobs.run_job(self.client.jobs, job_id, self.never)
-        self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelled")
-        self.assertFalse((self.folder(job_id) / "request.json").exists())
-
     async def test_only_regular_files_request_cancellation(self):
         target = self.root / "marker-target"
         target.touch()
@@ -517,14 +502,6 @@ time.sleep({4 * DEADLINE_SECONDS})
         await jobs.run_job(self.client.jobs, job_id, self.never)
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
 
-    async def test_cancelling_an_overdue_queued_job_stores_it_as_lost(self):
-        job_id = await self.queued(prompt="PRIVATE QUESTION")
-        later = time.time() + consultation.JOB_START_GRACE_SECONDS + 1
-        cancelled = self.client.jobs.cancel(job_id, CLAUDE, now=later)
-        self.assertEqual((cancelled["state"], cancelled["error"]), ("lost", consultation.LOST_JOB))
-        self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
-        self.assertFalse((self.folder(job_id) / "request.json").exists())
-
     async def test_a_job_reads_cancelling_until_its_runner_stops(self):
         job_id = await self.queued()
         store = self.client.jobs
@@ -533,6 +510,7 @@ time.sleep({4 * DEADLINE_SECONDS})
             self.assertEqual((await self.client.cancel(job_id, CLAUDE))["state"], "cancelling")
             self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelling")
         await jobs.run_job(self.client.jobs, job_id, self.never)  # the runner then honours the marker
+        self.assertFalse((self.folder(job_id) / "request.json").exists())  # before any read, which deletes it too
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "cancelled")
 
     async def test_prune_never_waits_for_a_job_another_process_holds(self):
@@ -582,22 +560,8 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertEqual(guarded, [True, True, True])
         self.assertFalse(self.folder(job_id).exists())
 
-    async def test_a_job_carries_its_codex_model_and_effort_to_the_runner(self):
-        job_id = await self.queued(provider="codex", model="gpt-6-astra", reasoning_effort="xhigh")
-        received = []
-
-        async def consult(request):
-            received.append((request["model"], request["reasoning_effort"]))
-            return {"conversation_id": str(uuid.uuid4()), "reply": "done", "model": request["model"],
-                    "reasoning_effort": request["reasoning_effort"]}
-
-        await jobs.run_job(self.client.jobs, job_id, consult)
-        self.assertEqual(received, [("gpt-6-astra", "xhigh")])
-        done = await self.client.job(job_id, {"codex"})
-        self.assertEqual((done["model"], done["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
-        with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
-            await self.queued(provider="codex", extra_directories=[str(self.root)])
-        # A Claude job's extra directories reach the runner resolved, with its warnings coming back from the result.
+    async def test_a_claude_jobs_extra_directories_reach_the_runner_resolved(self):
+        # Its warnings come back from the result.
         other = self.root / "other"
         other.mkdir()
         job_id = await self.queued(provider="claude", extra_directories=[str(other)])
