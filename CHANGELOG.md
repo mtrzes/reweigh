@@ -17,6 +17,8 @@
   repository's `worktrees/` registry is a real folder inside it: it takes git's word for the repository a folder
   belongs to, and `SECURITY.md` states what that leaves open. A repository made with `git init --separate-git-dir`,
   and one whose `.git` is a symlink, are read and pinned again.
+- A peer CLI that cannot start is now always reported as "Cannot start": on a busy machine the same failure could be
+  reported as the peer closing its input.
 
 ## 1.0.0-beta.3
 

@@ -524,9 +524,11 @@ async def run_command(command, prompt, working_directory, timeout, environment=N
             for reader in drained:
                 reader.result()
             output, errors = (b"".join(chunks) for chunks in collected)
+            # The guard's report comes first: a peer that could not start also leaves its input closed.
+            status = exited.result()
             if not handed_off:
                 raise InputClosed(output, errors)
-            return exited.result(), output, errors
+            return status, output, errors
         finally:
             for task in (*readers, exited):
                 task.cancel()
