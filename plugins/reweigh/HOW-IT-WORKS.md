@@ -132,9 +132,10 @@ claim finds its runner gone; a stored outcome, `lost` included, is final. Cancel
 claimed, marks a running one, and leaves an existing outcome as it is. A status read or cancellation waits at most one
 second for the job's state lock, then reports the job busy. A start launches the runner, then reads the job once and
 returns that view; if the read fails or finds the lock busy, it returns the job as `queued`. A start cancelled before
-that read returns cancels the job, if it has published one. If the runner cannot be launched, the start cancels the
-job, or names it in the error when the cancellation fails too. The locking model is in `scripts/jobs.py`; what becomes
-of a job's request, and how long a finished job is kept, in
+that read returns cancels the job, if it has published one; if another process holds the job's state lock for longer
+than that second, the cancellation gives up, and the job runs to its end or its timeout with nothing reporting its ID.
+If the runner cannot be launched, the start cancels the job, or names it in the error when the cancellation fails too.
+The locking model is in `scripts/jobs.py`; what becomes of a job's request, and how long a finished job is kept, in
 [SECURITY.md](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/SECURITY.md#what-is-kept-and-for-how-long).
 
 ## Thread reading

@@ -13,7 +13,9 @@ written, is final; a lost runner's verdict is written too, so a runner that star
 which holds the prompt and context, is deleted when the runner claims it, and before any other final outcome.
 
 Each operation's lock wait is set here, not by its caller. A start that is cancelled before its first view returns
-cancels the job it published, since its caller never learns the ID.
+cancels the job it published, since its caller never learns the ID. That cancel waits for the state lock no longer
+than any other: if another process holds the lock for longer, the job runs to its end or its timeout, and nothing
+reports its ID.
 """
 
 import asyncio
@@ -350,8 +352,10 @@ class JobStore:
 
 async def start_job(store, request, spawn):
     """Publish a job for a job_request(), launch its runner with spawn(job_id), and return its first view, the only way
-    its caller learns the ID. Nothing is awaited from publication until the runner is launched. A cancellation
-    requested meanwhile arrives at the read of that view, and one that arrives there cancels the job."""
+    its caller learns the ID; a view that cannot be read, for a busy lock or any other reason, is returned as `queued`.
+    Nothing is awaited from publication until the runner is launched. A cancellation requested meanwhile arrives at the
+    read of that view, and one that arrives there cancels the job, unless the state lock stays busy for the cancel's
+    whole wait: the job then runs to its end or its timeout, and nothing reports its ID."""
     provider = request["provider"]
     with job_store_errors():
         await asyncio.to_thread(store.prune, time.time())
@@ -370,7 +374,8 @@ async def start_job(store, request, spawn):
             return await asyncio.to_thread(store.view, job_id, {provider})
         except asyncio.CancelledError:
             # Nobody will learn the ID. A cancel that fails does not turn the interruption into an ordinary failure:
-            # nobody is left to read either.
+            # nobody is left to read either. It fails when another process holds the state lock for longer than the
+            # one-second wait, and the runner already launched then keeps the job.
             with suppress(BridgeError, OSError):
                 store.cancel(job_id, {provider})
             raise
