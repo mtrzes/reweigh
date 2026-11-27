@@ -617,7 +617,7 @@ class RecordParsingTests(unittest.TestCase):
 
 
 class CodexParsingTests(unittest.TestCase):
-    SUMMARY = t.ThreadSummary("id-1", None, "/repo", 0.0)
+    SUMMARY = t.ThreadSummary("id-1", None, 0.0)
 
     def test_rollout_files(self):
         identifier = str(uuid.uuid4())
@@ -642,8 +642,8 @@ class CodexParsingTests(unittest.TestCase):
         def meta(**payload):
             return {"type": "session_meta", "payload": {"cwd": "/repo", "id": "id-1"} | payload}
         cases = (
-            (meta(source="cli"), ("cli", "/repo", None)),
-            (meta(source="vscode", forked_from_id="p"), ("vscode", "/repo", "p")),
+            (meta(source="cli"), ("/repo", None)),
+            (meta(source="vscode", forked_from_id="p"), ("/repo", "p")),
             (meta(source="exec"), None), (meta(source={"subagent": "x"}), None), (meta(source="cli", cwd=3), None),
             ({"type": "other", "payload": {"source": "cli", "cwd": "/repo"}}, None),
         )
@@ -672,7 +672,7 @@ class CodexParsingTests(unittest.TestCase):
         for records, expected in cases:
             with self.subTest(records=records):
                 self.assertEqual(t.codex_snapshot(self.SUMMARY, t.scan_codex(records), 3).latest_turn, expected)
-        locked = t.ThreadSummary("id-1", None, "/repo", 0.0, writer_lock_present=True)
+        locked = t.ThreadSummary("id-1", None, 0.0, writer_lock_present=True)
         snapshot = t.codex_snapshot(locked, t.scan_codex([e("task_started", "t1")]), 3)
         self.assertEqual(snapshot.latest_turn.liveness, "unknown")
 
@@ -713,7 +713,7 @@ class CodexParsingTests(unittest.TestCase):
 
 
 class ClaudeParsingTests(unittest.TestCase):
-    SUMMARY = t.ThreadSummary("id-1", None, "/repo", 0.0)
+    SUMMARY = t.ThreadSummary("id-1", None, 0.0)
 
     @staticmethod
     def belongs(cwd):
@@ -990,12 +990,13 @@ class ResultTests(unittest.TestCase):
             (messages("abcd"), 4, ([{"text": "abcd", "phase": None}], False)),
         )
         for kept, budget, expected in cases:
-            with self.subTest(texts=[m.text for m in kept], budget=budget):
-                self.assertEqual(t.cap_messages(kept, budget), expected)
+            with self.subTest(texts=[m.text for m in kept], budget=budget), \
+                    patch.object(t, "MAX_MESSAGE_CHARACTERS", budget):
+                self.assertEqual(t.cap_messages(kept), expected)
 
     def test_match_thread(self):
-        threads = [t.ThreadSummary("a", "Review", "/r", 0), t.ThreadSummary("b", "Twin", "/r", 0),
-                   t.ThreadSummary("c", "Twin", "/r", 0)]
+        threads = [t.ThreadSummary("a", "Review", 0), t.ThreadSummary("b", "Twin", 0),
+                   t.ThreadSummary("c", "Twin", 0)]
         self.assertEqual(t.match_thread(threads, "a").id, "a")
         self.assertEqual(t.match_thread(threads, "Review").id, "a")
         for reference, reason in (("missing", "No readable thread"), ("Twin", "Several threads")):
@@ -1005,7 +1006,7 @@ class ResultTests(unittest.TestCase):
 
     def test_listing_result(self):
         listing = t.newest_first(t.ThreadListing(
-            [t.ThreadSummary("old", None, "/r", 0), t.ThreadSummary("new", "N", "/r", 60, writer_lock_present=True)],
+            [t.ThreadSummary("old", None, 0), t.ThreadSummary("new", "N", 60, writer_lock_present=True)],
             ("x", "y"), 3,
         ))
         self.assertEqual(t.listing_result("codex", listing, 1), {
