@@ -169,8 +169,8 @@ starts the other app in its own worktree (`claude --worktree`, `codex --worktree
 [ADR 0003](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0003-peers-only-read.md) records why.
 
 Codex's session files are an internal format;
-[ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0001-codex-thread-reader-source.md) sets
-when Codex's app-server API may replace reading them.
+[ADR 0001](https://github.com/mtrzes/reweigh/blob/v1.0.0-beta.3/docs/adr/0001-codex-thread-reader-source.md) records
+why the bridge reads them and not Codex's app-server API.
 
 ## Scope
 
