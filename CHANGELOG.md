@@ -19,6 +19,8 @@
   and one whose `.git` is a symlink, are read and pinned again.
 - A peer CLI that cannot start is now always reported as "Cannot start": on a busy machine the same failure could be
   reported as the peer closing its input.
+- The `list_codex_models` tool description no longer says its values are the ones `ask_codex` accepts: another
+  `model` or `reasoning_effort` is passed on, and Codex decides.
 
 ## 1.0.0-beta.3
 

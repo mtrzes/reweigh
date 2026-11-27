@@ -66,15 +66,13 @@ class SettingsTests(unittest.TestCase):
             c.state_directory({"REWEIGH_STATE_DIR": "relative"}, home)
 
     def test_consultation_timeout(self):
-        cases = (({}, None, 600), ({"REWEIGH_TIMEOUT_SECONDS": "30"}, None, 30),
-                 ({"REWEIGH_TIMEOUT_SECONDS": "30"}, 10, 10), ({}, 3600, 3600))
-        for environ, timeout, expected in cases:
-            with self.subTest(environ=environ, timeout=timeout):
-                self.assertEqual(c.consultation_timeout(environ, timeout), expected)
-        for environ, timeout in (({"REWEIGH_TIMEOUT_SECONDS": "soon"}, None), ({}, 0), ({}, 3601)):
-            with self.subTest(environ=environ, timeout=timeout):
-                with self.assertRaises(c.BridgeError):
-                    c.consultation_timeout(environ, timeout)
+        for setting, expected in ((None, 600), ("30", 30), ("3600", 3600)):
+            environ = {} if setting is None else {"REWEIGH_TIMEOUT_SECONDS": setting}
+            with self.subTest(setting=setting):
+                self.assertEqual(c.consultation_timeout(environ), expected)
+        for setting in ("soon", "0", "3601"):
+            with self.subTest(setting=setting), self.assertRaises(c.BridgeError):
+                c.consultation_timeout({"REWEIGH_TIMEOUT_SECONDS": setting})
 
     def test_executable_variable(self):
         self.assertEqual(c.executable_variable("claude"), "REWEIGH_CLAUDE_BIN")
