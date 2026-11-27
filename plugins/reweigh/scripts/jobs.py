@@ -33,7 +33,7 @@ from consultation import (
     CANCELLED_JOB, JOB_RETENTION_SECONDS, PROVIDERS, BridgeError, job_expired, job_outcome, job_state, job_view,
     new_job_record, stopped_outcome, valid_job_outcome, valid_job_record, validate_session_id,
 )
-from state_files import PRIVATE, check_private, ensure_private, open_regular, read_json, write_json
+from state_files import check_private, ensure_private, open_regular, read_json, write_json
 
 UNKNOWN_JOB = "No consultation job with that ID."
 UNREADABLE = "The consultation job's files are unreadable."
@@ -131,16 +131,12 @@ class JobStore:
         return folder
 
     @staticmethod
-    def open_regular(path, flags, mode=0o600):
-        return open_regular(path, flags, mode, unreadable=UNREADABLE)
+    def open_regular(path, flags):
+        return open_regular(path, flags, unreadable=UNREADABLE)
 
     @staticmethod
     def read(path):
         return read_json(path, unreadable=UNREADABLE)
-
-    @staticmethod
-    def write(path, data):
-        write_json(path, data)
 
     @classmethod
     def mark(cls, path):
@@ -213,7 +209,7 @@ class JobStore:
             raise BridgeError(UNREADABLE)
         return record, outcome
 
-    def settle(self, folder, record, outcome, now=None, *, cancelling=False, runner_present=None):
+    def settle(self, folder, record, outcome, *, cancelling=False, runner_present=None):
         """Finish a job that has stopped and return its view. Hold the state lock.
 
         A lost or cancelled verdict is stored, so a runner that starts later finds it and does not run.
@@ -222,7 +218,7 @@ class JobStore:
             # A crash may have left the request behind a final outcome; it is not kept.
             (folder / "request.json").unlink(missing_ok=True)
             return job_view(folder.name, record, outcome, outcome["state"])
-        now = time.time() if now is None else now
+        now = time.time()
         if runner_present is None:
             runner_present = self.runner_present(folder)
         state = job_state(record, None, runner_present, now, cancel_requested=cancelling or cancel_requested(folder))
@@ -238,7 +234,7 @@ class JobStore:
         """Write a final outcome, after deleting the request, unless one is already there. Hold the state lock."""
         (folder / "request.json").unlink(missing_ok=True)
         if self.read(folder / "outcome.json") is None:
-            self.write(folder / "outcome.json", outcome)
+            write_json(folder / "outcome.json", outcome)
 
     # Operations
 
@@ -248,9 +244,9 @@ class JobStore:
         staging = self.directory / f"{STAGING_PREFIX}{job_id}"
         staging.mkdir(mode=0o700)
         try:
-            self.write(staging / "request.json", request)
+            write_json(staging / "request.json", request)
             # Stamped at publication, so time spent before it does not count against the start-up grace.
-            self.write(staging / "job.json", new_job_record(provider, working_directory, time.time()))
+            write_json(staging / "job.json", new_job_record(provider, working_directory, time.time()))
             # The job appears with both files or not at all.
             os.rename(staging, self.directory / job_id)
         except BaseException:
@@ -258,16 +254,16 @@ class JobStore:
             raise
         return job_id
 
-    def view(self, job_id, providers, now=None):
+    def view(self, job_id, providers):
         folder = self.folder(job_id)
         with self.state_lock(folder):
-            return self.settle(folder, *self.load(folder, providers), now)
+            return self.settle(folder, *self.load(folder, providers))
 
-    def cancel(self, job_id, providers, now=None):
+    def cancel(self, job_id, providers):
         """Stop a running job, or mark one cancelled that no runner holds."""
         folder = self.folder(job_id)
         with self.state_lock(folder):
-            return self.settle(folder, *self.load(folder, providers), now, cancelling=True)
+            return self.settle(folder, *self.load(folder, providers), cancelling=True)
 
     def prune(self, now):
         """Remove jobs no runner holds that finished, or were created, longer ago than the retention period, and
@@ -342,7 +338,7 @@ class JobStore:
                 return None
             (folder / "request.json").unlink(missing_ok=True)
             # The PID is recorded for diagnosis only; nothing signals it.
-            self.write(folder / "job.json", {**record, "state": "running", "pid": os.getpid(),
+            write_json(folder / "job.json", {**record, "state": "running", "pid": os.getpid(),
                                              "started_at": time.time()})
             return request
 

@@ -369,7 +369,8 @@ time.sleep({4 * DEADLINE_SECONDS})
         job_id = await self.queued(prompt="PRIVATE QUESTION")
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "queued")
         later = time.time() + consultation.JOB_START_GRACE_SECONDS + 1
-        self.assertEqual(self.client.jobs.view(job_id, CLAUDE, now=later)["state"], "lost")
+        with patch.object(jobs.time, "time", return_value=later):
+            self.assertEqual(self.client.jobs.view(job_id, CLAUDE)["state"], "lost")
         self.assertFalse((self.folder(job_id) / "request.json").exists())
         await jobs.run_job(self.client.jobs, job_id, self.never)
         self.assertEqual((await self.client.job(job_id, CLAUDE))["state"], "lost")
@@ -517,12 +518,14 @@ time.sleep({4 * DEADLINE_SECONDS})
         self.assertFalse(folder.exists())
 
     async def test_a_job_appears_whole_or_not_at_all(self):
+        write_json = jobs.write_json
+
         def crash(path, data):
             if path.name == "job.json":
                 raise OSError(errno.ENOSPC, "No space left on device")
-            jobs.JobStore.write(path, data)
+            write_json(path, data)
 
-        with patch.object(self.client.jobs, "write", crash):
+        with patch.object(jobs, "write_json", crash):
             with self.assertRaisesRegex(bridge.BridgeError, "Cannot read or write the consultation job files"):
                 await self.start(prompt="PRIVATE QUESTION")
         self.assertEqual(list((self.state / "jobs").iterdir()), [])
