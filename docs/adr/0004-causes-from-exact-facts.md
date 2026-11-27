@@ -16,13 +16,20 @@ negative fact: a failed `git rev-parse` as "outside a repository", an unlistable
 - A failed run is described by `FailureFacts` in `consultation.py`: the saved conversation's resume state, the
   effective model choice, and facts from the CLI's structured output and targeted probes. A probed fact is True, False
   or None, and None means the bridge could not tell.
-- A probed fact comes only from an exact field (`loggedIn`, `api_error_status`), an exit status, a file check, or a
-  stderr line that starts with a fixed tag the CLI emits (`CLAUDE_UNRECOGNIZED_MODEL_TAG`), never from a pattern over
-  the CLI's or the model's text.
+- A fact comes only from an exact field, an exit status, a file check, or a stderr line that starts with a fixed tag
+  the CLI emits, never from a pattern over the CLI's or the model's text.
 - An inconclusive probe gives None: a failed call, a non-zero exit that does not mean the fact, an unlistable path. A
   handler catches only the exception types that mean what it claims.
-- The bridge gives the first diagnosis whose facts are established; a None blocks only the diagnoses that need that
-  fact. With none, the caller gets the generic message, with a hint when a Codex model or effort was chosen.
+- The bridge gives the first diagnosis whose facts are established, in this order; a None blocks only the diagnoses
+  that need that fact:
+  1. The thread is open elsewhere: a resumed Codex conversation whose thread has a writer-lock file.
+  2. The CLI is signed out: the sign-in probe says so (`claude auth status --json` gives `loggedIn: false`; `codex
+     login status` exits 1), or Claude's result carries `api_error_status` 401.
+  3. The history is gone: a resumed conversation has no history file, and every history folder could be listed.
+  4. Claude Code does not know the model: a stderr line starts with `CLAUDE_UNRECOGNIZED_MODEL_TAG`.
+
+  With none, the caller gets the generic message, with a hint when a Codex model or effort was chosen, per call or
+  by environment.
 - Codex refuses to run outside a git repository and says so only on stderr. A Codex consultation passes
   `--skip-git-repo-check`, so that failure does not occur and needs no fact.
 
