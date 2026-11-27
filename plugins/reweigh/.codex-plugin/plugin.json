@@ -1,6 +1,6 @@
 {
   "name": "reweigh",
-  "version": "1.0.0-beta.3",
+  "version": "1.0.0-beta.4",
   "description": "Consult Claude Code from Codex through resumable sessions that do not edit your project, pinned to a commit when needed, run in the background for long reviews, and read Claude Code's recent sessions in the same repository.",
   "author": {
     "name": "mtrzes",

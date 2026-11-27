@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0-beta.4
 
 - A background start that cannot read its new job back returns it as `queued` instead of cancelling it; a later read
   reports what is wrong. A start whose runner cannot be launched still cancels the job, but waits at most a second
