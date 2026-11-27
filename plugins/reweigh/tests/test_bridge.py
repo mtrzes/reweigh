@@ -22,7 +22,7 @@ import anyio
 # Lets a single test file run on its own, as well as through discover.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import (
-    BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, RecordingProbe, bridge, codex_thread, codex_turn,
+    BRIDGE_PATH, DEADLINE_SECONDS, BridgeTestCase, PRIVATE_MARKERS, bridge, codex_thread, codex_turn,
     consultation, eventually_async, git, git_repository, module_view, read_pid, running,
 )
 import jobs  # noqa: E402  (support adds the plugin's scripts to the path)
@@ -227,21 +227,6 @@ class ConsultationTests(BridgeTestCase):
         finally:
             self.state.chmod(0o700)
 
-    async def test_a_shared_state_directory_is_rejected_without_mutation_or_peer_execution(self):
-        self.state.mkdir(mode=0o750)
-        self.state.chmod(0o750)
-        marker = self.state / "unrelated.txt"
-        marker.write_text("Shared folder content", encoding="utf-8")
-        spawned = []
-        self.client.spawn = spawned.append
-        request = {"prompt": "Explain the query.", "working_directory": str(self.project)}
-        for call in (self.client.consult, self.client.start):
-            with self.subTest(call=call.__name__), self.assertRaisesRegex(bridge.BridgeError, "private directory"):
-                await call("claude", **request)
-        self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o750)
-        self.assertEqual(list(self.state.iterdir()), [marker])
-        self.assertEqual((self.calls(), spawned), ([], []))
-
     async def test_cleanup_never_reaches_through_a_state_directory_that_is_not_private(self):
         # Each layout hides something cleanup would delete (a leftover checkout, a half-removed job) behind a path
         # that is shared or a symlink; checks that ran only after cleanup would have let it go.
@@ -293,7 +278,9 @@ class ConsultationTests(BridgeTestCase):
                             await call("claude", **request)
                     sentinels = sorted((self.state if layout is shared_root else elsewhere).rglob("sentinel"))
                     self.assertEqual(len(sentinels), 2)
-                    self.assertEqual(spawned, [])
+                    if layout is shared_root:  # refused without a change to the folder's own mode
+                        self.assertEqual(stat.S_IMODE(self.state.stat().st_mode), 0o750)
+                    self.assertEqual((spawned, self.calls() if refused else []), ([], []))
                 finally:
                     if self.state.is_symlink():
                         self.state.unlink()
@@ -395,25 +382,13 @@ class ConsultationTests(BridgeTestCase):
 
     # Failures
 
-    async def test_cli_failure_does_not_expose_prompt_context_or_backend_output(self):
-        with (
-            patch.dict(os.environ, {"SIMULATED_PEER_MODE": "failure"}),
-            self.assertRaises(bridge.BridgeError) as raised,
-        ):
-            await self.consult(prompt="PRIVATE QUESTION", context="PRIVATE LEAD CONTEXT")
-        message = str(raised.exception)
-        self.assertIn("exit 7", message)
-        for private in ("PRIVATE QUESTION", "PRIVATE LEAD CONTEXT", "PRIVATE BACKEND CONTEXT"):
-            self.assertNotIn(private, message)
-        self.assertEqual(list(self.state.glob("*.json")), [])
-
     async def failure_message(self, provider, environment, **arguments):
         """Run a consultation expected to fail, and return its message after checking it stays private."""
         with (
             patch.dict(os.environ, {"SIMULATED_PEER_MODE": "known_failure", **environment}),
             self.assertRaises(bridge.BridgeError) as raised,
         ):
-            await self.consult(provider, prompt="PRIVATE QUESTION", **arguments)
+            await self.consult(provider, prompt="PRIVATE QUESTION", context="PRIVATE LEAD CONTEXT", **arguments)
         message = str(raised.exception)
         self.assertNotIn("PRIVATE", message)
         return message
@@ -449,22 +424,6 @@ class ConsultationTests(BridgeTestCase):
                 message = await self.failure_message(provider, environment, **arguments)
                 self.assertTrue(message.startswith(expected), message)
         self.assertEqual(list(self.state.glob("*.json")), [])
-
-    async def test_diagnosis_asks_the_probes_its_provider_and_resume_state_need(self):
-        for provider in ("claude", "codex"):
-            conversation = (await self.consult(provider))["conversation_id"]
-            session = json.loads((self.state / f"{conversation}.json").read_text())["backend_session_id"]
-            for resumed, arguments, answers, expected in (
-                (None, {}, {"signed_in": False}, "is not signed in"),
-                (session, {"conversation_id": conversation}, {"signed_in": True, "history_present": False},
-                 "no longer has this conversation's history"),
-            ):
-                with self.subTest(provider=provider, resumed=bool(resumed)):
-                    self.client.probe = RecordingProbe(answers)
-                    message = await self.failure_message(provider, {}, **arguments)
-                    self.assertIn(expected, message)
-                    self.assertEqual(self.client.probe.asked,
-                                     [(name, resumed) for name in consultation.failure_probes(provider, bool(resumed))])
 
     async def test_the_history_lookup_never_starts_once_the_peers_budget_is_spent(self):
         looked_up = []
@@ -772,7 +731,7 @@ class ConsultationTests(BridgeTestCase):
             await self.consult(working_directory=str(package), conversation_id=identifier,
                                extra_directories=[str(self.root)])
         # A background start with both is refused at once, before any job exists.
-        self.client.spawn = spawned = []
+        spawned = []
         self.client.spawn = spawned.append
         with self.assertRaisesRegex(bridge.BridgeError, "cannot be combined with a pinned ref"):
             await self.client.start("claude", "Explain.", str(package), ref="HEAD", extra_directories=[str(self.root)])

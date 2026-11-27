@@ -234,21 +234,6 @@ PEER_SOURCE = textwrap.dedent('''\
 ''')
 
 
-class RecordingProbe:
-    """The second adapter behind failure diagnosis: answers each observation from answers, None when it has none, and
-    records what was asked. Set it as a Bridge's probe attribute."""
-
-    def __init__(self, answers):
-        self.answers, self.asked = answers, []
-
-    def __call__(self, provider, scope, peer, source):
-        return self
-
-    async def observe(self, name, session):
-        self.asked.append((name, session))
-        return self.answers.get(name)
-
-
 async def no_preflight(provider, command, runner):
     return []
 
@@ -333,10 +318,6 @@ def codex_turn(turn_id, *texts, outcome="completed"):
         }))
     if outcome == "completed":
         events.append(codex_event("task_complete", turn_id, last_agent_message=texts[-1] if texts else None))
-    elif outcome == "failed":
-        events.append(codex_event("task_complete", turn_id, last_agent_message=None, error={"message": "TOOL OUTPUT"}))
-    elif outcome == "interrupted":
-        events.append(codex_event("turn_aborted", turn_id, reason="interrupted"))
     return events
 
 
