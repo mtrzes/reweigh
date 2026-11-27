@@ -214,8 +214,18 @@ class ConsultationTests(BridgeTestCase):
         broken = self.root / "broken-peer"
         broken.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")
         broken.chmod(0o700)
+        open_streams = bridge.open_streams
+
+        async def after_the_guard_let_go(guard):
+            # The harder order: the guard has reported and closed the peer's input before the handoff is written, so
+            # the write fails. The guard's errors end only once it has replaced its standard streams, input first.
+            (output, errors), handoff, transports = await open_streams(guard)
+            self.assertEqual(await asyncio.wait_for(errors.read(), DEADLINE_SECONDS), b"")
+            return (output, errors), handoff, transports
+
         with (
             patch.dict(os.environ, {"REWEIGH_CLAUDE_BIN": str(broken)}),
+            patch.object(bridge, "open_streams", after_the_guard_let_go),
             self.assertRaisesRegex(bridge.BridgeError, "Cannot start claude"),
         ):
             await self.consult()
