@@ -103,8 +103,9 @@ class JobTests(BridgeTestCase):
 
     async def test_a_started_job_runs_detached_and_returns_the_reply(self):
         started = await self.start()
-        # Not read back from the job: its runner may already hold it.
-        self.assertEqual(started, {"job_id": started["job_id"], "provider": "claude", "state": "queued"})
+        if started["state"] != "completed":  # a fast runner may already have finished before the first view
+            self.assertIn(started["state"], {"queued", "running"})
+            self.assertEqual(set(started), {"job_id", "provider", "state"})
         done = await self.finished(started["job_id"])
         self.assertEqual((done["state"], done["reply"]), ("completed", "claude consulted: Explain the query."))
         self.assertFalse((self.folder(started["job_id"]) / "request.json").exists())
@@ -219,6 +220,44 @@ time.sleep({4 * DEADLINE_SECONDS})
             [folder] = set((self.state / "jobs").iterdir()) - known
             known.add(folder)
             self.assertEqual(str(raised.exception), jobs.START_UNCONFIRMED.format(job_id=folder.name))
+
+    async def test_a_start_that_cannot_read_its_job_back_still_returns_the_job_id(self):
+        # The runner may already hold the state lock to claim its job when the start reads it.
+        spawned = []
+        self.client.spawn = spawned.append
+        for failure in (bridge.BridgeError(jobs.LOCK_BUSY), OSError("disk")):
+            with self.subTest(failure=failure), patch.object(self.client.jobs, "view", side_effect=failure):
+                started = await self.start()
+            self.assertEqual(started, {"job_id": spawned[-1], "provider": "claude", "state": "queued"})
+            # Left for its runner, not cancelled.
+            self.assertTrue((self.folder(spawned[-1]) / "request.json").exists())
+            self.assertEqual((await self.client.job(spawned[-1], CLAUDE))["state"], "queued")
+
+    async def test_a_start_cancelled_once_its_job_is_published_cancels_the_job(self):
+        # The cancellation is requested while the job is created and arrives at the start's next await. The only test
+        # that fails when that await comes before the runner is launched, or when it leaves the job to run.
+        real_create, real_cancel, spawned = self.client.jobs.create, self.client.jobs.cancel, []
+        self.client.spawn = spawned.append
+
+        def create_and_cancel(*arguments):
+            job_id = real_create(*arguments)
+            asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+            return job_id
+
+        # After the first time, cancelling the job fails: the start still ends as cancelled, not as that failure.
+        cancels = (real_cancel, bridge.BridgeError(jobs.LOCK_BUSY), OSError("disk"))
+        for launched, cancel in enumerate(cancels, start=1):
+            with (
+                self.subTest(cancel=cancel),
+                patch.object(self.client.jobs, "create", create_and_cancel),
+                patch.object(self.client.jobs, "cancel", side_effect=cancel),
+                self.assertRaises(asyncio.CancelledError),
+            ):
+                await asyncio.create_task(self.start(prompt="PRIVATE QUESTION"))
+            self.assertEqual(len(spawned), launched, "The start awaited something before it launched the runner.")
+            if cancel is real_cancel:
+                self.assertFalse((self.folder(spawned[-1]) / "request.json").exists())
+                self.assertEqual((await self.client.job(spawned[-1], CLAUDE))["state"], "cancelled")
 
     async def test_a_killed_runner_takes_its_peer_with_it_and_its_job_is_lost(self):
         with patch.dict(os.environ, {"SIMULATED_PEER_MODE": "spawn_hang"}):
@@ -494,7 +533,6 @@ time.sleep({4 * DEADLINE_SECONDS})
 
     async def test_prune_uses_the_folder_age_when_reading_the_record_fails(self):
         job_id = await self.queued()
-        await self.client.job(job_id, CLAUDE)  # makes the lock files, as a runner's claim does, before the folder ages
         folder = self.folder(job_id)
         record = (folder / "job.json").stat()
         old = time.time() - LATER

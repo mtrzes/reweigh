@@ -12,8 +12,8 @@ while it does. A peer never outlives its runner, because each peer runs under pe
 written, is final; a lost runner's verdict is written too, so a runner that starts late honours it. The request,
 which holds the prompt and context, is deleted when the runner claims it, and before any other final outcome.
 
-Each operation's lock wait is set here, not by its caller. A start awaits nothing between publishing its job and
-returning the ID, so an interruption cannot leave a job its caller never learns of.
+Each operation's lock wait is set here, not by its caller. A start that is cancelled before its first view returns
+cancels the job it published, since its caller never learns the ID.
 """
 
 import asyncio
@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from pathlib import Path
 
 from consultation import (
@@ -350,8 +350,8 @@ class JobStore:
 
 async def start_job(store, request, spawn):
     """Publish a job for a job_request(), launch its runner with spawn(job_id), and return its first view, the only way
-    its caller learns the ID. Nothing is awaited once the job is published, so an interruption that arrives then does
-    not stop the start: the job runs and its caller gets the ID."""
+    its caller learns the ID. Nothing is awaited from publication until the runner is launched. A cancellation
+    requested meanwhile arrives at the read of that view, and one that arrives there cancels the job."""
     provider = request["provider"]
     with job_store_errors():
         await asyncio.to_thread(store.prune, time.time())
@@ -366,8 +366,18 @@ async def start_job(store, request, spawn):
             except (BridgeError, OSError):
                 raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from exc
             raise BridgeError(RUNNER_FAILED) from exc
-    # Not read back: the runner may already hold the state lock to claim the job.
-    return job_view(job_id, {"provider": provider}, None, "queued")
+        try:
+            return await asyncio.to_thread(store.view, job_id, {provider})
+        except asyncio.CancelledError:
+            # Nobody will learn the ID. A cancel that fails does not turn the interruption into an ordinary failure:
+            # nobody is left to read either.
+            with suppress(BridgeError, OSError):
+                store.cancel(job_id, {provider})
+            raise
+        except (BridgeError, OSError):
+            # Busy, as when the runner holds the state lock to claim the job, or unreadable: the caller still needs
+            # the ID, and a later read reports what is wrong.
+            return job_view(job_id, {"provider": provider}, None, "queued")
 
 
 def spawn_runner(job_id):

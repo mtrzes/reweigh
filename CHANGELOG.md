@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- A background start no longer cancels its job when it is interrupted after publishing it: `start` on the command
-  line then prints the job, which runs until it finishes or `cancel` stops it. A start whose runner cannot be launched
-  still cancels the job; when a busy job lock blocks that for a second, the error names the job instead of waiting.
+- A background start that cannot read its new job back returns it as `queued` instead of cancelling it; a later read
+  reports what is wrong. A start whose runner cannot be launched still cancels the job, but waits at most a second
+  for the job's lock, then names the job in the error instead of waiting without limit. An interrupted start still
+  cancels its job.
 - A Codex `model` or `reasoning_effort` that Codex's cached catalogue does not list is no longer refused before Codex
   starts: Codex decides whether it accepts the value, so a stale catalogue cannot block a new model.
   `list_codex_models` still lists what the catalogue offers.

@@ -93,9 +93,8 @@ line runs.
   earliest seven days after the job finished, or after its last change when its files cannot be read; with no later
   start it stays until the user removes it. Its prompt and context are deleted when the runner reads them. If the
   request is unreadable and the job record is valid, the runner deletes the request and records a fixed failure
-  message. If the runner cannot be launched, the start cancels the job, which deletes them; if that cancellation fails
-  too, the error names the job, and they stay until the job is cancelled, read once its two-minute start-up grace has
-  passed, or removed.
+  message. If SIGTERM or SIGHUP interrupts the CLI while it creates a job, the bridge deletes that job's prompt and
+  context during cancellation.
 - Conversation records, which bind a conversation to its peer and project, are kept until the user removes them.
 - Each peer CLI keeps its own transcript of every consultation, as long as it keeps any history.
 
