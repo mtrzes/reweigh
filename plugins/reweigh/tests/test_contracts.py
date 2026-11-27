@@ -318,8 +318,8 @@ class CommandLineTests(BridgeTestCase):
                          (1, {"error": "No consultation job with that ID."}))
 
     def test_signalling_cli_start_after_publication_cancels_the_job(self):
-        script = f"""\
-import os, signal, sys, threading
+        script = """\
+import os, signal, sys
 from pathlib import Path
 
 sys.argv = sys.argv[1:]
@@ -327,23 +327,16 @@ sys.path.insert(0, str(Path(sys.argv[0]).parent))
 import bridge
 import jobs
 
-discarding = threading.Event()
 create = jobs.JobStore.create
-discard = jobs.abandon_created
 
 def create_and_signal(store, *arguments):
     job_id = create(store, *arguments)
     os.kill(os.getpid(), signal.SIGTERM)
-    # Keep creation pending until the CLI's task has entered its cancellation cleanup.
-    assert discarding.wait({DEADLINE_SECONDS})
     return job_id
 
-async def abandon_created(*arguments):
-    discarding.set()
-    await discard(*arguments)
-
 jobs.JobStore.create = create_and_signal
-jobs.abandon_created = abandon_created
+# No runner: one that claimed the job could reach its outcome before it saw the cancellation.
+bridge.spawn_runner = lambda job_id: None
 bridge.main()
 """
         completed = subprocess.run(

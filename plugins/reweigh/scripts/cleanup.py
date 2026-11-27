@@ -7,7 +7,7 @@ async def run_to_completion(cleanup):
     """Await a cleanup step to its end even if the caller is cancelled meanwhile, then pass the cancellation on.
 
     A signal cancels the CLI task once per delivery, and anyio, which serves MCP requests, cancels a cancelled request
-    again at every await; neither may cut short stopping the peer, removing its checkout or cancelling a job.
+    again at every await; neither may cut short stopping the peer or removing its checkout.
     """
     import anyio
 

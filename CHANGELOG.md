@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A background start that cannot read its new job back returns it as `queued` instead of cancelling it; a later read
+  reports what is wrong. A start whose runner cannot be launched still cancels the job, but waits at most a second
+  for the job's lock, then names the job in the error instead of waiting without limit. An interrupted start still
+  cancels its job, and now also waits at most a second for that lock: if another process holds it for longer, the job
+  runs to its end or its timeout, and nothing reports its ID.
 - A Codex `model` or `reasoning_effort` that Codex's cached catalogue does not list is no longer refused before Codex
   starts: Codex decides whether it accepts the value, so a stale catalogue cannot block a new model.
   `list_codex_models` still lists what the catalogue offers.
