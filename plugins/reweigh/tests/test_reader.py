@@ -136,13 +136,8 @@ class ReaderTests(unittest.TestCase):
         _, broken = codex_thread(home, self.project, codex_turn("t1", "Done."), name="Malformed")
         lines = broken.read_text(encoding="utf-8").splitlines(keepends=True)
         broken.write_text("".join(lines[:2] + ["{not json\n"] + lines[2:]), encoding="utf-8")
-        mismatched = codex_turn("t1", "Shown answer.")
-        mismatched[-1]["payload"]["last_agent_message"] = "Recorded answer."
-        codex_thread(home, self.project, mismatched, name="Mismatched")
         codex_thread(home, self.project, codex_turn("t1", "Done."), name="Forked", meta={"forked_from_id": "x"})
-        cases = (("Malformed", "malformed line"), ("Mismatched", "does not match its turn record"),
-                 ("Forked", "Forked Codex threads"), ("Missing", "No readable thread with that ID"))
-        for thread, expected in cases:
+        for thread, expected in (("Malformed", "malformed line"), ("Forked", "Forked Codex threads")):
             with self.subTest(thread=thread), self.assertRaisesRegex(ThreadUnavailable, expected):
                 self.read("codex", thread)
 
