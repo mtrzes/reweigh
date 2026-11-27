@@ -12,8 +12,8 @@ while it does. A peer never outlives its runner, because each peer runs under pe
 written, is final; a lost runner's verdict is written too, so a runner that starts late honours it. The request,
 which holds the prompt and context, is deleted when the runner claims it, and before any other final outcome.
 
-Each operation's lock wait is set here, not by its caller: only the cleanup of a start nobody else will learn of
-waits as long as the holder needs.
+Each operation's lock wait is set here, not by its caller. A start awaits nothing between publishing its job and
+returning the ID, so an interruption cannot leave a job its caller never learns of.
 """
 
 import asyncio
@@ -29,7 +29,6 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
-from cleanup import run_to_completion
 from consultation import (
     CANCELLED_JOB, JOB_RETENTION_SECONDS, PROVIDERS, BridgeError, job_expired, job_outcome, job_state, job_view,
     new_job_record, stopped_outcome, valid_job_outcome, valid_job_record, validate_session_id,
@@ -43,7 +42,7 @@ UNEXPECTED = "The consultation stopped on an unexpected error."
 STORE_FAILED = "Cannot read or write the consultation job files."
 RUNNER_FAILED = "Cannot start the consultation runner."
 START_UNCONFIRMED = (
-    "Consultation job {job_id} was started but cannot be read, and its cancellation could not be confirmed. Cancel it "
+    "Cannot start the runner of consultation job {job_id}, and its cancellation could not be confirmed. Cancel it "
     "with that job ID."
 )
 CANCEL_POLL_SECONDS = 0.2
@@ -85,10 +84,6 @@ def read_job_request(saved):
         return None
     return {key: saved[key] for key in ("provider", *REQUEST_TEXT_FIELDS, *REQUEST_OPTIONAL_FIELDS,
                                         *REQUEST_LIST_FIELDS)}
-
-
-class JobBusy(BridgeError):
-    """Another process held the job's state lock for longer than a caller waits."""
 
 
 @contextmanager
@@ -157,8 +152,8 @@ class JobStore:
             raise BridgeError(UNREADABLE) from exc
 
     @contextmanager
-    def flock(self, path, blocking):
-        """Hold an exclusive lock on path; with blocking False, yield False at once if another process holds it."""
+    def flock(self, path):
+        """Hold an exclusive lock on path, or yield False at once if another process holds it."""
         try:
             descriptor = self.open_regular(path, os.O_CREAT | os.O_RDWR)
         except OSError as exc:
@@ -167,7 +162,7 @@ class JobStore:
             raise BridgeError(UNREADABLE) from exc
         with os.fdopen(descriptor, "w") as handle:
             try:
-                fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 yield False
                 return
@@ -177,16 +172,11 @@ class JobStore:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     @contextmanager
-    def state_lock(self, folder, wait=False):
-        """Hold the job's short state lock. A caller gives up after a bounded wait and raises JobBusy; cleanup that
-        must finish, such as abandon(), passes wait=True and waits as long as the holder needs."""
-        if wait:
-            with self.flock(folder / "state.lock", blocking=True):
-                yield
-            return
+    def state_lock(self, folder):
+        """Hold the job's short state lock, or report the job busy after a bounded wait."""
         deadline = time.monotonic() + STATE_LOCK_TIMEOUT_SECONDS
         while True:
-            with self.flock(folder / "state.lock", blocking=False) as acquired:
+            with self.flock(folder / "state.lock") as acquired:
                 if acquired:
                     yield
                     return
@@ -196,13 +186,13 @@ class JobStore:
             time.sleep(min(LOCK_POLL_SECONDS, remaining))
             if time.monotonic() >= deadline:
                 break
-        raise JobBusy(LOCK_BUSY)
+        raise BridgeError(LOCK_BUSY)
 
     @asynccontextmanager
     async def runner_file_lock(self, path, *, retry=True):
         """Retry on the event loop so the runner can be cancelled while waiting."""
         while True:
-            with self.flock(path, blocking=False) as acquired:
+            with self.flock(path) as acquired:
                 if acquired or not retry:
                     yield acquired
                     return
@@ -210,7 +200,7 @@ class JobStore:
 
     def runner_present(self, folder):
         """Whether a runner holds the job. Call only while holding the job's state lock."""
-        with self.flock(folder / "runner.lock", blocking=False) as acquired:
+        with self.flock(folder / "runner.lock") as acquired:
             return not acquired
 
     def load(self, folder, providers):
@@ -275,15 +265,8 @@ class JobStore:
 
     def cancel(self, job_id, providers, now=None):
         """Stop a running job, or mark one cancelled that no runner holds."""
-        return self.stop(job_id, providers, now, wait=False)
-
-    def abandon(self, job_id, provider):
-        """Cancel a job whose start was given up, which nobody else will learn of: waits out a busy state lock."""
-        return self.stop(job_id, {provider}, None, wait=True)
-
-    def stop(self, job_id, providers, now, wait):
         folder = self.folder(job_id)
-        with self.state_lock(folder, wait=wait):
+        with self.state_lock(folder):
             return self.settle(folder, *self.load(folder, providers), now, cancelling=True)
 
     def prune(self, now):
@@ -310,7 +293,7 @@ class JobStore:
                     continue
                 tombstone = None
                 # Without waiting: a process stopped while holding one job's lock must not stall every start.
-                with self.flock(entry / "state.lock", blocking=False) as held:
+                with self.flock(entry / "state.lock") as held:
                     if not held or self.runner_present(entry):
                         continue
                     if self.expired(entry, now):
@@ -371,61 +354,24 @@ class JobStore:
 
 async def start_job(store, request, spawn):
     """Publish a job for a job_request(), launch its runner with spawn(job_id), and return its first view, the only way
-    its caller learns the ID. The job of a start that fails or is cancelled is cancelled, or named in the error."""
-    provider, working_directory = request["provider"], request["working_directory"]
+    its caller learns the ID. Nothing is awaited once the job is published, so an interruption that arrives then does
+    not stop the start: the job runs and its caller gets the ID."""
+    provider = request["provider"]
     with job_store_errors():
         await asyncio.to_thread(store.prune, time.time())
-        # A cancelled await does not stop its worker thread, so creation is let finish and its job cancelled.
-        creating = asyncio.ensure_future(asyncio.to_thread(store.create, provider, working_directory, request))
-        try:
-            job_id = await asyncio.shield(creating)
-        except asyncio.CancelledError:
-            await quietly(abandon_created(store, creating, provider))
-            raise
+        job_id = store.create(provider, request["working_directory"], request)
         try:
             spawn(job_id)
         except Exception as exc:
-            # The runner may have started anyway, such as when only its reaper thread failed.
-            await abandon_or_name(store, job_id, provider, exc)
+            # The runner may have started anyway, such as when only its reaper thread failed: the job is cancelled, or
+            # the error names its ID, the only way left to it.
+            try:
+                store.cancel(job_id, {provider})
+            except (BridgeError, OSError):
+                raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from exc
             raise BridgeError(RUNNER_FAILED) from exc
-        try:
-            return await asyncio.to_thread(store.view, job_id, {provider})
-        except JobBusy:
-            # The runner holds the state lock to claim the job: the caller still needs its ID.
-            return job_view(job_id, {"provider": provider}, None, "queued")
-        except asyncio.CancelledError:
-            await quietly(asyncio.to_thread(store.abandon, job_id, provider))
-            raise
-        except (BridgeError, OSError) as exc:
-            await abandon_or_name(store, job_id, provider, exc)
-            raise
-
-
-async def quietly(cleanup):
-    """Run a cleanup to its end. One that fails does not turn an interruption into an ordinary failure: nobody is
-    left to read either."""
-    try:
-        await run_to_completion(cleanup)
-    except (BridgeError, OSError):
-        pass
-
-
-async def abandon_or_name(store, job_id, provider, cause):
-    """Cancel the job of a failed start; cancelling reads the job first, so it can fail the same way, and then the
-    error names the ID, the only way left to the job."""
-    try:
-        await run_to_completion(asyncio.to_thread(store.abandon, job_id, provider))
-    except (BridgeError, OSError):
-        raise BridgeError(START_UNCONFIRMED.format(job_id=job_id)) from cause
-
-
-async def abandon_created(store, creating, provider):
-    """Cancel the job a creation published after its caller was cancelled, if it published one."""
-    try:
-        job_id = await creating
-    except Exception:
-        return
-    await asyncio.to_thread(store.abandon, job_id, provider)
+    # Not read back: the runner may already hold the state lock to claim the job.
+    return job_view(job_id, {"provider": provider}, None, "queued")
 
 
 def spawn_runner(job_id):

@@ -317,9 +317,11 @@ class CommandLineTests(BridgeTestCase):
         self.assertEqual(self.run_cli("job", "--job-id", "not-a-job"),
                          (1, {"error": "No consultation job with that ID."}))
 
-    def test_signalling_cli_start_after_publication_cancels_the_job(self):
-        script = f"""\
-import os, signal, sys, threading
+    def test_a_signal_once_cli_start_has_published_its_job_does_not_hide_the_job(self):
+        # The only test that fails when a start waits for anything, such as a read of the job, between publishing it
+        # and returning its ID: the signal would cancel the start there and leave a running job nobody can name.
+        script = """\
+import os, signal, sys
 from pathlib import Path
 
 sys.argv = sys.argv[1:]
@@ -327,36 +329,26 @@ sys.path.insert(0, str(Path(sys.argv[0]).parent))
 import bridge
 import jobs
 
-discarding = threading.Event()
 create = jobs.JobStore.create
-discard = jobs.abandon_created
 
 def create_and_signal(store, *arguments):
     job_id = create(store, *arguments)
     os.kill(os.getpid(), signal.SIGTERM)
-    # Keep creation pending until the CLI's task has entered its cancellation cleanup.
-    assert discarding.wait({DEADLINE_SECONDS})
     return job_id
 
-async def abandon_created(*arguments):
-    discarding.set()
-    await discard(*arguments)
-
 jobs.JobStore.create = create_and_signal
-jobs.abandon_created = abandon_created
 bridge.main()
 """
         completed = subprocess.run(
             [sys.executable, "-c", script, str(BRIDGE_PATH), "start", "--provider", "claude",
              "--working-directory", str(self.project)],
-            input="PRIVATE QUESTION", capture_output=True, text=True, timeout=DEADLINE_SECONDS,
+            input="Signalled?", capture_output=True, text=True, timeout=DEADLINE_SECONDS,
         )
-        self.assertEqual(completed.returncode, 1, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout), {"error": "The consultation was cancelled."})
-        [folder] = (self.state / "jobs").iterdir()
-        self.assertFalse((folder / "request.json").exists())
-        code, job = self.run_cli("job", "--job-id", folder.name)
-        self.assertEqual((code, job["state"]), (1, "cancelled"))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        started = json.loads(completed.stdout)
+        self.assertEqual((started["provider"], started["state"]), ("claude", "queued"))
+        code, done = self.run_cli("job", "--job-id", started["job_id"], "--wait", str(DEADLINE_SECONDS))
+        self.assertEqual((code, done["state"], done["reply"]), (0, "completed", "claude consulted: Signalled?"))
 
     def test_threads_and_read_thread_print_the_tool_result(self):
         git_repository(self.project)
