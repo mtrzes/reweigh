@@ -136,12 +136,13 @@ class ReaderTests(unittest.TestCase):
         _, broken = codex_thread(home, self.project, codex_turn("t1", "Done."), name="Malformed")
         lines = broken.read_text(encoding="utf-8").splitlines(keepends=True)
         broken.write_text("".join(lines[:2] + ["{not json\n"] + lines[2:]), encoding="utf-8")
+        # "Mismatched" is the only test that fails when the reader skips the final-message check on what it read.
         mismatched = codex_turn("t1", "Shown answer.")
         mismatched[-1]["payload"]["last_agent_message"] = "Recorded answer."
         codex_thread(home, self.project, mismatched, name="Mismatched")
         codex_thread(home, self.project, codex_turn("t1", "Done."), name="Forked", meta={"forked_from_id": "x"})
         cases = (("Malformed", "malformed line"), ("Mismatched", "does not match its turn record"),
-                 ("Forked", "Forked Codex threads"), ("Missing", "No readable thread with that ID"))
+                 ("Forked", "Forked Codex threads"))
         for thread, expected in cases:
             with self.subTest(thread=thread), self.assertRaisesRegex(ThreadUnavailable, expected):
                 self.read("codex", thread)
@@ -522,6 +523,7 @@ class ReaderTests(unittest.TestCase):
             return lambda: self.read("codex", thread), "^No readable thread with that ID"
 
         def moved_in_after_a_foreign_answer(stack, codex, claude):
+            # The only test that fails when a title or turns search counts records from another repository.
             thread, path = claude_session(claude, self.other, claude_prompt(), claude_reply("Started elsewhere."),
                                           {"type": "custom-title", "customTitle": "Elsewhere title"}, project="other")
             append(path, {**claude_prompt(), "cwd": str(self.project)})

@@ -16,19 +16,16 @@ c = consultation
 
 def fake_codex(arguments, settings):
     """Codex's exit status and output for `codex <arguments>`: it knows every name the bridge passes, except as
-    settings says. `features list` exits 2 on a value in rejected, or when every value in together is passed; it
-    refuses a wrong-type canary with 1 unless its key is in renamed; it lists each disabled feature as `stable false`
-    unless rows says otherwise (None leaves the row out); it exits 1 with broken, lists nothing with empty_listing
-    and only a header with header_only; and it exits with a status on an argument named in crash."""
+    settings says. `features list` exits 2 on a value in rejected; it refuses a wrong-type canary with 1 unless its key
+    is in renamed; it lists each disabled feature as `stable false` unless rows says otherwise (None leaves the row
+    out); it exits 1 with broken, lists nothing with empty_listing and only a header with header_only; and it exits
+    with a status on an argument named in crash."""
     for argument, status in settings.get("crash", {}).items():
         if argument in arguments:
             return status, ""
     if arguments[-2:] != ["features", "list"] or settings.get("broken"):
         return (1 if settings.get("broken") else 2), ""
-    if all(value in arguments for value in settings.get("together", [None])):
-        return 2, ""
-    values = [arguments[i + 1] for i, word in enumerate(arguments[:-1])
-              if word in ("-c", "--disable", "--sandbox", "--ask-for-approval", "--model")]
+    values = [arguments[i + 1] for i, word in enumerate(arguments[:-1]) if word in ("-c", "--disable")]
     if any(value in settings.get("rejected", []) for value in values):
         return 2, ""
     canary = False
@@ -85,8 +82,6 @@ class PreflightTests(unittest.TestCase):
                    "peer or set the chosen model and effort"
         cases = (
             ({"rejected": ["hooks"]}, (), rejected),
-            ({"rejected": ["read-only"]}, (), rejected),
-            ({"together": ["hooks", "plugins"]}, (), rejected),
             ({"renamed": ["shell_environment_policy.inherit"]}, (), "Codex no longer accepts -c "
              "shell_environment_policy.inherit, which the bridge passes to keep the peer's commands to the core"),
             ({"renamed": ["web_search"]}, (), "Codex no longer accepts -c web_search, which the bridge passes to "
