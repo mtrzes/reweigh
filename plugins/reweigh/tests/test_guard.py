@@ -138,6 +138,7 @@ class GuardTests(OwnedDescriptors, unittest.TestCase):
         self.release(lifeline)
 
     def test_a_high_numbered_lifeline_still_works(self):
+        # The only test that fails when the guard cannot watch a descriptor numbered 1024 or more, as select() cannot.
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         target = 2000
         if hard != resource.RLIM_INFINITY and hard <= target:

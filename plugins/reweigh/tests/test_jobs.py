@@ -309,6 +309,7 @@ time.sleep({4 * DEADLINE_SECONDS})
 
     async def test_an_interrupted_start_stays_cancelled_when_its_cleanup_fails(self):
         # The caller is interrupted during the first view, or during the cleanup that follows a failed one.
+        # The only test that fails when an interrupted first view lets a failed cleanup replace the interruption.
         self.client.spawn = lambda job_id: None
         for interrupted in ("view", "abandon"):
             entered, release = threading.Event(), threading.Event()
@@ -564,7 +565,7 @@ time.sleep({4 * DEADLINE_SECONDS})
         # Its warnings come back from the result.
         other = self.root / "other"
         other.mkdir()
-        job_id = await self.queued(provider="claude", extra_directories=[str(other)])
+        job_id = await self.queued(provider="claude", extra_directories=[str(other / ".." / "other")])
         received = []
 
         async def claude(request):
@@ -572,7 +573,7 @@ time.sleep({4 * DEADLINE_SECONDS})
             return {"conversation_id": str(uuid.uuid4()), "reply": "done", "warnings": ["w"]}
 
         await jobs.run_job(self.client.jobs, job_id, claude)
-        self.assertEqual(received, [[str(other.resolve())]])
+        self.assertEqual(received, [[str(other)]])
         self.assertEqual((await self.client.job(job_id, {"claude"}))["warnings"], ["w"])
 
     async def test_a_cancel_after_the_reply_but_before_its_outcome_keeps_the_result(self):
@@ -786,6 +787,7 @@ time.sleep({4 * DEADLINE_SECONDS})
                     await self.client.job(job, providers)
                 with self.assertRaisesRegex(bridge.BridgeError, "No consultation job with that ID"):
                     await self.client.cancel(job, providers)
+        # The only test that fails when Bridge.job stops checking wait_seconds.
         with self.assertRaisesRegex(bridge.BridgeError, "wait_seconds"):
             await self.client.job(job_id, CLAUDE, 61)
 

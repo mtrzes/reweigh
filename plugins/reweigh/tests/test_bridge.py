@@ -126,6 +126,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertFalse([argument for argument in arguments if "project-peer" in argument])
         self.assertEqual(arguments[arguments.index("--model") + 1], "gpt-x")
         # A choice made for the call wins over the environment, and the reply says what ran.
+        # Besides the MCP wire test, the only test that fails when the reply does not name the chosen model.
         with patch.dict(os.environ, settings):
             answer = await self.consult("codex", model="gpt-6-astra", reasoning_effort="xhigh")
         arguments = self.calls()[-1]["arguments"]
@@ -133,6 +134,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertIn('model_reasoning_effort="xhigh"', arguments)
         self.assertEqual((answer["model"], answer["reasoning_effort"]), ("gpt-6-astra", "xhigh"))
         calls = len(self.calls())
+        # The only test that fails when a Codex peer is given extra_directories.
         with self.assertRaisesRegex(bridge.BridgeError, "Claude consultations only"):
             await self.consult("codex", extra_directories=[str(self.root)])
         self.assertEqual(len(self.calls()), calls)
@@ -426,6 +428,7 @@ class ConsultationTests(BridgeTestCase):
         self.assertEqual(list(self.state.glob("*.json")), [])
 
     async def test_the_history_lookup_never_starts_once_the_peers_budget_is_spent(self):
+        # The only test that fails when a history worker that starts too late scans anyway.
         looked_up = []
         source = SimpleNamespace(rollouts=lambda: looked_up.append(True) or HistoryLookup({"session": []}))
         # The clock as the budget, the wait and the worker read it; the second time the worker starts too late.
